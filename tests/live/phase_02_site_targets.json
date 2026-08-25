@@ -1,0 +1,28 @@
+{
+  "schema_version": "phase-live-targets.v1",
+  "phase": 2,
+  "source_repo_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+  "network_limits": {
+    "max_content_reads_per_target": 1,
+    "max_total_requests": 6,
+    "max_bytes_per_response": 2097152,
+    "timeout_seconds": 30,
+    "concurrency": 1,
+    "retry": 0
+  },
+  "targets": [
+    {
+      "site_key": "ipcc",
+      "url": "https://www.ipcc.ch/",
+      "allowed_origins": [
+        "https://www.ipcc.ch"
+      ],
+      "historical_expectation": "pass_http",
+      "source_path": "config/smoke_site_catalog.json",
+      "profile_source_path": "web_listening/skills/sites/ipcc/1.0.0/profiles/default.yaml",
+      "profile_allowed_domains": [
+        "www.ipcc.ch"
+      ]
+    }
+  ]
+}
