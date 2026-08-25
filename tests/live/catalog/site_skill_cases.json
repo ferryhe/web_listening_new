@@ -1,0 +1,2012 @@
+{
+  "schema_version": "normalized-site-catalog.v1",
+  "cases": [
+    {
+      "site_key": "soa",
+      "site_skill": {
+        "site_key": "soa",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.soa.org/"
+          ],
+          "allowed_origins": [
+            "https://www.soa.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 150
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:889175f428f227000aeacfae1ebfda14704a9d469088c02b4a8745bfb732caf2"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/dev_test_sites.json",
+        "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+        "old_site_key": "soa"
+      }
+    },
+    {
+      "site_key": "cas",
+      "site_skill": {
+        "site_key": "cas",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.casact.org/"
+          ],
+          "allowed_origins": [
+            "https://www.casact.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 150
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:95cd0d9bd086990398e5caba2a0c76010cea2618b91d1568e7852451980a10ee"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/dev_test_sites.json",
+        "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+        "old_site_key": "cas"
+      }
+    },
+    {
+      "site_key": "iaa",
+      "site_skill": {
+        "site_key": "iaa",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://actuaries.org/"
+          ],
+          "allowed_origins": [
+            "https://actuaries.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 150
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:bae6b907301530149a7392e1a3ed4b59a472dbf776bb740cb67ea549769023fe"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/dev_test_sites.json",
+        "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+        "old_site_key": "iaa"
+      }
+    },
+    {
+      "site_key": "a2ii",
+      "site_skill": {
+        "site_key": "a2ii",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://a2ii.org/"
+          ],
+          "allowed_origins": [
+            "https://a2ii.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 100
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:8399b3eebd71a993afd0629698cef6d18257c9f293add0d218837908554a9315"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "a2ii"
+      }
+    },
+    {
+      "site_key": "iais",
+      "site_skill": {
+        "site_key": "iais",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.iais.org/"
+          ],
+          "allowed_origins": [
+            "https://www.iais.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 20
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:b6935c073383f063a3a49f0b87d7eed60d5cd104c814b4eb6b7f2d6b45588deb"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "iais"
+      }
+    },
+    {
+      "site_key": "iea",
+      "site_skill": {
+        "site_key": "iea",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://iea.org/",
+            "https://www.iea.org/news"
+          ],
+          "allowed_origins": [
+            "https://iea.org",
+            "https://www.iea.org"
+          ],
+          "include_paths": [
+            "/",
+            "/news/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 200
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:4ef9b4cdfa165b09fd81d98681a9253081c5d3fda47c376b2cc419470e236a55"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "iea"
+      }
+    },
+    {
+      "site_key": "ipcc",
+      "site_skill": {
+        "site_key": "ipcc",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.ipcc.ch/"
+          ],
+          "allowed_origins": [
+            "https://www.ipcc.ch"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ],
+          "recipe_id": "catalog-http"
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 300
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:65886846062d93ebe8e4d9edef63c1c65fc37774749d731db086ed3a408b97be"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "ipcc"
+      }
+    },
+    {
+      "site_key": "irff",
+      "site_skill": {
+        "site_key": "irff",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://irff.undp.org/"
+          ],
+          "allowed_origins": [
+            "https://irff.undp.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 150
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:98e91d57d4387329dfd129afaec5df4688b200cda52b8618c241d3db6ca67bbe"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "irff"
+      }
+    },
+    {
+      "site_key": "issa",
+      "site_skill": {
+        "site_key": "issa",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.issa.int/"
+          ],
+          "allowed_origins": [
+            "https://www.issa.int"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 100
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:05fa532d0b4562b31a5c92f30bdf64ac54e9ef5195eac8fa80ea17526f2ac5b1"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "issa"
+      }
+    },
+    {
+      "site_key": "issb",
+      "site_skill": {
+        "site_key": "issb",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.ifrs.org/news-and-events/"
+          ],
+          "allowed_origins": [
+            "https://www.ifrs.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 200
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:b067b5b8e9bd8f193ff8283b578e05ec46671cb421a0324abc5f76c63c20f0c7"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "issb"
+      }
+    },
+    {
+      "site_key": "oecd",
+      "site_skill": {
+        "site_key": "oecd",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.oecd.org/"
+          ],
+          "allowed_origins": [
+            "https://www.oecd.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 100
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:80fc7c074c1db4fa637cd38ca5ea2556aefec7eb3453be7ac705cf445d7444bb"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "oecd"
+      }
+    },
+    {
+      "site_key": "pcaf",
+      "site_skill": {
+        "site_key": "pcaf",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://carbonaccountingfinancials.com/"
+          ],
+          "allowed_origins": [
+            "https://carbonaccountingfinancials.com"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 100
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:53342dd46cf02384474415c8b1df8a3e3e531134f2785f958bf410501f007bd0"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "pcaf"
+      }
+    },
+    {
+      "site_key": "psi",
+      "site_skill": {
+        "site_key": "psi",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.unepfi.org/insurance/"
+          ],
+          "allowed_origins": [
+            "https://www.unepfi.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 300
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:a6f15a2b43272d82e6562841bc5c625369b020c3b45a43941071eecda6e6116a"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "psi"
+      }
+    },
+    {
+      "site_key": "tnfd",
+      "site_skill": {
+        "site_key": "tnfd",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://tnfd.global/news/"
+          ],
+          "allowed_origins": [
+            "https://tnfd.global"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 3
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:ae1ae58703f633c30c4c23bcd0dba1eb090efd70ee7e4a94aa011fd9ce902b20"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "tnfd"
+      }
+    },
+    {
+      "site_key": "undp",
+      "site_skill": {
+        "site_key": "undp",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.undp.org/"
+          ],
+          "allowed_origins": [
+            "https://www.undp.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 100
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:8966799bb8fc4c02e9796312fae1e959b567fe0c14e2665b688b3ccdb76bb85d"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "undp"
+      }
+    },
+    {
+      "site_key": "fao",
+      "site_skill": {
+        "site_key": "fao",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.fao.org/home/en"
+          ],
+          "allowed_origins": [
+            "https://www.fao.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 400
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:b7c7d967d0602c31135152c1ed4d7da05486a5f1929f47778e01d66e9c13e306"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "fao"
+      }
+    },
+    {
+      "site_key": "unep",
+      "site_skill": {
+        "site_key": "unep",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.unep.org/"
+          ],
+          "allowed_origins": [
+            "https://www.unep.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 200
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:9e0fe4442ae2f044afa272dcc595448aa6657f76e4d0e80ca2dccefb91aa0543"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "unep"
+      }
+    },
+    {
+      "site_key": "wef",
+      "site_skill": {
+        "site_key": "wef",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.weforum.org/"
+          ],
+          "allowed_origins": [
+            "https://www.weforum.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 100
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:d77f72b8dd12dc1ae57d2fe0f4324dd936efb1767160a9b2c94858b1eaad0ad4"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "wef"
+      }
+    },
+    {
+      "site_key": "world-bank",
+      "site_skill": {
+        "site_key": "world-bank",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.worldbank.org/ext/en/home"
+          ],
+          "allowed_origins": [
+            "https://www.worldbank.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 300
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:278cb9e60f34affc05668ed221a31da71a7f82118ad763d28c92a1507571f8da"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "world-bank"
+      }
+    },
+    {
+      "site_key": "adb",
+      "site_skill": {
+        "site_key": "adb",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.adb.org/news"
+          ],
+          "allowed_origins": [
+            "https://www.adb.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 300
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:4331ee63c3ccc3e129cc2b2e61c8f4b28b3418f36eb2ce0e765f0cd68aaadacd"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "adb"
+      }
+    },
+    {
+      "site_key": "afdb",
+      "site_skill": {
+        "site_key": "afdb",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.afdb.org/en"
+          ],
+          "allowed_origins": [
+            "https://www.afdb.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 100
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:04f73f2473811cdb86d7909d5c06e752b121eefc8bc4cb690dccf7d5b38bdf68"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "afdb"
+      }
+    },
+    {
+      "site_key": "bcbs",
+      "site_skill": {
+        "site_key": "bcbs",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.bis.org/bcbs/index.htm"
+          ],
+          "allowed_origins": [
+            "https://www.bis.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 80
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:a72c784e035f1f944832034ea2ab7e0002625fc1d6af26b5643799e3da2fe67c"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "bcbs"
+      }
+    },
+    {
+      "site_key": "bis",
+      "site_skill": {
+        "site_key": "bis",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.bis.org/index.htm"
+          ],
+          "allowed_origins": [
+            "https://www.bis.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 120
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:b41b7bcc25e1fee4bf37f9cedfa58631463e0a06e78c8e907366b50be960a0d4"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "bis"
+      }
+    },
+    {
+      "site_key": "caf",
+      "site_skill": {
+        "site_key": "caf",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.caf.com/en/"
+          ],
+          "allowed_origins": [
+            "https://www.caf.com"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 100
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:a8c03ea35f6e05a092009b2fa27623b6e7d1719de856675c34f254ecbdaef2a9"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "caf"
+      }
+    },
+    {
+      "site_key": "fit",
+      "site_skill": {
+        "site_key": "fit",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.unepfi.org/forum-for-insurance-transition-to-net-zero/"
+          ],
+          "allowed_origins": [
+            "https://www.unepfi.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 200
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:00f000b2730e7aba66608cce1ec9e0623b0155fc0a373a1098218ca5d08358b0"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "fit"
+      }
+    },
+    {
+      "site_key": "fsb",
+      "site_skill": {
+        "site_key": "fsb",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.fsb.org/"
+          ],
+          "allowed_origins": [
+            "https://www.fsb.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 200
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:e1a8514cf7bc0fd3b9e795a82a45ecc6197d6ed7bdf80fa3e269a6253715ad8a"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "fsb"
+      }
+    },
+    {
+      "site_key": "g20",
+      "site_skill": {
+        "site_key": "g20",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://g20.org/"
+          ],
+          "allowed_origins": [
+            "https://g20.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 50
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:9c677c72d829a05bccc84d8a3a1842ec582d03a34c0b48ae24c4006e52d92177"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "g20"
+      }
+    },
+    {
+      "site_key": "gca",
+      "site_skill": {
+        "site_key": "gca",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://gca.org/"
+          ],
+          "allowed_origins": [
+            "https://gca.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 250
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:ea937b9ef53986ceaef7f0b663ebd8c2c450b32679d447073b64d9af73d274c2"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "gca"
+      }
+    },
+    {
+      "site_key": "ifac",
+      "site_skill": {
+        "site_key": "ifac",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.ifac.org/"
+          ],
+          "allowed_origins": [
+            "https://www.ifac.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 150
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:1510cf084b69bfd2036124733aad3d91ddfacd1a74dc226f6bb34a2938d45557"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "ifac"
+      }
+    },
+    {
+      "site_key": "ilo",
+      "site_skill": {
+        "site_key": "ilo",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.ilo.org/"
+          ],
+          "allowed_origins": [
+            "https://www.ilo.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 50
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:a1e7d2d3b3ff95ea71da159c3e7a4d6eb913a34f39e9447d6a348837c7551f40"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "ilo"
+      }
+    },
+    {
+      "site_key": "imf",
+      "site_skill": {
+        "site_key": "imf",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.imf.org/en/news"
+          ],
+          "allowed_origins": [
+            "https://www.imf.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 80
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:496d38abb1a2f89f8310a176c6f231a3cd8c6ba46486b9c2a11f9ccfb41b8171"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "imf"
+      }
+    },
+    {
+      "site_key": "ngfs",
+      "site_skill": {
+        "site_key": "ngfs",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.ngfs.net/"
+          ],
+          "allowed_origins": [
+            "https://www.ngfs.net"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 100
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:bdb670f50593a39332ad27e4fd1cee21682c60480206fde6e840363113877ec8"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "ngfs"
+      }
+    },
+    {
+      "site_key": "sif",
+      "site_skill": {
+        "site_key": "sif",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.sustainableinsuranceforum.org/"
+          ],
+          "allowed_origins": [
+            "https://www.sustainableinsuranceforum.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 100
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:f6ff9c9cd33352893999a6743a9d2252e280c75018a13827dc2cffaccea192ef"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "sif"
+      }
+    },
+    {
+      "site_key": "un-water",
+      "site_skill": {
+        "site_key": "un-water",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.unwater.org/"
+          ],
+          "allowed_origins": [
+            "https://www.unwater.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 200
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:14d91b37fefff10cb2fd728e8a273debb16474e4373fea95c346358ace20e250"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "un-water"
+      }
+    },
+    {
+      "site_key": "unctad",
+      "site_skill": {
+        "site_key": "unctad",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://unctad.org/"
+          ],
+          "allowed_origins": [
+            "https://unctad.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 250
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:08518c3455f4c1d03e8c95460b24f07e4738e102ebe16f4052f8eb789dfcb5d2"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "unctad"
+      }
+    },
+    {
+      "site_key": "unfccc",
+      "site_skill": {
+        "site_key": "unfccc",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://unfccc.int/news",
+            "https://unfccc.int/documents"
+          ],
+          "allowed_origins": [
+            "https://unfccc.int"
+          ],
+          "include_paths": [
+            "/news",
+            "/documents/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 3
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:7ac3f1a57ce69c99620b7c84a49b0c42eb81b559a3977b11b739db69dae8259d"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "unfccc"
+      }
+    },
+    {
+      "site_key": "who",
+      "site_skill": {
+        "site_key": "who",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.who.int/news-room"
+          ],
+          "allowed_origins": [
+            "https://www.who.int"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 5
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:32868099ce565d4040f90152415cc6a459f468d0b3748990850d8cef4d944a73"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "who"
+      }
+    },
+    {
+      "site_key": "wmo",
+      "site_skill": {
+        "site_key": "wmo",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://wmo.int/"
+          ],
+          "allowed_origins": [
+            "https://wmo.int"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 100
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:3bd1dab2fee17c3cd3ff2e4e6e45231fb72c872f89a2591e10796b22bec34e8d"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "wmo"
+      }
+    },
+    {
+      "site_key": "wri",
+      "site_skill": {
+        "site_key": "wri",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.wri.org/"
+          ],
+          "allowed_origins": [
+            "https://www.wri.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 250
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:20e88cbe540f6651e88e179eb06f02ee45300a1ea21ac23e1525eb7f80feede2"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "wri"
+      }
+    },
+    {
+      "site_key": "wto",
+      "site_skill": {
+        "site_key": "wto",
+        "version": 1,
+        "previous_digest": null,
+        "scope": {
+          "seeds": [
+            "https://www.wto.org/"
+          ],
+          "allowed_origins": [
+            "https://www.wto.org"
+          ],
+          "include_paths": [
+            "/**"
+          ],
+          "content_types": [
+            "html"
+          ]
+        },
+        "budgets": {
+          "max_requests": 12,
+          "max_bytes": 2097152,
+          "max_runtime_seconds": 30,
+          "max_tool_attempts_per_target": 1
+        },
+        "tool": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        },
+        "success_checks": {
+          "allowed_mime_types": [
+            "text/html"
+          ],
+          "minimum_words": 120
+        },
+        "verified_at": "2026-08-25T00:00:00Z",
+        "digest": "sha256:85250ea757006654c214786b82bebee8435f92ceda8bf5c4c7796df308f043a6"
+      },
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "wto"
+      }
+    }
+  ],
+  "catalog_kind": "site_skill_cases"
+}
