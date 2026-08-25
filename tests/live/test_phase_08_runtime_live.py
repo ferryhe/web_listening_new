@@ -42,6 +42,12 @@ SITE_SKILLS = Path(__file__).parent / "catalog" / "site_skill_cases.json"
 AUTHORIZED_WINDOW = "issue-9-20260825-authorized"
 
 
+def _newline_canonical_sha256(content: bytes) -> str:
+    text = content.decode("utf-8").replace("\r\n", "\n")
+    canonical = text.replace("\n", "\r\n").encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 class _RecordingGateway(GovernedAccessGateway):
     """Retain public Gateway evidence from exactly one Runtime acquisition."""
 
@@ -93,6 +99,15 @@ class _CountingStore(ArtifactStore):
     def get_observation(self, observation_id: str) -> StoredObservation:
         self.reads += 1
         return super().get_observation(observation_id)
+
+
+def test_source_catalog_digest_is_stable_across_checkout_newlines() -> None:
+    catalog_lf = SOURCE_CATALOG.read_bytes().decode("utf-8").replace("\r\n", "\n")
+    catalog_crlf = catalog_lf.replace("\n", "\r\n")
+    expected = str(json.loads(TARGETS.read_bytes())["source_catalog_sha256"]).lower()
+
+    assert _newline_canonical_sha256(catalog_lf.encode("utf-8")) == expected
+    assert _newline_canonical_sha256(catalog_crlf.encode("utf-8")) == expected
 
 
 def _load_authorized_target() -> tuple[dict[str, object], dict[str, object], str]:
@@ -147,7 +162,7 @@ def _load_authorized_target() -> tuple[dict[str, object], dict[str, object], str
     }
     if payload.get("network_limits") != expected_limits:
         pytest.fail("Phase 8 network limits drifted from the authorized caps")
-    if hashlib.sha256(SOURCE_CATALOG.read_bytes()).hexdigest().upper() != payload.get(
+    if _newline_canonical_sha256(SOURCE_CATALOG.read_bytes()).upper() != payload.get(
         "source_catalog_sha256"
     ):
         pytest.fail("Phase 8 source catalog digest drifted")
