@@ -1,0 +1,113 @@
+{
+  "schema_version": "web-listening-result.v1",
+  "status": "completed",
+  "artifacts": [
+    {
+      "artifact_id": "artifact-5812af58b8c7fcda8129803e00b509c79c011f554a3bdabb4681948053ba85d8",
+      "observation_id": "observation-11111111111111111111111111111111",
+      "role": "source",
+      "source_url": "https://www.soa.org/research/annual/",
+      "observed_at": "2026-08-25T12:00:00Z",
+      "mime_type": "text/html",
+      "size_bytes": 62,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "lineage": []
+    }
+  ],
+  "manifest": {
+    "schema_version": "web-listening-manifest.v1",
+    "run_id": "run-completed-001",
+    "generated_at": "2026-08-25T12:00:01Z",
+    "requested_url": "https://www.soa.org/research/annual",
+    "current_url": "https://www.soa.org/research/annual/",
+    "final_url": "https://www.soa.org/research/annual/",
+    "http_status": 200,
+    "mime_type": "text/html",
+    "size_bytes": 62,
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tool_id": "web_http",
+    "tool_version": "1.0.0",
+    "redirects": [
+      {
+        "order": 0,
+        "from_url": "https://www.soa.org/research/annual",
+        "to_url": "https://www.soa.org/research/annual/",
+        "http_status": 301,
+        "decision": "followed"
+      }
+    ],
+    "site_skill": {
+      "version": "3",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "attempts": [
+      {
+        "schema_version": "web-listening-attempt.v1",
+        "order": 0,
+        "attempt_id": "attempt-completed-0",
+        "outcome": "succeeded",
+        "tool_id": "web_http",
+        "tool_version": "1.0.0",
+        "started_at": "2026-08-25T11:59:59Z",
+        "finished_at": "2026-08-25T12:00:00Z",
+        "requested_url": "https://www.soa.org/research/annual",
+        "final_url": "https://www.soa.org/research/annual/",
+        "http_status": 200,
+        "error": null,
+        "requests": 2,
+        "bytes_received": 62,
+        "runtime_ms": 120
+      }
+    ],
+    "artifacts": [
+      {
+        "artifact_id": "artifact-5812af58b8c7fcda8129803e00b509c79c011f554a3bdabb4681948053ba85d8",
+        "observation_id": "observation-11111111111111111111111111111111",
+        "role": "source",
+        "source_url": "https://www.soa.org/research/annual/",
+        "observed_at": "2026-08-25T12:00:00Z",
+        "mime_type": "text/html",
+        "size_bytes": 62,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "lineage": []
+      }
+    ],
+    "usage": {
+      "requests": 2,
+      "bytes_received": 62,
+      "runtime_ms": 130,
+      "tool_attempts": 1
+    }
+  },
+  "site_skill_used": {
+    "version": "3",
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "site_skill_update": null,
+  "attempts": [
+    {
+      "schema_version": "web-listening-attempt.v1",
+      "order": 0,
+      "attempt_id": "attempt-completed-0",
+      "outcome": "succeeded",
+      "tool_id": "web_http",
+      "tool_version": "1.0.0",
+      "started_at": "2026-08-25T11:59:59Z",
+      "finished_at": "2026-08-25T12:00:00Z",
+      "requested_url": "https://www.soa.org/research/annual",
+      "final_url": "https://www.soa.org/research/annual/",
+      "http_status": 200,
+      "error": null,
+      "requests": 2,
+      "bytes_received": 62,
+      "runtime_ms": 120
+    }
+  ],
+  "errors": [],
+  "usage": {
+    "requests": 2,
+    "bytes_received": 62,
+    "runtime_ms": 130,
+    "tool_attempts": 1
+  }
+}

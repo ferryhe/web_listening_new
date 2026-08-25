@@ -1,0 +1,89 @@
+{
+  "schema_version": "web-listening-result.v1",
+  "status": "failed",
+  "artifacts": [],
+  "manifest": {
+    "schema_version": "web-listening-manifest.v1",
+    "run_id": "run-failed-001",
+    "generated_at": "2026-08-25T13:00:01Z",
+    "requested_url": "https://www.casact.org/about/governance/annual-reports",
+    "current_url": "https://www.casact.org/about/governance/annual-reports",
+    "final_url": null,
+    "http_status": null,
+    "mime_type": null,
+    "size_bytes": null,
+    "sha256": null,
+    "tool_id": "web_http",
+    "tool_version": "1.0.0",
+    "redirects": [],
+    "site_skill": null,
+    "attempts": [
+      {
+        "schema_version": "web-listening-attempt.v1",
+        "order": 0,
+        "attempt_id": "attempt-failed-0",
+        "outcome": "failed",
+        "tool_id": "web_http",
+        "tool_version": "1.0.0",
+        "started_at": "2026-08-25T13:00:00Z",
+        "finished_at": "2026-08-25T13:00:01Z",
+        "requested_url": "https://www.casact.org/about/governance/annual-reports",
+        "final_url": null,
+        "http_status": null,
+        "error": {
+          "code": "gateway.timeout",
+          "message": "The governed request timed out",
+          "details": {"phase": "response"}
+        },
+        "requests": 1,
+        "bytes_received": 0,
+        "runtime_ms": 900
+      }
+    ],
+    "artifacts": [],
+    "usage": {
+      "requests": 1,
+      "bytes_received": 0,
+      "runtime_ms": 950,
+      "tool_attempts": 1
+    }
+  },
+  "site_skill_used": null,
+  "site_skill_update": null,
+  "attempts": [
+    {
+      "schema_version": "web-listening-attempt.v1",
+      "order": 0,
+      "attempt_id": "attempt-failed-0",
+      "outcome": "failed",
+      "tool_id": "web_http",
+      "tool_version": "1.0.0",
+      "started_at": "2026-08-25T13:00:00Z",
+      "finished_at": "2026-08-25T13:00:01Z",
+      "requested_url": "https://www.casact.org/about/governance/annual-reports",
+      "final_url": null,
+      "http_status": null,
+      "error": {
+        "code": "gateway.timeout",
+        "message": "The governed request timed out",
+        "details": {"phase": "response"}
+      },
+      "requests": 1,
+      "bytes_received": 0,
+      "runtime_ms": 900
+    }
+  ],
+  "errors": [
+    {
+      "code": "gateway.timeout",
+      "message": "The governed request timed out",
+      "details": {"phase": "response"}
+    }
+  ],
+  "usage": {
+    "requests": 1,
+    "bytes_received": 0,
+    "runtime_ms": 950,
+    "tool_attempts": 1
+  }
+}

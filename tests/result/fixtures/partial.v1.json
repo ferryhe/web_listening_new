@@ -1,0 +1,243 @@
+{
+  "schema_version": "web-listening-result.v1",
+  "status": "partial",
+  "artifacts": [
+    {
+      "artifact_id": "artifact-8dd5fba1f6574d3ed187713e69492b0d61ad4efba88b23687963323bae8bf6df",
+      "observation_id": "observation-cccccccccccccccccccccccccccccccc",
+      "role": "source",
+      "source_url": "https://www.casact.org/about/governance/annual-reports/",
+      "observed_at": "2026-08-25T15:00:02Z",
+      "mime_type": "text/html",
+      "size_bytes": 30,
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "lineage": []
+    },
+    {
+      "artifact_id": "artifact-13cb5f65f67326369bd83e6b5b75d9a1c41e0aa4e0ab41d8681736cc888afd1a",
+      "observation_id": "observation-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "role": "derived",
+      "source_url": "urn:web-listening:derived:markdown",
+      "observed_at": "2026-08-25T15:00:03Z",
+      "mime_type": "text/markdown",
+      "size_bytes": 18,
+      "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "lineage": [
+        {
+          "lineage_id": "lineage-512438b3cfca998fc615cd0edcc3621d4e3e389d87f09b9e67c8e4948180e0d3",
+          "observation_id": "observation-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "artifact_id": "artifact-13cb5f65f67326369bd83e6b5b75d9a1c41e0aa4e0ab41d8681736cc888afd1a",
+          "relation": "derived_from",
+          "source_observation_id": "observation-cccccccccccccccccccccccccccccccc",
+          "source_artifact_id": "artifact-8dd5fba1f6574d3ed187713e69492b0d61ad4efba88b23687963323bae8bf6df"
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "schema_version": "web-listening-manifest.v1",
+    "run_id": "run-partial-001",
+    "generated_at": "2026-08-25T15:00:04Z",
+    "requested_url": "https://www.casact.org/about/governance/annual-reports",
+    "current_url": "https://www.casact.org/about/governance/annual-reports/",
+    "final_url": "https://www.casact.org/about/governance/annual-reports/",
+    "http_status": 200,
+    "mime_type": "text/html",
+    "size_bytes": 30,
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "tool_id": "web_http",
+    "tool_version": "1.0.0",
+    "redirects": [
+      {
+        "order": 0,
+        "from_url": "https://www.casact.org/about/governance/annual-reports",
+        "to_url": "https://www.casact.org/about/governance/annual-reports/",
+        "http_status": 301,
+        "decision": "followed"
+      }
+    ],
+    "site_skill": {
+      "version": "7",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "attempts": [
+      {
+        "schema_version": "web-listening-attempt.v1",
+        "order": 0,
+        "attempt_id": "attempt-partial-0",
+        "outcome": "failed",
+        "tool_id": "web_http",
+        "tool_version": "0.9.0",
+        "started_at": "2026-08-25T15:00:00Z",
+        "finished_at": "2026-08-25T15:00:01Z",
+        "requested_url": "https://www.casact.org/about/governance/annual-reports",
+        "final_url": null,
+        "http_status": null,
+        "error": {
+          "code": "gateway.timeout",
+          "message": "The first governed attempt timed out",
+          "details": {"phase": "headers"}
+        },
+        "requests": 1,
+        "bytes_received": 0,
+        "runtime_ms": 50
+      },
+      {
+        "schema_version": "web-listening-attempt.v1",
+        "order": 1,
+        "attempt_id": "attempt-partial-1",
+        "outcome": "skipped",
+        "tool_id": "browser_rendered",
+        "tool_version": "1.0.0",
+        "started_at": "2026-08-25T15:00:01Z",
+        "finished_at": "2026-08-25T15:00:01Z",
+        "requested_url": "https://www.casact.org/about/governance/annual-reports",
+        "final_url": null,
+        "http_status": null,
+        "error": {
+          "code": "tool.not_authorized",
+          "message": "The candidate tool was not authorized",
+          "details": {"decision": "skipped"}
+        },
+        "requests": 0,
+        "bytes_received": 0,
+        "runtime_ms": 0
+      },
+      {
+        "schema_version": "web-listening-attempt.v1",
+        "order": 2,
+        "attempt_id": "attempt-partial-2",
+        "outcome": "succeeded",
+        "tool_id": "web_http",
+        "tool_version": "1.0.0",
+        "started_at": "2026-08-25T15:00:01Z",
+        "finished_at": "2026-08-25T15:00:02Z",
+        "requested_url": "https://www.casact.org/about/governance/annual-reports",
+        "final_url": "https://www.casact.org/about/governance/annual-reports/",
+        "http_status": 200,
+        "error": null,
+        "requests": 1,
+        "bytes_received": 30,
+        "runtime_ms": 60
+      }
+    ],
+    "artifacts": [
+      {
+        "artifact_id": "artifact-8dd5fba1f6574d3ed187713e69492b0d61ad4efba88b23687963323bae8bf6df",
+        "observation_id": "observation-cccccccccccccccccccccccccccccccc",
+        "role": "source",
+        "source_url": "https://www.casact.org/about/governance/annual-reports/",
+        "observed_at": "2026-08-25T15:00:02Z",
+        "mime_type": "text/html",
+        "size_bytes": 30,
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "lineage": []
+      },
+      {
+        "artifact_id": "artifact-13cb5f65f67326369bd83e6b5b75d9a1c41e0aa4e0ab41d8681736cc888afd1a",
+        "observation_id": "observation-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "role": "derived",
+        "source_url": "urn:web-listening:derived:markdown",
+        "observed_at": "2026-08-25T15:00:03Z",
+        "mime_type": "text/markdown",
+        "size_bytes": 18,
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "lineage": [
+          {
+            "lineage_id": "lineage-512438b3cfca998fc615cd0edcc3621d4e3e389d87f09b9e67c8e4948180e0d3",
+            "observation_id": "observation-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "artifact_id": "artifact-13cb5f65f67326369bd83e6b5b75d9a1c41e0aa4e0ab41d8681736cc888afd1a",
+            "relation": "derived_from",
+            "source_observation_id": "observation-cccccccccccccccccccccccccccccccc",
+            "source_artifact_id": "artifact-8dd5fba1f6574d3ed187713e69492b0d61ad4efba88b23687963323bae8bf6df"
+          }
+        ]
+      }
+    ],
+    "usage": {
+      "requests": 2,
+      "bytes_received": 30,
+      "runtime_ms": 200,
+      "tool_attempts": 2
+    }
+  },
+  "site_skill_used": {
+    "version": "7",
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "site_skill_update": null,
+  "attempts": [
+    {
+      "schema_version": "web-listening-attempt.v1",
+      "order": 0,
+      "attempt_id": "attempt-partial-0",
+      "outcome": "failed",
+      "tool_id": "web_http",
+      "tool_version": "0.9.0",
+      "started_at": "2026-08-25T15:00:00Z",
+      "finished_at": "2026-08-25T15:00:01Z",
+      "requested_url": "https://www.casact.org/about/governance/annual-reports",
+      "final_url": null,
+      "http_status": null,
+      "error": {
+        "code": "gateway.timeout",
+        "message": "The first governed attempt timed out",
+        "details": {"phase": "headers"}
+      },
+      "requests": 1,
+      "bytes_received": 0,
+      "runtime_ms": 50
+    },
+    {
+      "schema_version": "web-listening-attempt.v1",
+      "order": 1,
+      "attempt_id": "attempt-partial-1",
+      "outcome": "skipped",
+      "tool_id": "browser_rendered",
+      "tool_version": "1.0.0",
+      "started_at": "2026-08-25T15:00:01Z",
+      "finished_at": "2026-08-25T15:00:01Z",
+      "requested_url": "https://www.casact.org/about/governance/annual-reports",
+      "final_url": null,
+      "http_status": null,
+      "error": {
+        "code": "tool.not_authorized",
+        "message": "The candidate tool was not authorized",
+        "details": {"decision": "skipped"}
+      },
+      "requests": 0,
+      "bytes_received": 0,
+      "runtime_ms": 0
+    },
+    {
+      "schema_version": "web-listening-attempt.v1",
+      "order": 2,
+      "attempt_id": "attempt-partial-2",
+      "outcome": "succeeded",
+      "tool_id": "web_http",
+      "tool_version": "1.0.0",
+      "started_at": "2026-08-25T15:00:01Z",
+      "finished_at": "2026-08-25T15:00:02Z",
+      "requested_url": "https://www.casact.org/about/governance/annual-reports",
+      "final_url": "https://www.casact.org/about/governance/annual-reports/",
+      "http_status": 200,
+      "error": null,
+      "requests": 1,
+      "bytes_received": 30,
+      "runtime_ms": 60
+    }
+  ],
+  "errors": [
+    {
+      "code": "gateway.timeout",
+      "message": "The first governed attempt timed out",
+      "details": {"phase": "headers"}
+    }
+  ],
+  "usage": {
+    "requests": 2,
+    "bytes_received": 30,
+    "runtime_ms": 200,
+    "tool_attempts": 2
+  }
+}
