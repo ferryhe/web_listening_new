@@ -84,7 +84,7 @@ def _load_authorized_target() -> tuple[dict[str, object], dict[str, object], str
     if os.environ.get("WEB_LISTENING_RUN_LIVE") != "1":
         pytest.skip("Phase 6 live Site Skill test is offline by default")
     if os.environ.get("WEB_LISTENING_LIVE_AUTHORIZED_WINDOW") != AUTHORIZED_WINDOW:
-        pytest.skip("the exact Phase 6 authorized live window is required")
+        pytest.fail("the exact Phase 6 authorized live window is required")
 
     catalog_raw = CATALOG.read_bytes()
     catalog = json.loads(catalog_raw)
@@ -106,6 +106,66 @@ def _load_authorized_target() -> tuple[dict[str, object], dict[str, object], str
     case = case_by_key[selector]
     _assert_target_binding(target, catalog_row, case)
     return target, case, hashlib.sha256(catalog_raw).hexdigest()
+
+
+@pytest.mark.parametrize("authorized_window", [None, "wrong-window"])
+def test_explicit_live_rejects_missing_or_wrong_authorized_window(
+    monkeypatch: pytest.MonkeyPatch, authorized_window: str | None
+) -> None:
+    """An explicitly enabled live run must not turn authorization failure green."""
+    catalog_reads = 0
+
+    def count_catalog_read(_path: Path) -> bytes:
+        nonlocal catalog_reads
+        catalog_reads += 1
+        return b""
+
+    monkeypatch.setenv("WEB_LISTENING_RUN_LIVE", "1")
+    monkeypatch.setattr(Path, "read_bytes", count_catalog_read)
+    if authorized_window is None:
+        monkeypatch.delenv("WEB_LISTENING_LIVE_AUTHORIZED_WINDOW", raising=False)
+    else:
+        monkeypatch.setenv("WEB_LISTENING_LIVE_AUTHORIZED_WINDOW", authorized_window)
+
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as caught:
+        _load_authorized_target()
+
+    assert isinstance(caught.value, pytest.fail.Exception)
+    assert catalog_reads == 0
+
+
+def test_offline_default_still_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An absent live opt-in remains the normal offline test-suite behavior."""
+    monkeypatch.delenv("WEB_LISTENING_RUN_LIVE", raising=False)
+
+    with pytest.raises(pytest.skip.Exception):
+        _load_authorized_target()
+
+
+def test_exact_window_loads_only_the_frozen_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact window authorizes catalog loading without performing network I/O."""
+    monkeypatch.setenv("WEB_LISTENING_RUN_LIVE", "1")
+    monkeypatch.setenv("WEB_LISTENING_LIVE_AUTHORIZED_WINDOW", AUTHORIZED_WINDOW)
+    monkeypatch.setenv("WEB_LISTENING_LIVE_SITE", "ipcc")
+
+    target, case, catalog_sha256 = _load_authorized_target()
+
+    assert target["site_key"] == case["site_key"] == "ipcc"
+    assert catalog_sha256 == hashlib.sha256(CATALOG.read_bytes()).hexdigest()
+
+
+def test_live_site_selector_cannot_inject_a_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The selector accepts catalog keys, never caller-provided URLs."""
+    monkeypatch.setenv("WEB_LISTENING_RUN_LIVE", "1")
+    monkeypatch.setenv("WEB_LISTENING_LIVE_AUTHORIZED_WINDOW", AUTHORIZED_WINDOW)
+    monkeypatch.setenv("WEB_LISTENING_LIVE_SITE", "https://example.invalid/")
+
+    with pytest.raises(pytest.fail.Exception, match="existing catalog key"):
+        _load_authorized_target()
 
 
 def test_target_binding_rejects_coordinated_drift_before_gateway() -> None:
