@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, replace
+from types import MemberDescriptorType
 from typing import Any
+from urllib.parse import urlsplit
 
+from web_listening.request.model import ContentType
 from web_listening.request.validate import compile_access_policy
 from web_listening.tool_registry.eligibility import (
     EligibilityDecision,
@@ -78,7 +81,7 @@ class Registry:
         snapshot = _snapshot_manifest(manifest)
         if snapshot.tool_id in self._registrations:
             raise ToolRegistryError("registry.duplicate_id")
-        tool_manifest = _snapshot_manifest(_static_attribute(tool, "manifest"))
+        tool_manifest = _snapshot_manifest(_static_manifest(tool))
         if not _manifests_equal(tool_manifest, snapshot):
             raise ToolRegistryError("registry.identity_mismatch")
         matches = tuple(
@@ -131,9 +134,7 @@ class Registry:
         registration = self._registrations.get(tool_id)
         if registration is None:
             raise ToolRegistryError("registry.not_found")
-        current_manifest = _snapshot_manifest(
-            _static_attribute(registration.tool, "manifest")
-        )
+        current_manifest = _snapshot_manifest(_static_manifest(registration.tool))
         if not _manifests_equal(current_manifest, registration.manifest):
             raise ToolRegistryError("registry.identity_mismatch")
         tool_input = _rebuild_input(tool_input)
@@ -224,6 +225,17 @@ def _static_attribute(value: object, name: str) -> object:
         return _ATTRIBUTE_MISSING
 
 
+def _static_manifest(value: object) -> object:
+    descriptor = _static_attribute(value, "manifest")
+    if type(descriptor) is not MemberDescriptorType:
+        return descriptor
+    try:
+        # pylint: disable-next=unnecessary-dunder-call
+        return descriptor.__get__(value, type(value))
+    except Exception:  # pylint: disable=broad-exception-caught
+        return _ATTRIBUTE_MISSING
+
+
 def _static_callable(value: object, name: str) -> bool:
     attribute = _static_attribute(value, name)
     try:
@@ -303,7 +315,11 @@ def _validate_output(
         raise ToolRegistryError(error)
     if output.tool_id != manifest.tool_id or output.tool_version != manifest.version:
         raise ToolRegistryError("registry.output_identity_mismatch")
-    if isinstance(output, AcquisitionOutput):
+    if isinstance(output, DiscoveryOutput):
+        output_bytes = sum(len(value.encode("utf-8")) for value in output.candidates)
+        if output_bytes > manifest.limits.max_output_bytes:
+            raise ToolRegistryError("registry.output_limit")
+    elif isinstance(output, AcquisitionOutput):
         if output.requested_url != tool_input.target_url:
             raise ToolRegistryError("registry.output_invalid")
         _validate_acquisition_authority(tool_input, output)
@@ -345,6 +361,12 @@ def _validate_acquisition_authority(
     tool_input: AcquisitionInput, output: AcquisitionOutput
 ) -> None:
     policy = compile_access_policy(tool_input.request)
+    for redirect in output.redirects:
+        if (
+            urlsplit(redirect.from_url).scheme == "https"
+            and urlsplit(redirect.to_url).scheme == "http"
+        ):
+            raise ToolRegistryError("gateway.https_downgrade")
     urls = (
         output.requested_url,
         *(
@@ -358,6 +380,12 @@ def _validate_acquisition_authority(
         decision = policy.decide_url(url)
         if not decision.allowed:
             raise ToolRegistryError(decision.code)
+    content_type = (
+        ContentType.HTML if output.mime_type == "text/html" else ContentType.FILE
+    )
+    decision = policy.decide_content_type(content_type)
+    if not decision.allowed:
+        raise ToolRegistryError(decision.code)
     runtime_seconds = (output.runtime_ms + 999) // 1000
     for name, amount in (
         ("max_requests", len(output.redirects) + 1),

@@ -58,13 +58,15 @@ def _request(
     max_requests: int = 2,
     max_bytes: int = 4096,
     max_runtime_seconds: int = 10,
+    allowed_origins: tuple[str, ...] = ("https://example.test",),
+    content_types: tuple[ContentType, ...] = (ContentType.HTML,),
 ) -> Request:
     return Request(
         scope=Scope(
             seeds=("https://example.test/",),
-            allowed_origins=("https://example.test",),
+            allowed_origins=allowed_origins,
             include_paths=("/**",),
-            content_types=(ContentType.HTML,),
+            content_types=content_types,
         ),
         site_skill=None,
         explore_all_tools=False,
@@ -144,7 +146,7 @@ class _AcquisitionFake:
             requested_url=tool_input.target_url,
             final_url=tool_input.target_url,
             status_code=200,
-            mime_type="text/plain",
+            mime_type="text/html",
             body=body,
             sha256=hashlib.sha256(body).hexdigest(),
             redirects=(),
@@ -223,6 +225,29 @@ def _forged_acquisition_output(
     ):
         object.__setattr__(output, name, value)
     return output
+
+
+def _acquisition_output(
+    manifest: ToolManifest,
+    *,
+    requested_url: str = "https://example.test/",
+    final_url: str | None = None,
+    mime_type: str = "text/html",
+    redirects: tuple[AcquisitionRedirect, ...] = (),
+) -> AcquisitionOutput:
+    body = b"ok"
+    return AcquisitionOutput(
+        manifest.tool_id,
+        manifest.version,
+        requested_url,
+        final_url or requested_url,
+        200,
+        mime_type,
+        body,
+        hashlib.sha256(body).hexdigest(),
+        redirects,
+        1,
+    )
 
 
 def test_register_and_query_preserve_order_and_independent_distribution() -> None:
@@ -345,6 +370,53 @@ def test_registration_never_executes_manifest_or_category_properties() -> None:
         "registry.protocol_mismatch",
         canary,
     )
+
+
+def test_slotted_tool_manifest_registers_and_invokes() -> None:
+    @dataclass(slots=True)
+    class SlottedDiscoveryFake:
+        manifest: ToolManifest
+
+        def discover(self, tool_input: DiscoveryInput) -> DiscoveryOutput:
+            return DiscoveryOutput(
+                self.manifest.tool_id,
+                self.manifest.version,
+                tool_input.scope.seeds,
+            )
+
+    manifest = _manifest("discovery.slotted")
+    tool = SlottedDiscoveryFake(manifest)
+    registry = Registry()
+
+    registry.register(manifest, tool)
+    output = registry.invoke(manifest.tool_id, DiscoveryInput(_request().scope))
+
+    assert output == DiscoveryOutput(
+        manifest.tool_id, manifest.version, _request().scope.seeds
+    )
+
+
+def test_slotted_tool_manifest_failures_are_stable_and_context_free() -> None:
+    class UnsetSlotFake:
+        __slots__ = ("manifest",)
+
+        def discover(self, tool_input: DiscoveryInput) -> DiscoveryOutput:
+            raise AssertionError(tool_input)
+
+    @dataclass(slots=True)
+    class BrokenSlotFake:
+        manifest: object
+
+        def discover(self, tool_input: DiscoveryInput) -> DiscoveryOutput:
+            raise AssertionError(tool_input)
+
+    manifest = _manifest("discovery.broken-slot")
+    for tool in (UnsetSlotFake(), BrokenSlotFake(object())):
+        _safe_error(
+            lambda tool=tool: Registry().register(manifest, tool),
+            "registry.manifest_invalid",
+            "private-slot-canary",
+        )
 
 
 def test_invoke_statically_retrieves_manifest_after_registration() -> None:
@@ -644,6 +716,61 @@ def test_invoke_revalidates_a_forged_output_instead_of_trusting_its_type() -> No
     )
 
 
+def test_discovery_output_limit_accepts_exact_aggregate_utf8_bytes() -> None:
+    candidates = (
+        "https://example.test/%C3%A9",
+        "https://example.test/%E4%BA%8C",
+    )
+    aggregate_bytes = sum(len(value.encode("utf-8")) for value in candidates)
+    manifest = _manifest(
+        "discovery.bounded",
+        limits=ToolLimits(10, 4096, aggregate_bytes),
+    )
+    registry = Registry()
+    registry.register(
+        manifest,
+        _DiscoveryFake(
+            manifest,
+            DiscoveryOutput(manifest.tool_id, manifest.version, candidates),
+        ),
+    )
+
+    output = registry.invoke(manifest.tool_id, DiscoveryInput(_request().scope))
+
+    assert output.candidates == candidates
+
+
+@pytest.mark.parametrize(
+    "candidates",
+    [
+        ("https://example.test/report",),
+        ("https://example.test/a", "https://example.test/b"),
+    ],
+)
+def test_discovery_output_limit_rejects_aggregate_one_byte_over(
+    candidates: tuple[str, ...],
+) -> None:
+    aggregate_bytes = sum(len(value.encode("utf-8")) for value in candidates)
+    manifest = _manifest(
+        "discovery.oversize",
+        limits=ToolLimits(10, 4096, aggregate_bytes - 1),
+    )
+    registry = Registry()
+    registry.register(
+        manifest,
+        _DiscoveryFake(
+            manifest,
+            DiscoveryOutput(manifest.tool_id, manifest.version, candidates),
+        ),
+    )
+
+    _safe_error(
+        lambda: registry.invoke(manifest.tool_id, DiscoveryInput(_request().scope)),
+        "registry.output_limit",
+        "private-discovery-limit-canary",
+    )
+
+
 def test_invoke_contains_hostile_nested_output_and_input_reconstruction() -> None:
     output_canary = "output-iterator-private-canary"
 
@@ -883,7 +1010,7 @@ def test_invoke_enforces_declared_output_and_runtime_limits(
         requested_url="https://example.test/",
         final_url="https://example.test/",
         status_code=200,
-        mime_type="text/plain",
+        mime_type="text/html",
         body=body,
         sha256=hashlib.sha256(body).hexdigest(),
         redirects=(),
@@ -901,6 +1028,40 @@ def test_invoke_enforces_declared_output_and_runtime_limits(
         )
         == expected
     )
+
+
+@pytest.mark.parametrize(
+    "content_types, mime_type, allowed",
+    [
+        ((ContentType.HTML,), "text/plain", False),
+        ((ContentType.FILE,), "text/html", False),
+        ((ContentType.HTML,), "text/html", True),
+        ((ContentType.FILE,), "application/pdf", True),
+    ],
+)
+def test_acquisition_mime_must_match_request_content_type(
+    content_types: tuple[ContentType, ...], mime_type: str, allowed: bool
+) -> None:
+    manifest = _manifest("acquisition.mime", ToolCategory.ACQUISITION)
+    registry = Registry()
+    registry.register(
+        manifest,
+        _AcquisitionFake(manifest, _acquisition_output(manifest, mime_type=mime_type)),
+    )
+    tool_input = AcquisitionInput(
+        _request(content_types=content_types), "https://example.test/"
+    )
+
+    if allowed:
+        assert isinstance(
+            registry.invoke(manifest.tool_id, tool_input), AcquisitionOutput
+        )
+    else:
+        _safe_error(
+            lambda: registry.invoke(manifest.tool_id, tool_input),
+            "scope.content_type_not_allowed",
+            "private-mime-policy-canary",
+        )
 
 
 def test_acquisition_invoke_enforces_request_scope_for_redirect_and_final() -> None:
@@ -981,7 +1142,7 @@ def test_acquisition_invoke_enforces_request_owned_byte_and_runtime_budget(
         requested_url="https://example.test/",
         final_url="https://example.test/",
         status_code=200,
-        mime_type="text/plain",
+        mime_type="text/html",
         body=body,
         sha256=hashlib.sha256(body).hexdigest(),
         redirects=(),
@@ -1010,7 +1171,7 @@ def test_acquisition_request_count_includes_redirects_and_final_response() -> No
         "https://example.test/start",
         "https://example.test/final",
         200,
-        "text/plain",
+        "text/html",
         body,
         hashlib.sha256(body).hexdigest(),
         (
@@ -1058,6 +1219,73 @@ def test_acquisition_request_count_includes_redirects_and_final_response() -> No
             AcquisitionInput(_request(max_requests=1), "https://example.test/final"),
         ),
         AcquisitionOutput,
+    )
+
+
+@pytest.mark.parametrize(
+    "requested_url, final_url",
+    [
+        ("https://example.test/start", "https://example.test/final"),
+        ("http://example.test/start", "https://example.test/final"),
+    ],
+)
+def test_acquisition_redirect_allows_non_downgrade_transitions(
+    requested_url: str, final_url: str
+) -> None:
+    manifest = _manifest("acquisition.redirect-safe", ToolCategory.ACQUISITION)
+    redirect = AcquisitionRedirect(requested_url, final_url, 302)
+    output = _acquisition_output(
+        manifest,
+        requested_url=requested_url,
+        final_url=final_url,
+        redirects=(redirect,),
+    )
+    registry = Registry()
+    registry.register(manifest, _AcquisitionFake(manifest, output))
+    request = _request(allowed_origins=("https://example.test", "http://example.test"))
+
+    assert isinstance(
+        registry.invoke(manifest.tool_id, AcquisitionInput(request, requested_url)),
+        AcquisitionOutput,
+    )
+
+
+@pytest.mark.parametrize(
+    "urls",
+    [
+        ("https://example.test/start", "http://example.test/final"),
+        (
+            "https://example.test/start",
+            "https://example.test/middle",
+            "http://example.test/final",
+        ),
+    ],
+)
+def test_acquisition_redirect_rejects_any_https_downgrade(
+    urls: tuple[str, ...],
+) -> None:
+    manifest = _manifest("acquisition.redirect-downgrade", ToolCategory.ACQUISITION)
+    redirects = tuple(
+        AcquisitionRedirect(from_url, to_url, 302)
+        for from_url, to_url in zip(urls, urls[1:])
+    )
+    output = _acquisition_output(
+        manifest,
+        requested_url=urls[0],
+        final_url=urls[-1],
+        redirects=redirects,
+    )
+    registry = Registry()
+    registry.register(manifest, _AcquisitionFake(manifest, output))
+    request = _request(
+        max_requests=len(redirects) + 1,
+        allowed_origins=("https://example.test", "http://example.test"),
+    )
+
+    _safe_error(
+        lambda: registry.invoke(manifest.tool_id, AcquisitionInput(request, urls[0])),
+        "gateway.https_downgrade",
+        "private-redirect-policy-canary",
     )
 
 
