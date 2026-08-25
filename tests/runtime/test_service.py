@@ -556,7 +556,7 @@ def test_ordinary_artifact_exception_rolls_back_to_one_safe_failure(
     store.close()
 
 
-def test_invalid_attempt_time_is_rejected_before_artifact_commit(
+def test_invalid_attempt_time_is_failed_before_artifact_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registry = Registry()
@@ -570,6 +570,7 @@ def test_invalid_attempt_time_is_rejected_before_artifact_commit(
             NOW,
             "2026-08-25T20:00:02Z",
             "2026-08-25T20:00:01Z",
+            "2026-08-25T20:00:03Z",
         )
     )
     service = RuntimeService(
@@ -597,11 +598,75 @@ def test_invalid_attempt_time_is_rejected_before_artifact_commit(
     assert [event.status for event in jobs.events("job-one")] == [
         JobStatus.SUBMITTED,
         JobStatus.RUNNING,
+        JobStatus.FAILED,
     ]
+    failed = jobs.get("job-one")
+    assert failed.failure_code == "runtime.workflow_failed"
+    assert failed.result is None
     with pytest.raises(ArtifactStoreError) as missing:
         store.read_blob(hashlib.sha256(BODY).hexdigest())
     assert missing.value.code == "blob.not_found"
     assert not tuple((store.root / "blobs").rglob("*.blob"))
+    store.close()
+
+
+def test_failed_terminalization_cannot_mask_primary_workflow_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = Registry()
+    registry.register(WEB_HTTP_MANIFEST, _CountingTool(_successful_output()))
+    store = ArtifactStore(tmp_path / "artifacts")
+    jobs = JobRepository()
+    times = iter(
+        (
+            NOW,
+            NOW,
+            "2026-08-25T20:00:02Z",
+            "2026-08-25T20:00:01Z",
+            "2026-08-25T20:00:03Z",
+        )
+    )
+    service = RuntimeService(
+        registry,
+        store,
+        jobs,
+        clock=lambda: next(times),
+        job_id_factory=lambda: "job-one",
+    )
+    transition = jobs.transition
+
+    def fail_terminal(
+        job_id: str,
+        status: JobStatus,
+        *,
+        at: str,
+        result=None,
+        failure_code: str | None = None,
+    ):
+        if status is JobStatus.FAILED:
+            raise RuntimeError("private terminalization failure")
+        return transition(
+            job_id,
+            status,
+            at=at,
+            result=result,
+            failure_code=failure_code,
+        )
+
+    monkeypatch.setattr(jobs, "transition", fail_terminal)
+
+    with pytest.raises(ResultValidationError) as error:
+        service.run(_request(_skill()))
+
+    assert error.value.code == "attempt.time_invalid"
+    assert "private terminalization failure" not in str(error.value)
+    assert [event.status for event in jobs.events("job-one")] == [
+        JobStatus.SUBMITTED,
+        JobStatus.RUNNING,
+    ]
+    with pytest.raises(ArtifactStoreError) as missing:
+        store.read_blob(hashlib.sha256(BODY).hexdigest())
+    assert missing.value.code == "blob.not_found"
     store.close()
 
 

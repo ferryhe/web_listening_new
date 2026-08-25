@@ -53,6 +53,17 @@ class RuntimeService:
                 at=self._clock(),
                 failure_code=exc.code,
             )
+        except Exception:  # pylint: disable=broad-exception-caught
+            try:
+                self._jobs.transition(
+                    job_id,
+                    JobStatus.FAILED,
+                    at=self._clock(),
+                    failure_code="runtime.workflow_failed",
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            raise
         status = JobStatus(result.status.value)
         failure_code = result.errors[0].code if result.errors else None
         return self._jobs.transition(
