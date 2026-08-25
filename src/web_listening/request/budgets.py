@@ -24,14 +24,14 @@ def validate_budgets(value: Budgets) -> Budgets:
 def budgets_from_mapping(value: object) -> Budgets:
     """Build strict budgets from one JSON-compatible object."""
     if not isinstance(value, Mapping):
-        raise RequestValidationError("budget.invalid")
+        raise RequestValidationError("budgets.invalid")
     keys = set(value)
     if not all(isinstance(key, str) for key in keys):
         raise RequestValidationError("budgets.unknown_field")
     if keys - set(BUDGET_FIELDS):
         raise RequestValidationError("budgets.unknown_field")
     if set(BUDGET_FIELDS) - keys:
-        raise RequestValidationError("budget.missing")
+        raise RequestValidationError("budgets.missing")
     return validate_budgets(Budgets(**{name: value[name] for name in BUDGET_FIELDS}))
 
 

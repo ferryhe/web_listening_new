@@ -81,9 +81,7 @@ def test_optional_request_values_use_readme_defaults() -> None:
             "scope.empty_content_types",
         ),
         (
-            lambda value: value["scope"].update(
-                seeds=["https://user:secret@www.soa.org/"]
-            ),
+            lambda value: value["scope"].update(seeds=["https://user@www.soa.org/"]),
             "scope.url_userinfo",
         ),
         (
@@ -155,6 +153,14 @@ def test_optional_request_values_use_readme_defaults() -> None:
         (
             lambda value: value["scope"].update(content_types=["video"]),
             "scope.content_type_invalid",
+        ),
+        (
+            lambda value: value.update(budgets=[]),
+            "budgets.invalid",
+        ),
+        (
+            lambda value: value["budgets"].pop("max_requests"),
+            "budgets.missing",
         ),
         (
             lambda value: value["budgets"].update(max_requests=True),
