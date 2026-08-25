@@ -384,6 +384,25 @@ def test_registry_requires_explicit_registration_and_invokes_the_adapter() -> No
     assert transport.closed == 1
 
 
+def test_registry_query_url_returns_safe_failure_instead_of_invalid_output() -> None:
+    """Gateway URL redaction cannot escape as a Registry contract error."""
+    url = "https://example.test/report?access=private-token"
+    transport, _robots, _target = _direct_transport(b"query", "text/html", url)
+    registry = Registry()
+    registry.register(WEB_HTTP_MANIFEST, _tool(transport))
+
+    output = registry.invoke(
+        WEB_HTTP_MANIFEST.tool_id,
+        AcquisitionInput(_request(url), url),
+    )
+
+    assert output == AcquisitionFailure(
+        "acquisition.web_http", "1.0.0", "web_http.url_redacted"
+    )
+    assert transport.requests == ["https://example.test/robots.txt", url]
+    assert transport.closed == 1
+
+
 def test_repeat_acquisitions_use_and_close_fresh_request_bound_gateways() -> None:
     """Every invocation owns fresh resources and closes them before returning."""
     url = "https://example.test/report"

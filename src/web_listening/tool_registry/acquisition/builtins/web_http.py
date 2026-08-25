@@ -71,6 +71,8 @@ class WebHttpAcquisitionTool:
                 resolver=self._resolver,
             )
             result = gateway.read(tool_input.target_url)
+            if result.requested_url != tool_input.target_url:
+                return self._failure("web_http.url_redacted")
             redirects = tuple(
                 AcquisitionRedirect(
                     from_url=redirect.source_url,
