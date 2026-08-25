@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -39,6 +41,46 @@ def _authorized_target() -> tuple[dict[str, object], str, str]:
     target = targets[0]
     if not isinstance(target, dict) or target.get("site_key") != "ipcc":
         pytest.fail("Phase 2 live catalog must select only ipcc")
+    origins = target.get("allowed_origins")
+    profile_domains = target.get("profile_allowed_domains")
+    if (
+        not isinstance(origins, list)
+        or not origins
+        or not all(isinstance(item, str) for item in origins)
+    ):
+        pytest.fail("allowed origins require profile-derived domains")
+    if (
+        not isinstance(profile_domains, list)
+        or not profile_domains
+        or not all(isinstance(item, str) and item for item in profile_domains)
+    ):
+        pytest.fail("allowed origins require profile-derived domains")
+    try:
+        parsed_origins = tuple(urlsplit(item) for item in origins)
+        ports = tuple(item.port for item in parsed_origins)
+    except ValueError:
+        pytest.fail("allowed origins require profile-derived domains")
+    normalized_domains = {item.rstrip(".").casefold() for item in profile_domains}
+    if any(
+        parsed.scheme != "https" or parsed.hostname is None or port not in {None, 443}
+        for parsed, port in zip(parsed_origins, ports, strict=True)
+    ):
+        pytest.fail("allowed origins require profile-derived domains")
+    if any(
+        parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or bool(parsed.query)
+        or bool(parsed.fragment)
+        for parsed in parsed_origins
+    ):
+        pytest.fail("allowed origins require profile-derived domains")
+    if any(
+        parsed.hostname.rstrip(".").casefold() not in normalized_domains
+        for parsed in parsed_origins
+        if parsed.hostname is not None
+    ):
+        pytest.fail("allowed origins require profile-derived domains")
     return target, hashlib.sha256(raw).hexdigest(), window
 
 
@@ -77,6 +119,23 @@ def test_authorized_target_uses_optional_site_filter(
     assert target["site_key"] == "ipcc"
     assert catalog_sha256
     assert window == "offline-gate"
+
+
+def test_authorized_target_rejects_origin_outside_profile_domains(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The catalog cannot grant an origin absent from pinned profile evidence."""
+    payload = json.loads(TARGETS.read_text(encoding="utf-8"))
+    payload["targets"][0]["allowed_origins"].append("https://outside.example")
+    widened = tmp_path / "widened-targets.json"
+    widened.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "TARGETS", widened)
+    monkeypatch.setenv("WEB_LISTENING_RUN_LIVE", "1")
+    monkeypatch.setenv("WEB_LISTENING_LIVE_AUTHORIZED_WINDOW", "offline-gate")
+    monkeypatch.setenv("WEB_LISTENING_LIVE_SITE", "ipcc")
+
+    with pytest.raises(pytest.fail.Exception, match="profile-derived domains"):
+        _authorized_target()
 
 
 def test_emit_evidence_bypasses_quiet_capture(

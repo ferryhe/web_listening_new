@@ -9,6 +9,7 @@ import http.client
 import inspect
 import io
 import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
@@ -564,6 +565,59 @@ def test_malformed_redirect_location_is_stable_and_redacted(
     encoded = json.dumps(asdict(failure.evidence), sort_keys=True)
     assert marker not in encoded
     assert "https://[" not in encoded
+    assert len(failure.evidence.redirects) == 1
+    transition = failure.evidence.redirects[0]
+    assert transition.kind == redirect_kind
+    assert transition.status_code == 302
+    assert transition.target_url == "[invalid-url]"
+    assert transition.decision_code == "gateway.redirect_invalid"
+    assert any(
+        item.stage == f"{redirect_kind}.redirect"
+        and item.code == "gateway.redirect_invalid"
+        and not item.allowed
+        for item in failure.evidence.decisions
+    )
+
+
+@pytest.mark.parametrize(
+    ("redirect_kind", "expected_code"),
+    [
+        ("robots", "robots.redirect_missing"),
+        ("target", "gateway.redirect"),
+    ],
+)
+def test_missing_redirect_location_retains_rejection_evidence(
+    redirect_kind: str, expected_code: str
+) -> None:
+    """A redirect without Location still records one sanitized transition."""
+    redirect = FakeResponse(302)
+    scripts: dict[str, list[TransportResponse | BaseException]] = {
+        "https://example.com/robots.txt": [
+            redirect if redirect_kind == "robots" else FakeResponse(404)
+        ]
+    }
+    if redirect_kind == "target":
+        scripts["https://example.com/public"] = [redirect]
+    transport = FakeTransport(scripts)
+
+    failure = failure_code(
+        lambda: gateway(transport).read("https://example.com/public")
+    )
+
+    assert failure.code == expected_code
+    assert redirect.closed == 1
+    assert len(failure.evidence.redirects) == 1
+    transition = failure.evidence.redirects[0]
+    assert transition.kind == redirect_kind
+    assert transition.status_code == 302
+    assert transition.target_url == "[invalid-url]"
+    assert transition.decision_code == expected_code
+    assert any(
+        item.stage == f"{redirect_kind}.redirect"
+        and item.code == expected_code
+        and not item.allowed
+        for item in failure.evidence.decisions
+    )
 
 
 def test_dns_and_peer_safety_fail_closed() -> None:
@@ -640,6 +694,35 @@ def test_resolver_does_not_swallow_base_exception() -> None:
         gateway(FakeTransport({}), resolver=aborting_resolver).read(
             "https://example.com/public"
         )
+
+
+def test_resolver_is_bounded_by_the_remaining_runtime() -> None:
+    """A slow DNS resolver cannot hold the gateway past its remaining deadline."""
+    clock = ManualClock()
+
+    def slow_resolver(_host: str, _port: int) -> tuple[str, ...]:
+        time.sleep(0.2)
+        return (PUBLIC_IP,)
+
+    access = GovernedAccessGateway(
+        request_for(max_runtime_seconds=1),
+        FakeTransport({}),
+        resolver=slow_resolver,
+        clock=clock,
+    )
+    clock.value = 0.99
+    started = time.monotonic()
+
+    failure = failure_code(lambda: access.read("https://example.com/public"))
+
+    assert failure.code == "robots.timeout"
+    assert time.monotonic() - started < 0.15
+    assert any(
+        item.stage == "robots.dns"
+        and item.code == "gateway.timeout"
+        and not item.allowed
+        for item in failure.evidence.decisions
+    )
 
 
 def test_pinned_transport_checks_peer_before_http_application_bytes(
@@ -937,18 +1020,40 @@ def test_non_success_status_rejects_without_body_and_preserves_evidence(
     assert failure.evidence.content_sha256 is None
 
 
-def test_request_and_byte_budgets_stop_before_unapproved_work() -> None:
+def test_request_and_byte_budgets_stop_before_unapproved_work() -> (
+    None
+):  # pylint: disable=too-many-locals
     """Request and aggregate byte limits are hard, run-level boundaries."""
+    resolver = Resolver()
     request_limited = FakeTransport(
         {"https://example.com/robots.txt": [FakeResponse(404)]}
     )
     failure = failure_code(
-        lambda: gateway(request_limited, request_for(max_requests=1)).read(
-            "https://example.com/public"
-        )
+        lambda: gateway(
+            request_limited, request_for(max_requests=1), resolver=resolver
+        ).read("https://example.com/public")
     )
     assert failure.code == "budget.requests"
     assert len(request_limited.requests) == 1
+    assert resolver.calls == [("example.com", 443)]
+
+    robots = FakeResponse(
+        200,
+        ROBOTS_ALLOW,
+        Content_Type="text/plain",
+        Content_Length=str(len(ROBOTS_ALLOW)),
+    )
+    resolver = Resolver()
+    byte_preflight = FakeTransport({"https://example.com/robots.txt": [robots]})
+    failure = failure_code(
+        lambda: gateway(
+            byte_preflight,
+            request_for(max_bytes=len(ROBOTS_ALLOW)),
+            resolver=resolver,
+        ).read("https://example.com/public")
+    )
+    assert failure.code == "budget.bytes"
+    assert resolver.calls == [("example.com", 443)]
 
     raw_target = RecordingHttpResponse(b"0123456789", [("Content-Type", "text/html")])
     target_connection = RecordingConnection()
@@ -1044,6 +1149,7 @@ def test_request_and_byte_budgets_stop_before_unapproved_work() -> None:
     [
         "https://example.com/public/\x00PRIVATE-CONTROL-MARKER",
         " https://example.com/public/PRIVATE-CONTROL-MARKER ",
+        "https://example.com:PRIVATE-CONTROL-MARKER/public",
     ],
 )
 def test_unsafe_url_characters_never_enter_evidence(requested: str) -> None:
@@ -1098,6 +1204,40 @@ def test_timeout_and_transport_failures_are_typed_and_redacted() -> None:
     assert failure.code == "robots.timeout"
     assert failure.evidence.robots[-1].code == "robots.timeout"
     assert timed_out.requests[0][1] <= 30
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (TimeoutError("private robots timeout"), "robots.timeout"),
+        (OSError("private robots transport"), "robots.network_error"),
+    ],
+)
+def test_robots_body_io_failures_keep_robots_specific_codes(
+    error: BaseException, expected_code: str
+) -> None:
+    """Robots body I/O failures stay distinguishable from target failures."""
+
+    class FailingRobotsBody(FakeResponse):
+        """Raise the scripted failure while preserving read evidence."""
+
+        def read(self, max_bytes: int) -> bytes:
+            self.read_limits.append(max_bytes)
+            raise error
+
+    robots = FailingRobotsBody(200, Content_Type="text/plain")
+    transport = FakeTransport({"https://example.com/robots.txt": [robots]})
+
+    failure = failure_code(
+        lambda: gateway(transport).read("https://example.com/public")
+    )
+
+    assert failure.code == expected_code
+    assert failure.evidence.robots[-1].code == expected_code
+    assert robots.closed == 1
+    assert len(transport.requests) == 1
+    encoded = json.dumps(asdict(failure.evidence), sort_keys=True)
+    assert "private robots" not in encoded
 
 
 def test_success_closes_responses_and_gateway_close_is_idempotent() -> None:

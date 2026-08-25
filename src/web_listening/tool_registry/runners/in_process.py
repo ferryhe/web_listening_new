@@ -8,6 +8,7 @@ import ipaddress
 import re
 import socket
 import ssl
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, NoReturn, Protocol
@@ -22,6 +23,11 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _USER_AGENT = "web-listening/0.1"
 _MEDIA_TYPE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
 _MAX_CONTENT_LENGTH = (1 << 63) - 1
+_ROBOTS_NETWORK_FAILURE_CODES = {
+    "gateway.dns": "robots.dns_error",
+    "gateway.timeout": "robots.timeout",
+    "gateway.transport": "robots.network_error",
+}
 
 
 class TransportResponse(Protocol):
@@ -417,11 +423,7 @@ class GovernedAccessGateway:
                 addresses = self._resolve(current, state, "robots.dns")
                 response = self._send(current, addresses, state)
             except GatewayFailure as exc:
-                mapped_code = {
-                    "gateway.dns": "robots.dns_error",
-                    "gateway.timeout": "robots.timeout",
-                    "gateway.transport": "robots.network_error",
-                }.get(exc.code)
+                mapped_code = _ROBOTS_NETWORK_FAILURE_CODES.get(exc.code)
                 if mapped_code is None:
                     raise
                 return _RobotsPolicy(current, None, mapped_code, None)
@@ -442,7 +444,13 @@ class GovernedAccessGateway:
                     return _RobotsPolicy(
                         current, response.status, "robots.http_status", None
                     )
-                body = self._read_body(response, current, state)
+                try:
+                    body = self._read_body(response, current, state)
+                except GatewayFailure as exc:
+                    mapped_code = _ROBOTS_NETWORK_FAILURE_CODES.get(exc.code)
+                    if mapped_code is None:
+                        raise
+                    return _RobotsPolicy(current, response.status, mapped_code, None)
                 try:
                     text = body.decode("utf-8-sig")
                 except UnicodeDecodeError:
@@ -527,7 +535,9 @@ class GovernedAccessGateway:
         current: str,
         state: _ReadState,
     ) -> str:
-        target = self._redirect_target(response, current, "gateway.redirect", state)
+        target = self._redirect_target(
+            response, current, "target", "gateway.redirect", state
+        )
         code = "policy.allowed"
         if urlsplit(current).scheme == "https" and urlsplit(target).scheme == "http":
             code = "gateway.https_downgrade"
@@ -562,7 +572,7 @@ class GovernedAccessGateway:
         state: _ReadState,
     ) -> str:
         target = self._redirect_target(
-            response, current, "robots.redirect_missing", state
+            response, current, "robots", "robots.redirect_missing", state
         )
         if urlsplit(current).scheme == "https" and urlsplit(target).scheme == "http":
             code = "gateway.https_downgrade"
@@ -591,19 +601,45 @@ class GovernedAccessGateway:
         self,
         response: TransportResponse,
         current: str,
+        kind: str,
         missing_code: str,
         state: _ReadState,
     ) -> str:
         location = _header(response.headers, "location")
         if not location:
-            self._raise(missing_code, state)
+            self._reject_invalid_redirect(response, current, kind, missing_code, state)
         try:
             return canonicalize_url(urljoin(current, location))
         except ValueError:
-            self._raise("gateway.redirect_invalid", state)
+            self._reject_invalid_redirect(
+                response, current, kind, "gateway.redirect_invalid", state
+            )
+
+    def _reject_invalid_redirect(
+        self,
+        response: TransportResponse,
+        current: str,
+        kind: str,
+        code: str,
+        state: _ReadState,
+    ) -> NoReturn:
+        state.decisions.append(
+            DecisionEvidence(f"{kind}.redirect", "[invalid-url]", False, code)
+        )
+        state.redirects.append(
+            RedirectEvidence(
+                kind=kind,
+                ordinal=len(state.redirects) + 1,
+                source_url=_safe_url(current),
+                target_url="[invalid-url]",
+                status_code=response.status,
+                decision_code=code,
+            )
+        )
+        self._raise(code, state)
 
     def _resolve(self, url: str, state: _ReadState, stage: str) -> tuple[str, ...]:
-        self._ensure_runtime(state)
+        timeout = self._preflight_budget(url, state)
         parsed = urlsplit(url)
         host = parsed.hostname
         if host is None:
@@ -613,14 +649,22 @@ class GovernedAccessGateway:
             addresses = tuple(
                 dict.fromkeys(
                     str(ipaddress.ip_address(item))
-                    for item in self._resolver(host, port)
+                    for item in _resolve_before_deadline(
+                        self._resolver, host, port, timeout
+                    )
                 )
             )
+        except TimeoutError:
+            state.decisions.append(
+                DecisionEvidence(stage, _safe_url(url), False, "gateway.timeout")
+            )
+            self._raise("gateway.timeout", state)
         except Exception:  # pylint: disable=broad-exception-caught
             state.decisions.append(
                 DecisionEvidence(stage, _safe_url(url), False, "gateway.dns")
             )
             self._raise("gateway.dns", state)
+        self._ensure_runtime(state)
         allowed = bool(addresses) and all(
             _is_public_address(item) for item in addresses
         )
@@ -657,6 +701,15 @@ class GovernedAccessGateway:
         return response
 
     def _reserve_request(self, url: str, state: _ReadState) -> float:
+        timeout = self._preflight_budget(url, state)
+        self._usage.requests += 1
+        state.decisions.append(
+            DecisionEvidence("budget.request", _safe_url(url), True, "policy.allowed")
+        )
+        return timeout
+
+    def _preflight_budget(self, url: str, state: _ReadState) -> float:
+        """Reject exhausted work without mutating cumulative usage."""
         timeout = self._remaining_runtime(state)
         if self._usage.requests >= self._policy.budgets.max_requests:
             state.decisions.append(
@@ -670,10 +723,6 @@ class GovernedAccessGateway:
                 DecisionEvidence("budget.bytes", _safe_url(url), False, "budget.bytes")
             )
             self._raise("budget.bytes", state)
-        self._usage.requests += 1
-        state.decisions.append(
-            DecisionEvidence("budget.request", _safe_url(url), True, "policy.allowed")
-        )
         return timeout
 
     def _read_body(
@@ -817,6 +866,7 @@ def _safe_url(value: object) -> str:
         return "[invalid-url]"
     try:
         parsed = urlsplit(value)
+        _unused_port = parsed.port
         if (
             parsed.hostname is None
             or parsed.username is not None
@@ -893,6 +943,32 @@ def _resolve_public_addresses(host: str, port: int) -> tuple[str, ...]:
     rows = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     addresses = {str(ipaddress.ip_address(row[4][0])) for row in rows}
     return tuple(sorted(addresses, key=lambda item: (":" in item, item)))
+
+
+def _resolve_before_deadline(
+    resolver: Callable[[str, int], tuple[str, ...]],
+    host: str,
+    port: int,
+    timeout: float,
+) -> tuple[str, ...]:
+    """Return resolver output without letting DNS hold the caller past timeout."""
+    results: list[tuple[str, ...]] = []
+    failures: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            results.append(resolver(host, port))
+        except BaseException as exc:  # pylint: disable=broad-exception-caught
+            failures.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise TimeoutError
+    if failures:
+        raise failures[0]
+    return results[0]
 
 
 def _host_header(host: str, port: int, scheme: str) -> str:
