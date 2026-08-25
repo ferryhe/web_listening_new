@@ -1,0 +1,24 @@
+{
+  "scope": {
+    "seeds": [
+      "https://www.soa.org/"
+    ],
+    "allowed_origins": [
+      "https://www.soa.org"
+    ],
+    "include_paths": [
+      "/**"
+    ],
+    "content_types": [
+      "html"
+    ]
+  },
+  "site_skill": null,
+  "explore_all_tools": false,
+  "budgets": {
+    "max_requests": 10,
+    "max_bytes": 1048576,
+    "max_runtime_seconds": 30,
+    "max_tool_attempts_per_target": 2
+  }
+}
