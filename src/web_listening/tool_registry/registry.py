@@ -141,11 +141,12 @@ class Registry:
         category = _input_category(tool_input)
         if registration.manifest.category is not category:
             raise ToolRegistryError("registry.input_mismatch")
-        input_bytes = (
-            len(tool_input.source.content)
-            if isinstance(tool_input, TransformInput)
-            else 0
-        )
+        if isinstance(tool_input, DiscoveryInput):
+            input_bytes = len(tool_input.source_body)
+        elif isinstance(tool_input, TransformInput):
+            input_bytes = len(tool_input.source.content)
+        else:
+            input_bytes = 0
         decision = evaluate_eligibility(
             registration.manifest,
             EligibilityRequirements(category=category, input_bytes=input_bytes),
@@ -261,7 +262,19 @@ def _rebuild_input(tool_input: ToolInput) -> ToolInput:
 def _contained_input(tool_input: object) -> tuple[ToolInput | None, str | None]:
     try:
         if type(tool_input) is DiscoveryInput:
-            return DiscoveryInput(tool_input.scope), None
+            return (
+                DiscoveryInput(
+                    tool_input.scope,
+                    getattr(tool_input, "source_url", None),
+                    getattr(tool_input, "source_body", b""),
+                    getattr(
+                        tool_input,
+                        "source_mime_type",
+                        "application/octet-stream",
+                    ),
+                ),
+                None,
+            )
         if type(tool_input) is AcquisitionInput:
             return AcquisitionInput(tool_input.request, tool_input.target_url), None
         if type(tool_input) is TransformInput:
@@ -298,7 +311,7 @@ def _contained_call(tool: Any, tool_input: ToolInput) -> object:
         return _CALL_FAILED
 
 
-def _validate_output(
+def _validate_output(  # pylint: disable=too-many-branches
     manifest: ToolManifest, tool_input: ToolInput, output: object
 ) -> ToolResult:
     allowed_types: tuple[type[Any], ...]
@@ -316,7 +329,13 @@ def _validate_output(
     if output.tool_id != manifest.tool_id or output.tool_version != manifest.version:
         raise ToolRegistryError("registry.output_identity_mismatch")
     if isinstance(output, DiscoveryOutput):
-        output_bytes = sum(len(value.encode("utf-8")) for value in output.candidates)
+        if any(source != tool_input.source_url for source in output.discovered_from):
+            raise ToolRegistryError("registry.output_invalid")
+        output_bytes = sum(
+            len(value.encode("utf-8"))
+            for values in (output.candidates, output.discovered_from)
+            for value in values
+        )
         if output_bytes > manifest.limits.max_output_bytes:
             raise ToolRegistryError("registry.output_limit")
     elif isinstance(output, AcquisitionOutput):
@@ -333,6 +352,13 @@ def _validate_output(
 
 def _revalidate_output(output: ToolResult) -> ToolResult:
     """Reconstruct an untrusted value so frozen type identity is not sufficient."""
+    if isinstance(output, DiscoveryOutput):
+        return DiscoveryOutput(
+            output.tool_id,
+            output.tool_version,
+            output.candidates,
+            getattr(output, "discovered_from", None),
+        )
     if isinstance(output, AcquisitionOutput):
         redirects = tuple(replace(redirect) for redirect in output.redirects)
         return replace(output, redirects=redirects)

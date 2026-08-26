@@ -1,0 +1,46 @@
+{
+  "schema_version": "phase-12-discovery-live-targets.v1",
+  "phase": "12",
+  "source_catalog": "tests/live/catalog/smoke_site_catalog.json",
+  "source_catalog_sha256": "CE378F743C6363F1DC22A25758B958E3ADA695F8996B3F619AFA4CF0CD5D5322",
+  "targets": [
+    {
+      "site_key": "iea",
+      "display_name": "International Energy Agency",
+      "seed_field": "tree_seed_url",
+      "seed_url": "https://www.iea.org/news",
+      "allowed_origins": [
+        "https://iea.org",
+        "https://www.iea.org"
+      ],
+      "historical_expectation": "pass_http",
+      "site_skill_case": "iea",
+      "site_skill_digest": "sha256:4ef9b4cdfa165b09fd81d98681a9253081c5d3fda47c376b2cc419470e236a55",
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "iea"
+      }
+    }
+  ],
+  "network_limits": {
+    "max_seeds": 1,
+    "max_feeds": 2,
+    "max_acquired_candidates": 2,
+    "max_total_requests": 12,
+    "max_total_bytes": 4194304,
+    "timeout_seconds": 30,
+    "concurrency": 1,
+    "retry": 0,
+    "fallback": 0
+  },
+  "endpoint_policy": {
+    "allowed_sources": [
+      "robots_sitemap_declaration",
+      "html_link_declaration"
+    ],
+    "hand_constructed_paths": false,
+    "valid_empty_discovery": true
+  }
+}

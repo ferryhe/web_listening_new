@@ -102,6 +102,7 @@ class _DiscoveryFake:
             tool_id="discovery.soa",
             tool_version="1.0.0",
             candidates=tool_input.scope.seeds,
+            discovered_from=(tool_input.source_url,) * len(tool_input.scope.seeds),
         )
 
 
@@ -154,7 +155,12 @@ def test_protocols_are_runtime_checkable_and_category_distinct() -> None:
 
 
 def test_protocol_inputs_and_outputs_are_immutable_and_category_specific() -> None:
-    discovery_input = DiscoveryInput(scope=_request().scope)
+    discovery_input = DiscoveryInput(
+        scope=_request().scope,
+        source_url="https://example.test/feed.xml",
+        source_body=b"<feed/>",
+        source_mime_type="application/xml",
+    )
     acquisition_input = AcquisitionInput(
         request=_request(), target_url="https://example.test/report"
     )
@@ -167,7 +173,62 @@ def test_protocol_inputs_and_outputs_are_immutable_and_category_specific() -> No
     assert not isinstance(transform_input, (DiscoveryInput, AcquisitionInput))
 
 
+def test_discovery_contract_carries_only_governed_source_and_provenance() -> None:
+    tool_input = DiscoveryInput(
+        scope=_request().scope,
+        source_url="HTTPS://EXAMPLE.TEST:443/feed.xml",
+        source_body=b"<feed/>",
+        source_mime_type="application/xml",
+    )
+    output = DiscoveryOutput(
+        "discovery.soa",
+        "1.0.0",
+        ("https://example.test/b", "https://example.test/a"),
+        (tool_input.source_url, tool_input.source_url),
+    )
+
+    assert tool_input.source_url == "https://example.test/feed.xml"
+    assert tool_input.source_body == b"<feed/>"
+    assert tool_input.source_mime_type == "application/xml"
+    assert output.discovered_from == (
+        "https://example.test/feed.xml",
+        "https://example.test/feed.xml",
+    )
+
+
+def test_discovery_contract_rejects_out_of_scope_source_or_unpaired_evidence() -> None:
+    with pytest.raises(ToolRegistryError) as source_error:
+        DiscoveryInput(
+            scope=_request().scope,
+            source_url="https://outside.test/feed.xml",
+            source_body=b"<feed/>",
+            source_mime_type="application/xml",
+        )
+    assert source_error.value.code == "scope.origin_not_allowed"
+
+    with pytest.raises(ToolRegistryError) as output_error:
+        DiscoveryOutput(
+            "discovery.soa",
+            "1.0.0",
+            ("https://example.test/a",),
+            (),
+        )
+    assert output_error.value.code == "protocol.output_invalid"
+
+
+def test_discovery_contract_rejects_omitted_provenance() -> None:
+    with pytest.raises(ToolRegistryError) as caught:
+        DiscoveryOutput(
+            "discovery.soa",
+            "1.0.0",
+            ("https://example.test/a",),
+        )
+
+    assert caught.value.code == "protocol.output_invalid"
+
+
 def test_url_values_use_request_canonical_syntax_without_network_policy() -> None:
+    source = "https://example.test/feed.xml"
     output = DiscoveryOutput(
         tool_id="discovery.soa",
         tool_version="1.0.0",
@@ -176,6 +237,7 @@ def test_url_values_use_request_canonical_syntax_without_network_policy() -> Non
             "http://127.0.0.1:8080/",
             "http://[2001:0db8::1]/",
         ),
+        discovered_from=(source, source, source),
     )
 
     assert output.candidates == (
