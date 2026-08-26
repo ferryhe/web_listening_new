@@ -14,6 +14,9 @@ dependencies = []
 web-listening = "web_listening.interfaces.cli:main"
 
 [project.optional-dependencies]
+rest = [
+    "fastapi>=0.115",
+]
 dev = [
     "black>=24.0",
     "isort>=5.13",
