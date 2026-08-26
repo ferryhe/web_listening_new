@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.scripts]
+web-listening = "web_listening.interfaces.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "black>=24.0",

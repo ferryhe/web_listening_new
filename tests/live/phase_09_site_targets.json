@@ -1,0 +1,110 @@
+{
+  "schema_version": "phase-live-targets.v1",
+  "phase": "9",
+  "source_catalog_path": "tests/live/catalog/smoke_site_catalog.json",
+  "source_catalog_sha256": "CE378F743C6363F1DC22A25758B958E3ADA695F8996B3F619AFA4CF0CD5D5322",
+  "site_skill_catalog_path": "tests/live/catalog/site_skill_cases.json",
+  "site_skill_catalog_sha256": "AE1CE1126EB475A21839FFEF178B68DC0806C19300C5347181197CD922E90BEC",
+  "canonical_request_sha256": "775dc2b617d54fcc28c517bda0f5a121fcec92b82d756438fb09dd6fae4467f7",
+  "canonical_request": {
+    "scope": {
+      "seeds": [
+        "https://www.ipcc.ch/"
+      ],
+      "allowed_origins": [
+        "https://www.ipcc.ch"
+      ],
+      "include_paths": [
+        "/**"
+      ],
+      "content_types": [
+        "html"
+      ]
+    },
+    "site_skill": {
+      "site_key": "ipcc",
+      "version": 1,
+      "previous_digest": null,
+      "scope": {
+        "seeds": [
+          "https://www.ipcc.ch/"
+        ],
+        "allowed_origins": [
+          "https://www.ipcc.ch"
+        ],
+        "include_paths": [
+          "/**"
+        ],
+        "content_types": [
+          "html"
+        ]
+      },
+      "budgets": {
+        "max_requests": 12,
+        "max_bytes": 2097152,
+        "max_runtime_seconds": 30,
+        "max_tool_attempts_per_target": 1
+      },
+      "tool": {
+        "tool_id": "acquisition.web_http",
+        "version": "1.0.0",
+        "category": "acquisition",
+        "capabilities": [
+          "http_get"
+        ],
+        "recipe_id": "catalog-http"
+      },
+      "success_checks": {
+        "allowed_mime_types": [
+          "text/html"
+        ],
+        "minimum_words": 300
+      },
+      "verified_at": "2026-08-25T00:00:00Z",
+      "digest": "sha256:65886846062d93ebe8e4d9edef63c1c65fc37774749d731db086ed3a408b97be"
+    },
+    "explore_all_tools": false,
+    "budgets": {
+      "max_requests": 12,
+      "max_bytes": 2097152,
+      "max_runtime_seconds": 30,
+      "max_tool_attempts_per_target": 1
+    }
+  },
+  "network_limits": {
+    "max_content_reads_per_target": 1,
+    "max_total_requests": 6,
+    "max_bytes_per_response": 2097152,
+    "timeout_seconds": 30,
+    "concurrency": 1,
+    "retry": 0
+  },
+  "targets": [
+    {
+      "site_key": "ipcc",
+      "url": "https://www.ipcc.ch/",
+      "allowed_origins": [
+        "https://www.ipcc.ch"
+      ],
+      "historical_expectation": "pass_http",
+      "monitor_min_words": 300,
+      "site_skill_case": "ipcc",
+      "site_skill_digest": "sha256:65886846062d93ebe8e4d9edef63c1c65fc37774749d731db086ed3a408b97be",
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "ipcc"
+      },
+      "tool_facts": {
+        "tool_id": "acquisition.web_http",
+        "version": "1.0.0",
+        "category": "acquisition",
+        "capabilities": [
+          "http_get"
+        ],
+        "recipe_id": "catalog-http"
+      }
+    }
+  ]
+}
