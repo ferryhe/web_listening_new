@@ -41,6 +41,17 @@ class Artifact:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredArtifact:
+    """Verified Artifact content and delivery metadata."""
+
+    artifact_id: str
+    blob_sha256: str
+    size_bytes: int
+    mime_type: str
+    content: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class Observation:
     """One successful acquisition event."""
 

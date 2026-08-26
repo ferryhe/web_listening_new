@@ -9,11 +9,12 @@ import hashlib
 import json
 import sqlite3
 import threading
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 
 import pytest
 
+import web_listening.artifact.model as artifact_model
 import web_listening.artifact.store as artifact_store_module
 from web_listening.artifact.identity import (
     artifact_id,
@@ -98,6 +99,141 @@ def make_symlink(link: Path, target: Path, *, directory: bool) -> None:
         link.symlink_to(target, target_is_directory=directory)
     except OSError as exc:
         pytest.skip(f"symlink creation unavailable: {exc}")
+
+
+def test_read_artifact_returns_minimal_verified_frozen_value(
+    store: ArtifactStore,
+) -> None:
+    """An Artifact ID loads only its verified content and delivery metadata."""
+    committed = store.commit_observation(proposal())
+
+    loaded = store.read_artifact(committed.artifact.artifact_id)
+
+    assert isinstance(loaded, artifact_model.StoredArtifact)
+    assert {field.name for field in fields(loaded)} == {
+        "artifact_id",
+        "blob_sha256",
+        "size_bytes",
+        "mime_type",
+        "content",
+    }
+    assert loaded.artifact_id == committed.artifact.artifact_id
+    assert loaded.blob_sha256 == committed.blob.sha256
+    assert loaded.size_bytes == committed.blob.size_bytes
+    assert loaded.mime_type == committed.artifact.mime_type
+    assert loaded.content == committed.content == HTML
+    assert not hasattr(loaded, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        loaded.content = b"changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("identifier", "expected_code"),
+    [
+        ("not-an-artifact-id", "artifact.id_invalid"),
+        ("artifact-" + "0" * 64, "artifact.not_found"),
+    ],
+)
+def test_read_artifact_rejects_invalid_and_unknown_ids(
+    store: ArtifactStore, identifier: str, expected_code: str
+) -> None:
+    """Malformed and absent identities fail with stable repository errors."""
+    with pytest.raises(ArtifactStoreError) as caught:
+        store.read_artifact(identifier)
+
+    assert caught.value.code == expected_code
+
+
+def test_read_artifact_rejects_closed_store(store: ArtifactStore) -> None:
+    """Artifact reads cannot use a closed repository connection."""
+    committed = store.commit_observation(proposal())
+    store.close()
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        store.read_artifact(committed.artifact.artifact_id)
+
+    assert caught.value.code == "repository.closed"
+
+
+def test_read_artifact_rejects_missing_blob_record(store: ArtifactStore) -> None:
+    """A dangling Artifact-to-Blob relationship is not reported as unknown."""
+    committed = store.commit_observation(proposal())
+    with sqlite3.connect(store.database_path) as connection:
+        connection.execute(
+            "DELETE FROM blobs WHERE sha256 = ?", (committed.blob.sha256,)
+        )
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        store.read_artifact(committed.artifact.artifact_id)
+
+    assert caught.value.code == "blob.not_found"
+
+
+def test_read_artifact_rejects_missing_blob_file(store: ArtifactStore) -> None:
+    """A missing CAS leaf cannot yield a StoredArtifact."""
+    committed = store.commit_observation(proposal())
+    target = store.root.joinpath(*committed.blob.relative_path.split("/"))
+    target.unlink()
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        store.read_artifact(committed.artifact.artifact_id)
+
+    assert caught.value.code == "blob.corrupt"
+
+
+def test_read_artifact_rejects_artifact_blob_relationship_tamper(
+    store: ArtifactStore,
+) -> None:
+    """The requested Artifact ID must still derive from its linked Blob."""
+    committed = store.commit_observation(proposal())
+    replacement = store.commit_observation(
+        proposal(CHANGED_HTML, observed_at="2026-08-25T12:02:00Z")
+    )
+    with sqlite3.connect(store.database_path) as connection:
+        connection.execute(
+            "UPDATE artifacts SET blob_sha256 = ? WHERE artifact_id = ?",
+            (replacement.blob.sha256, committed.artifact.artifact_id),
+        )
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        store.read_artifact(committed.artifact.artifact_id)
+
+    assert caught.value.code == "artifact.invalid"
+
+
+def test_read_artifact_rejects_unsafe_blob_path_without_reading_outside(
+    store: ArtifactStore,
+) -> None:
+    """A database path escape is rejected before an outside file is opened."""
+    committed = store.commit_observation(proposal())
+    outside = store.root.parent / "outside-victim"
+    outside.write_bytes(HTML)
+    with sqlite3.connect(store.database_path) as connection:
+        connection.execute(
+            "UPDATE blobs SET relative_path = ? WHERE sha256 = ?",
+            ("../outside-victim", committed.blob.sha256),
+        )
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        store.read_artifact(committed.artifact.artifact_id)
+
+    assert caught.value.code == "path.invalid"
+    assert outside.read_bytes() == HTML
+
+
+@pytest.mark.parametrize("tampered", [b"X" * len(HTML), HTML + b"extra"])
+def test_read_artifact_rejects_blob_hash_or_size_mismatch(
+    store: ArtifactStore, tampered: bytes
+) -> None:
+    """Stored metadata never authenticates replaced or resized bytes."""
+    committed = store.commit_observation(proposal())
+    target = store.root.joinpath(*committed.blob.relative_path.split("/"))
+    target.write_bytes(tampered)
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        store.read_artifact(committed.artifact.artifact_id)
+
+    assert caught.value.code == "blob.corrupt"
 
 
 def test_first_store_and_same_bytes_keep_one_blob_two_observations(

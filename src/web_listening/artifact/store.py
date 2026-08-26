@@ -36,6 +36,7 @@ from web_listening.artifact.model import (
     Blob,
     Lineage,
     Observation,
+    StoredArtifact,
     StoredObservation,
 )
 from web_listening.artifact.observation import (
@@ -202,6 +203,46 @@ class ArtifactStore:
                 blob.sha256,
                 blob.size_bytes,
                 corrupt_code="blob.corrupt",
+            )
+
+    def read_artifact(  # pylint: disable=redefined-outer-name
+        self, artifact_id: str
+    ) -> StoredArtifact:
+        """Read an Artifact only after revalidating its identity and Blob."""
+        identifier = validate_artifact_id(artifact_id)
+        with self._lock:
+            self._ensure_open()
+            self._check_repository_paths()
+            artifact_row = self._connection.execute(
+                "SELECT artifact_id, blob_sha256, mime_type, role"
+                " FROM artifacts WHERE artifact_id = ?",
+                (identifier,),
+            ).fetchone()
+            if artifact_row is None:
+                raise ArtifactStoreError("artifact.not_found")
+            artifact = self._artifact_from_row(artifact_row)
+
+            blob_row = self._connection.execute(
+                "SELECT sha256, size_bytes, relative_path FROM blobs WHERE sha256 = ?",
+                (artifact.blob_sha256,),
+            ).fetchone()
+            if blob_row is None:
+                raise ArtifactStoreError("blob.not_found")
+            blob = self._blob_from_row(blob_row)
+            if artifact.blob_sha256 != blob.sha256:
+                raise ArtifactStoreError("artifact.invalid")
+            content = self._read_verified_blob(
+                self._path_for(blob.relative_path),
+                blob.sha256,
+                blob.size_bytes,
+                corrupt_code="blob.corrupt",
+            )
+            return StoredArtifact(
+                artifact_id=artifact.artifact_id,
+                blob_sha256=blob.sha256,
+                size_bytes=blob.size_bytes,
+                mime_type=artifact.mime_type,
+                content=content,
             )
 
     def get_observation(self, observation_id: str) -> StoredObservation:
