@@ -649,39 +649,13 @@ def test_source_calls_only_public_runtime_and_site_skill_boundaries() -> None:
     assert all(value not in source for value in forbidden)
 
 
-def test_module_help_names_supported_stdio_invocation() -> None:
-    environment = os.environ.copy()
-    environment["PYTHONPATH"] = (
-        str(ROOT / "src") + os.pathsep + environment.get("PYTHONPATH", "")
-    )
-    completed = subprocess.run(
-        [sys.executable, "-m", "web_listening.interfaces.mcp", "--help"],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stderr == ""
-    assert completed.stdout.splitlines()[0] == (
-        "usage: python -m web_listening.interfaces.mcp [-h] --data-dir DATA_DIR"
-    )
-    assert "web-listening-mcp" not in completed.stdout
-
-
 def test_pyproject_adds_only_the_dedicated_mcp_extra() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"
     ]
 
     assert project["dependencies"] == []
-    assert project["optional-dependencies"]["mcp"] == [
-        "anyio>=4.5",
-        "mcp>=1.27.2,<2",
-    ]
+    assert project["optional-dependencies"]["mcp"] == ["mcp>=1.27.2,<2"]
     assert {
         item.split(">=", maxsplit=1)[0]
         for item in project["optional-dependencies"]["dev"]

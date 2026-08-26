@@ -18,7 +18,6 @@ rest = [
     "fastapi>=0.115",
 ]
 mcp = [
-    "anyio>=4.5",
     "mcp>=1.27.2,<2",
 ]
 dev = [
