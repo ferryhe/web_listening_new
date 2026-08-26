@@ -1,6 +1,7 @@
 """Offline end-to-end tests for the minimal Runtime supporting layer."""
 
-# pylint: disable=missing-function-docstring
+# pylint: disable=missing-class-docstring,missing-function-docstring
+# pylint: disable=too-few-public-methods
 
 from __future__ import annotations
 
@@ -13,11 +14,15 @@ import pytest
 
 import web_listening.runtime.service as service_module
 import web_listening.runtime.workflow as workflow_module
-from web_listening.artifact.model import ArtifactStoreError, Observation
+from web_listening.artifact.model import (
+    ArtifactStoreError,
+    Observation,
+    StoredArtifact,
+)
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import Budgets, ContentType, Request, Scope
 from web_listening.result.errors import ResultValidationError
-from web_listening.runtime.jobs import JobRepository, JobStatus
+from web_listening.runtime.jobs import JobRepository, JobStateError, JobStatus
 from web_listening.runtime.service import RuntimeService
 from web_listening.site_skill.model import SuccessChecks, ToolReference
 from web_listening.site_skill.update import create_candidate
@@ -700,3 +705,170 @@ def test_runtime_source_is_one_ordered_orchestrator_without_new_authority() -> N
         "._commit_checkpoint",
     )
     assert all(token not in source for token in forbidden)
+
+
+def test_open_run_close_reopen_reads_job_and_artifact_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transports: list[_Transport] = []
+
+    def transport_factory() -> _Transport:
+        transport = _Transport(
+            _Response(
+                200,
+                BODY,
+                Content_Type="text/html",
+                Content_Length=str(len(BODY)),
+            )
+        )
+        transports.append(transport)
+        return transport
+
+    monkeypatch.setattr(service_module, "PinnedHttpTransport", transport_factory)
+    monkeypatch.setattr(
+        service_module,
+        "WebHttpAcquisitionTool",
+        lambda factory: WebHttpAcquisitionTool(factory, resolver=_resolver),
+    )
+    data_dir = tmp_path / "runtime-data"
+    first = RuntimeService.open(data_dir)
+    job = first.run(_request(_skill()))
+    assert job.result is not None
+    artifact_id = job.result.artifacts[0].artifact_id
+    first.close()
+    requests_after_run = tuple(transports[0].requests)
+
+    reopened = RuntimeService.open(data_dir)
+    restored_job = reopened.get_job(job.job_id)
+    restored_artifact = reopened.read_artifact(artifact_id)
+    reopened.close()
+
+    assert restored_job == job
+    assert restored_artifact == StoredArtifact(
+        artifact_id=artifact_id,
+        blob_sha256=hashlib.sha256(BODY).hexdigest(),
+        size_bytes=len(BODY),
+        mime_type="text/html",
+        content=BODY,
+    )
+    assert len(transports) == 1
+    assert tuple(transports[0].requests) == requests_after_run
+    files = {
+        path.relative_to(data_dir).as_posix()
+        for path in data_dir.rglob("*")
+        if path.is_file()
+    }
+    assert "jobs.sqlite3" in files
+    assert "artifacts/artifact.sqlite3" in files
+    assert len(files) == 3
+    assert len(files - {"jobs.sqlite3", "artifacts/artifact.sqlite3"}) == 1
+    assert next(
+        iter(files - {"jobs.sqlite3", "artifacts/artifact.sqlite3"})
+    ).startswith("artifacts/blobs/")
+
+
+def test_get_job_and_read_artifact_are_identity_preserving_delegations() -> None:
+    expected_job = object()
+    expected_artifact = object()
+
+    class Jobs:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def get(self, job_id: str) -> object:
+            self.calls.append(job_id)
+            return expected_job
+
+    class Store:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def read_artifact(self, artifact_id: str) -> object:
+            self.calls.append(artifact_id)
+            return expected_artifact
+
+    jobs = Jobs()
+    store = Store()
+    service = RuntimeService(object(), store, jobs)  # type: ignore[arg-type]
+
+    assert service.get_job("job-one") is expected_job
+    assert service.read_artifact("artifact-one") is expected_artifact
+    assert jobs.calls == ["job-one"]
+    assert store.calls == ["artifact-one"]
+
+
+def test_close_is_idempotent_guards_operations_and_does_not_close_injections(
+    tmp_path: Path,
+) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+
+    service.close()
+    service.close()
+
+    for operation in (
+        lambda: service.run(_request(_skill())),
+        lambda: service.get_job("job-one"),
+        lambda: service.read_artifact("artifact-one"),
+    ):
+        with pytest.raises(RuntimeError, match="^runtime.closed$"):
+            operation()
+    assert jobs.submit("job-after-close", at=NOW).status is JobStatus.SUBMITTED
+    with pytest.raises(ArtifactStoreError) as missing:
+        store.read_artifact("artifact-" + "0" * 64)
+    assert missing.value.code == "artifact.not_found"
+    store.close()
+
+
+def test_open_failure_closes_every_partially_created_resource(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed: list[str] = []
+
+    class Tool:
+        manifest = WEB_HTTP_MANIFEST
+
+        def acquire(self, _tool_input: AcquisitionInput) -> AcquisitionFailure:
+            return AcquisitionFailure(
+                WEB_HTTP_MANIFEST.tool_id,
+                WEB_HTTP_MANIFEST.version,
+                "test.unused",
+            )
+
+        def close(self) -> None:
+            closed.append("tool")
+
+    class Store:
+        def __init__(self, _root: Path) -> None:
+            pass
+
+        def close(self) -> None:
+            closed.append("store")
+
+    def fail_jobs(_path: Path) -> JobRepository:
+        raise OSError("injected open failure")
+
+    monkeypatch.setattr(service_module, "WebHttpAcquisitionTool", lambda *_: Tool())
+    monkeypatch.setattr(service_module, "ArtifactStore", Store)
+    monkeypatch.setattr(service_module, "JobRepository", fail_jobs)
+
+    with pytest.raises(OSError, match="injected open failure"):
+        RuntimeService.open(tmp_path / "runtime-data")
+
+    assert closed == ["store", "tool"]
+
+
+def test_open_owned_resources_are_closed_once(tmp_path: Path) -> None:
+    service = RuntimeService.open(tmp_path / "runtime-data")
+    store = service._artifact_store  # pylint: disable=protected-access
+    jobs = service._jobs  # pylint: disable=protected-access
+
+    service.close()
+    service.close()
+
+    with pytest.raises(ArtifactStoreError) as store_error:
+        store.read_artifact("artifact-" + "0" * 64)
+    with pytest.raises(JobStateError) as jobs_error:
+        jobs.get("job-one")
+    assert store_error.value.code == "repository.closed"
+    assert jobs_error.value.code == "repository.closed"

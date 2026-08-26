@@ -7,12 +7,21 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 
+from web_listening.artifact.model import StoredArtifact
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import Request, RequestValidationError
 from web_listening.runtime.jobs import Job, JobRepository, JobStatus
 from web_listening.runtime.workflow import run_single_target
+from web_listening.tool_registry.acquisition.builtins.web_http import (
+    WEB_HTTP_MANIFEST,
+    WebHttpAcquisitionTool,
+)
 from web_listening.tool_registry.registry import Registry
+from web_listening.tool_registry.runners.in_process import PinnedHttpTransport
+
+_OwnedResource = WebHttpAcquisitionTool | ArtifactStore | JobRepository
 
 
 class RuntimeService:
@@ -32,9 +41,34 @@ class RuntimeService:
         self._jobs = jobs
         self._clock = clock or _utc_now
         self._job_id_factory = job_id_factory or _job_id
+        self._closed = False
+        self._owned_resources: tuple[_OwnedResource, ...] = ()
+
+    @classmethod
+    def open(cls, data_dir: str | Path) -> RuntimeService:
+        """Open the one current built-in Runtime composition in a data directory."""
+        root = Path(data_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        resources: list[_OwnedResource] = []
+        try:
+            tool = WebHttpAcquisitionTool(PinnedHttpTransport)
+            resources.append(tool)
+            registry = Registry()
+            registry.register(WEB_HTTP_MANIFEST, tool)
+            artifact_store = ArtifactStore(root / "artifacts")
+            resources.append(artifact_store)
+            jobs = JobRepository(root / "jobs.sqlite3")
+            resources.append(jobs)
+            service = cls(registry, artifact_store, jobs)
+            service._owned_resources = tuple(resources)
+            return service
+        except BaseException:
+            _close_resources(resources)
+            raise
 
     def run(self, request: Request) -> Job:
         """Record submitted/running/terminal around the one-target workflow."""
+        self._ensure_open()
         job_id = self._job_id_factory()
         self._jobs.submit(job_id, at=self._clock())
         self._jobs.transition(job_id, JobStatus.RUNNING, at=self._clock())
@@ -73,6 +107,37 @@ class RuntimeService:
             result=result,
             failure_code=failure_code,
         )
+
+    def get_job(self, job_id: str) -> Job:
+        """Return one Job without adding Runtime-owned interpretation."""
+        self._ensure_open()
+        return self._jobs.get(job_id)
+
+    def read_artifact(self, artifact_id: str) -> StoredArtifact:
+        """Return one verified Artifact through the Store's public boundary."""
+        self._ensure_open()
+        return self._artifact_store.read_artifact(artifact_id)
+
+    def close(self) -> None:
+        """Close only resources created by open; repeated closes are harmless."""
+        if self._closed:
+            return
+        self._closed = True
+        resources = self._owned_resources
+        self._owned_resources = ()
+        _close_resources(list(resources))
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("runtime.closed")
+
+
+def _close_resources(resources: list[_OwnedResource]) -> None:
+    for resource in reversed(resources):
+        try:
+            resource.close()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
 
 
 def _utc_now() -> str:
