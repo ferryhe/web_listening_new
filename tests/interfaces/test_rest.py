@@ -12,6 +12,7 @@ import base64
 import json
 import tomllib
 from pathlib import Path
+from threading import get_ident
 
 import pytest
 
@@ -96,10 +97,12 @@ class FakeRuntime:
         self.get_error: Exception | None = None
         self.read_error: Exception | None = None
         self.requests: list[Request] = []
+        self.run_thread_ids: list[int] = []
         self.job_ids: list[str] = []
         self.artifact_ids: list[str] = []
 
     def run(self, request: Request) -> Job:
+        self.run_thread_ids.append(get_ident())
         self.requests.append(request)
         if self.run_error is not None:
             raise self.run_error
@@ -154,6 +157,24 @@ def test_acquire_maps_a_strict_request_to_runtime_and_returns_exact_result_schem
     assert isinstance(runtime.requests[0], Request)
     assert response.json() == cli._job_payload(runtime.run_job)
     assert Result.from_dict(response.json()["result"]) == runtime.run_job.result
+
+
+def test_acquire_offloads_runtime_run_from_the_handler_thread(
+    runtime: FakeRuntime,
+) -> None:
+    provider_thread_ids: list[int] = []
+
+    def provider() -> FakeRuntime:
+        provider_thread_ids.append(get_ident())
+        return runtime
+
+    response = TestClient(rest.create_app(provider)).post(
+        "/v1/acquisitions", json=_request_payload()
+    )
+
+    assert response.status_code == 201
+    assert len(provider_thread_ids) == len(runtime.run_thread_ids) == 1
+    assert runtime.run_thread_ids[0] != provider_thread_ids[0]
 
 
 def test_acquire_validates_embedded_site_skill_before_runtime(
@@ -435,7 +456,7 @@ def test_rest_source_has_only_interface_dto_and_public_runtime_authority() -> No
 
     assert "RuntimeService" in source
     assert "runtime_provider" in source
-    assert "runtime.run(" in source
+    assert "run_in_threadpool(runtime.run, request)" in source
     assert "runtime.get_job(" in source
     assert "runtime.read_artifact(" in source
     assert "RuntimeService.open" not in source

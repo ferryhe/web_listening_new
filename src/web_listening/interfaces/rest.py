@@ -10,6 +10,7 @@ from dataclasses import replace
 
 from fastapi import FastAPI  # pylint: disable=import-error
 from fastapi import Request as HttpRequest  # pylint: disable=import-error
+from fastapi.concurrency import run_in_threadpool  # pylint: disable=import-error
 from fastapi.responses import JSONResponse  # pylint: disable=import-error
 
 from web_listening.artifact.model import ArtifactStoreError, StoredArtifact
@@ -89,7 +90,7 @@ def create_app(runtime_provider: RuntimeProvider) -> FastAPI:
             return _error_response(422, exc.code, "Request is invalid.")
         try:
             runtime = runtime_provider()
-            job = runtime.run(request)
+            job = await run_in_threadpool(runtime.run, request)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             return _runtime_error_response(exc)
         status_code = {
