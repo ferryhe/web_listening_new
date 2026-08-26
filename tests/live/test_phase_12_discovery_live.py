@@ -451,7 +451,7 @@ def test_other_discovery_failure_is_not_empty() -> None:
     result = DiscoveryFailure(
         RSS_MANIFEST.tool_id,
         RSS_MANIFEST.version,
-        "discovery.mime_not_supported",
+        "discovery.mime_unsupported",
     )
 
     with pytest.raises(AssertionError):

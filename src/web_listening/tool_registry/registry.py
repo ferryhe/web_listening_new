@@ -329,8 +329,6 @@ def _validate_output(  # pylint: disable=too-many-branches
     if output.tool_id != manifest.tool_id or output.tool_version != manifest.version:
         raise ToolRegistryError("registry.output_identity_mismatch")
     if isinstance(output, DiscoveryOutput):
-        assert output.discovered_from is not None
-        assert isinstance(tool_input, DiscoveryInput)
         if any(source != tool_input.source_url for source in output.discovered_from):
             raise ToolRegistryError("registry.output_invalid")
         output_bytes = sum(
