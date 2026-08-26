@@ -698,13 +698,13 @@ def test_runtime_source_is_one_ordered_orchestrator_without_new_authority() -> N
         "import socket",
         "playwright",
         "subprocess",
-        "discoveryinput",
         "transforminput",
         "fallback",
         "._connection",
         "._commit_checkpoint",
     )
     assert all(token not in source for token in forbidden)
+    assert "discoveryinput" not in workflow.lower()
 
 
 def test_open_run_close_reopen_reads_job_and_artifact_without_network(

@@ -126,6 +126,7 @@ class _DiscoveryFake:
             tool_id=self.manifest.tool_id,
             tool_version=self.manifest.version,
             candidates=tool_input.scope.seeds,
+            discovered_from=(tool_input.source_url,) * len(tool_input.scope.seeds),
         )
 
 
@@ -382,6 +383,7 @@ def test_slotted_tool_manifest_registers_and_invokes() -> None:
                 self.manifest.tool_id,
                 self.manifest.version,
                 tool_input.scope.seeds,
+                (tool_input.source_url,) * len(tool_input.scope.seeds),
             )
 
     manifest = _manifest("discovery.slotted")
@@ -392,7 +394,10 @@ def test_slotted_tool_manifest_registers_and_invokes() -> None:
     output = registry.invoke(manifest.tool_id, DiscoveryInput(_request().scope))
 
     assert output == DiscoveryOutput(
-        manifest.tool_id, manifest.version, _request().scope.seeds
+        manifest.tool_id,
+        manifest.version,
+        _request().scope.seeds,
+        _request().scope.seeds,
     )
 
 
@@ -429,7 +434,10 @@ def test_invoke_statically_retrieves_manifest_after_registration() -> None:
 
         def discover(self, tool_input: DiscoveryInput) -> object:
             return DiscoveryOutput(
-                safe_manifest.tool_id, safe_manifest.version, tool_input.scope.seeds
+                safe_manifest.tool_id,
+                safe_manifest.version,
+                tool_input.scope.seeds,
+                (tool_input.source_url,) * len(tool_input.scope.seeds),
             )
 
     tool = MutableClassManifestFake()
@@ -666,16 +674,94 @@ def test_invoke_accepts_conforming_fake_and_rejects_wrong_input() -> None:
     )
 
 
+def test_discovery_invoke_enforces_source_input_and_provenance_output_limits() -> None:
+    source = b"12345"
+    candidate = "https://example.test/a"
+    discovered_from = "https://example.test/feed.xml"
+    input_value = DiscoveryInput(
+        _request().scope,
+        discovered_from,
+        source,
+        "application/xml",
+    )
+    too_small_input = _manifest(
+        "discovery.input-bounded", limits=ToolLimits(10, len(source) - 1, 4096)
+    )
+    registry = Registry()
+    registry.register(too_small_input, _DiscoveryFake(too_small_input))
+    assert _code(lambda: registry.invoke(too_small_input.tool_id, input_value)) == (
+        "registry.ineligible"
+    )
+
+    output_bytes = len(candidate.encode()) + len(discovered_from.encode())
+    too_small_output = _manifest(
+        "discovery.output-bounded", limits=ToolLimits(10, 4096, output_bytes - 1)
+    )
+    registry = Registry()
+    registry.register(
+        too_small_output,
+        _DiscoveryFake(
+            too_small_output,
+            DiscoveryOutput(
+                too_small_output.tool_id,
+                too_small_output.version,
+                (candidate,),
+                (discovered_from,),
+            ),
+        ),
+    )
+    assert _code(lambda: registry.invoke(too_small_output.tool_id, input_value)) == (
+        "registry.output_limit"
+    )
+
+
+def test_discovery_invoke_rejects_provenance_not_bound_to_input_source() -> None:
+    manifest = _manifest("discovery.provenance-forged")
+    registry = Registry()
+    registry.register(
+        manifest,
+        _DiscoveryFake(
+            manifest,
+            DiscoveryOutput(
+                manifest.tool_id,
+                manifest.version,
+                ("https://example.test/a",),
+                ("https://example.test/other-feed.xml",),
+            ),
+        ),
+    )
+    tool_input = DiscoveryInput(
+        _request().scope,
+        "https://example.test/feed.xml",
+        b"<feed/>",
+        "application/xml",
+    )
+
+    assert _code(lambda: registry.invoke(manifest.tool_id, tool_input)) == (
+        "registry.output_invalid"
+    )
+
+
 @pytest.mark.parametrize(
     "output, code",
     [
         ({"candidates": ["https://example.test/"]}, "registry.output_invalid"),
         (
-            DiscoveryOutput("discovery.other", "1.2.3", ("https://example.test/",)),
+            DiscoveryOutput(
+                "discovery.other",
+                "1.2.3",
+                ("https://example.test/",),
+                ("https://example.test/",),
+            ),
             "registry.output_identity_mismatch",
         ),
         (
-            DiscoveryOutput("discovery.soa", "2.0.0", ("https://example.test/",)),
+            DiscoveryOutput(
+                "discovery.soa",
+                "2.0.0",
+                ("https://example.test/",),
+                ("https://example.test/",),
+            ),
             "registry.output_identity_mismatch",
         ),
     ],
@@ -721,7 +807,10 @@ def test_discovery_output_limit_accepts_exact_aggregate_utf8_bytes() -> None:
         "https://example.test/%C3%A9",
         "https://example.test/%E4%BA%8C",
     )
-    aggregate_bytes = sum(len(value.encode("utf-8")) for value in candidates)
+    sources = ("https://example.test/",) * len(candidates)
+    aggregate_bytes = sum(
+        len(value.encode("utf-8")) for value in (*candidates, *sources)
+    )
     manifest = _manifest(
         "discovery.bounded",
         limits=ToolLimits(10, 4096, aggregate_bytes),
@@ -731,7 +820,7 @@ def test_discovery_output_limit_accepts_exact_aggregate_utf8_bytes() -> None:
         manifest,
         _DiscoveryFake(
             manifest,
-            DiscoveryOutput(manifest.tool_id, manifest.version, candidates),
+            DiscoveryOutput(manifest.tool_id, manifest.version, candidates, sources),
         ),
     )
 
@@ -750,7 +839,10 @@ def test_discovery_output_limit_accepts_exact_aggregate_utf8_bytes() -> None:
 def test_discovery_output_limit_rejects_aggregate_one_byte_over(
     candidates: tuple[str, ...],
 ) -> None:
-    aggregate_bytes = sum(len(value.encode("utf-8")) for value in candidates)
+    sources = ("https://example.test/",) * len(candidates)
+    aggregate_bytes = sum(
+        len(value.encode("utf-8")) for value in (*candidates, *sources)
+    )
     manifest = _manifest(
         "discovery.oversize",
         limits=ToolLimits(10, 4096, aggregate_bytes - 1),
@@ -760,7 +852,7 @@ def test_discovery_output_limit_rejects_aggregate_one_byte_over(
         manifest,
         _DiscoveryFake(
             manifest,
-            DiscoveryOutput(manifest.tool_id, manifest.version, candidates),
+            DiscoveryOutput(manifest.tool_id, manifest.version, candidates, sources),
         ),
     )
 

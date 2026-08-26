@@ -1,10 +1,12 @@
 """One governed single-target workflow connecting existing public modules."""
 
 # pylint: disable=duplicate-code,too-many-locals,too-many-return-statements
+# pylint: disable=unidiomatic-typecheck
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from web_listening.artifact.model import ArtifactRole, ArtifactStoreError
 from web_listening.artifact.observation import ObservationProposal
@@ -29,21 +31,38 @@ from web_listening.tool_registry.protocols.acquisition import (
     AcquisitionInput,
     AcquisitionOutput,
 )
+from web_listening.tool_registry.protocols.discovery import (
+    DiscoveryFailure,
+    DiscoveryInput,
+    DiscoveryOutput,
+)
 from web_listening.tool_registry.registry import Registry
 
+_MAX_DISCOVERY_CANDIDATES = 100
 
-def run_single_target(
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredCandidateResult:
+    """One deterministically paired candidate, provenance URL, and Result."""
+
+    candidate_url: str
+    discovered_from: str
+    result: Result
+
+
+def run_single_target(  # pylint: disable=too-many-arguments
     request: Request,
     registry: Registry,
     artifact_store: ArtifactStore,
     *,
     run_id: str,
     clock: Callable[[], str],
+    target_url: str | None = None,
 ) -> Result:
     """Validate, resolve, invoke once, commit once, and assemble one Result."""
     request = validate_request(request)
-    requested_url = request.scope.seeds[0]
-    if len(request.scope.seeds) != 1:
+    requested_url = target_url or request.scope.seeds[0]
+    if target_url is None and len(request.scope.seeds) != 1:
         return _failure_result(
             status=ResultStatus.REJECTED,
             run_id=run_id,
@@ -83,7 +102,8 @@ def run_single_target(
             site_skill=site_skill,
         )
     effective_request = resolution.request
-    requested_url = effective_request.scope.seeds[0]
+    if target_url is None:
+        requested_url = effective_request.scope.seeds[0]
     try:
         tool_input = AcquisitionInput(effective_request, requested_url)
     except ToolRegistryError as exc:
@@ -100,6 +120,7 @@ def run_single_target(
             site_skill=site_skill,
         )
 
+    requested_url = tool_input.target_url
     started_at = clock()
     try:
         acquisition = registry.invoke(resolution.skill.tool.tool_id, tool_input)
@@ -230,6 +251,82 @@ def run_single_target(
         attempts=attempts,
         errors=(),
         usage=usage,
+    )
+
+
+def discover_candidates(  # pylint: disable=too-many-arguments
+    request: Request,
+    registry: Registry,
+    *,
+    discovery_tool_id: str,
+    source_url: str,
+    source_body: bytes,
+    source_mime_type: str,
+) -> DiscoveryOutput | DiscoveryFailure:
+    """Invoke one Discovery Protocol tool on an already-governed source."""
+    request = validate_request(request)
+    result = registry.invoke(
+        discovery_tool_id,
+        DiscoveryInput(
+            request.scope,
+            source_url,
+            source_body,
+            source_mime_type,
+        ),
+    )
+    assert isinstance(result, (DiscoveryOutput, DiscoveryFailure))
+    return result
+
+
+def acquire_discovered_candidates(  # pylint: disable=too-many-arguments
+    request: Request,
+    registry: Registry,
+    artifact_store: ArtifactStore,
+    discovery: DiscoveryOutput,
+    *,
+    max_candidates: int,
+    run_id: str,
+    clock: Callable[[], str],
+) -> tuple[DiscoveredCandidateResult, ...]:
+    """Bound candidates and return each through the governed acquisition path."""
+    request = validate_request(request)
+    if (
+        type(max_candidates) is not int
+        or not 0 < max_candidates <= _MAX_DISCOVERY_CANDIDATES
+    ):
+        raise ToolRegistryError("runtime.discovery_limit_invalid")
+    discovery = DiscoveryOutput(
+        discovery.tool_id,
+        discovery.tool_version,
+        discovery.candidates,
+        discovery.discovered_from,
+    )
+    assert discovery.discovered_from is not None
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for candidate, source in sorted(
+        zip(discovery.candidates, discovery.discovered_from)
+    ):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        candidates.append((candidate, source))
+        if len(candidates) == max_candidates:
+            break
+    return tuple(
+        DiscoveredCandidateResult(
+            candidate,
+            source,
+            run_single_target(
+                request,
+                registry,
+                artifact_store,
+                run_id=f"{run_id}-{index + 1}",
+                clock=clock,
+                target_url=candidate,
+            ),
+        )
+        for index, (candidate, source) in enumerate(candidates)
     )
 
 
@@ -371,4 +468,9 @@ def _ineligible_code(reasons: tuple[str, ...]) -> str:
     return "runtime.site_skill_ineligible"
 
 
-__all__ = ["run_single_target"]
+__all__ = [
+    "DiscoveredCandidateResult",
+    "acquire_discovered_candidates",
+    "discover_candidates",
+    "run_single_target",
+]

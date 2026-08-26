@@ -1,6 +1,6 @@
 """Pure contract for URL discovery tools."""
 
-# pylint: disable=duplicate-code
+# pylint: disable=duplicate-code,unidiomatic-typecheck
 
 from __future__ import annotations
 
@@ -9,8 +9,14 @@ from ipaddress import ip_address
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
+from web_listening.artifact.identity import validate_mime_type
+from web_listening.artifact.model import ArtifactStoreError
 from web_listening.request.model import RequestValidationError, Scope
-from web_listening.request.scope import canonicalize_url, validate_scope
+from web_listening.request.scope import (
+    canonicalize_url,
+    path_is_included,
+    validate_scope,
+)
 from web_listening.tool_registry.manifest import (
     ToolManifest,
     ToolRegistryError,
@@ -53,24 +59,42 @@ def _contained_ip_address(value: str):
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryInput:
-    """The governed scope presented to one discovery tool."""
+    """One inert, governed source snapshot presented to a discovery tool."""
 
     scope: Scope
+    source_url: str | None = None
+    source_body: bytes = b""
+    source_mime_type: str = "application/octet-stream"
 
     def __post_init__(self) -> None:
         canonical, error = _contained_scope(self.scope)
         if error is not None:
             raise ToolRegistryError(error)
+        source_url = validate_url(self.source_url or canonical.seeds[0])
+        parsed = urlsplit(source_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if origin not in canonical.allowed_origins:
+            raise ToolRegistryError("scope.origin_not_allowed")
+        if not path_is_included(parsed.path, canonical.include_paths):
+            raise ToolRegistryError("scope.path_not_included")
+        if type(self.source_body) is not bytes:
+            raise ToolRegistryError("protocol.body_invalid")
+        mime_type = _contained_mime_type(self.source_mime_type)
+        if mime_type is None:
+            raise ToolRegistryError("protocol.mime_invalid")
         object.__setattr__(self, "scope", canonical)
+        object.__setattr__(self, "source_url", source_url)
+        object.__setattr__(self, "source_mime_type", mime_type)
 
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryOutput:
-    """Ordered candidate URLs returned by a successful discovery tool."""
+    """Ordered candidate URLs and their one-to-one discovery provenance."""
 
     tool_id: str
     tool_version: str
     candidates: tuple[str, ...]
+    discovered_from: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         validate_tool_id(self.tool_id)
@@ -78,10 +102,19 @@ class DiscoveryOutput:
         # pylint: disable-next=unidiomatic-typecheck
         if type(self.candidates) is not tuple or not self.candidates:
             raise ToolRegistryError("protocol.output_invalid")
+        candidates = tuple(validate_url(value) for value in self.candidates)
+        discovered_from = self.discovered_from
+        if discovered_from is None:
+            raise ToolRegistryError("protocol.output_invalid")
+        if type(discovered_from) is not tuple or len(discovered_from) != len(
+            candidates
+        ):
+            raise ToolRegistryError("protocol.output_invalid")
+        object.__setattr__(self, "candidates", candidates)
         object.__setattr__(
             self,
-            "candidates",
-            tuple(validate_url(value) for value in self.candidates),
+            "discovered_from",
+            tuple(validate_url(value) for value in discovered_from),
         )
 
 
@@ -118,3 +151,14 @@ def _contained_scope(value: object) -> tuple[Scope | None, str | None]:
         return None, exc.code
     except Exception:  # pylint: disable=broad-exception-caught
         return None, "protocol.input_invalid"
+
+
+def _contained_mime_type(value: object) -> str | None:
+    try:
+        if type(value) is not str:
+            return None
+        return validate_mime_type(value)
+    except ArtifactStoreError:
+        return None
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
