@@ -569,7 +569,7 @@ async def _run_stdio(server: Server) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="web-listening-mcp",
+        prog="python -m web_listening.interfaces.mcp",
         description="Serve the governed Web Listening interface over stdio.",
     )
     parser.add_argument("--data-dir", required=True, type=Path)
