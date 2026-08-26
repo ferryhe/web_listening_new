@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -121,7 +122,7 @@ class FakeRuntime:
         content = b"\x00phase-9\xff"
         return StoredArtifact(
             artifact_id=artifact_id,
-            blob_sha256="sha256:" + "a" * 64,
+            blob_sha256="a" * 64,
             size_bytes=len(content),
             mime_type="application/octet-stream",
             content=content,
@@ -378,7 +379,7 @@ def test_read_artifact_emits_lossless_json_bytes_contract(
     assert FakeRuntime.instances[0].closed is True
     assert payload == {
         "artifact_id": "artifact-one",
-        "blob_sha256": "sha256:" + "a" * 64,
+        "blob_sha256": "a" * 64,
         "size_bytes": 9,
         "mime_type": "application/octet-stream",
         "content_encoding": "base64",
@@ -563,7 +564,8 @@ def test_installed_console_script_runs_the_real_cli(tmp_path: Path) -> None:
 
 
 def test_pyproject_declares_only_the_requested_console_script() -> None:
-    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]
 
-    assert "[project.scripts]" in text
-    assert 'web-listening = "web_listening.interfaces.cli:main"' in text
+    assert project["scripts"] == {"web-listening": "web_listening.interfaces.cli:main"}

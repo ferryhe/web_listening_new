@@ -142,8 +142,12 @@ def _sanitize_artifact_stdout(stdout_json: object) -> dict[str, object]:
     projection["content_redacted"] = True
     content = stdout_json.get("content")
     if isinstance(content, str):
-        decoded = base64.b64decode(content, validate=True)
-        projection["content_sha256"] = hashlib.sha256(decoded).hexdigest()
+        try:
+            decoded = base64.b64decode(content, validate=True)
+        except ValueError:
+            pass
+        else:
+            projection["content_sha256"] = hashlib.sha256(decoded).hexdigest()
     return projection
 
 
@@ -212,6 +216,25 @@ def test_artifact_evidence_redacts_content_but_retains_safe_hash_metadata() -> N
     assert encoded not in serialized
     assert content.decode("ascii") not in serialized
     assert "unexpected" not in serialized
+
+
+def test_artifact_evidence_redacts_malformed_content_without_hashing() -> None:
+    evidence = _sanitize_artifact_stdout(
+        {
+            "artifact_id": "artifact-malformed",
+            "content_encoding": "base64",
+            "content": "not base64!",
+        }
+    )
+
+    assert evidence == {
+        "artifact_id": "artifact-malformed",
+        "blob_sha256": None,
+        "size_bytes": None,
+        "mime_type": None,
+        "content_encoding": "base64",
+        "content_redacted": True,
+    }
 
 
 def test_phase_09_snapshot_reuses_the_phase_8b_request_and_ipcc_projection() -> None:
