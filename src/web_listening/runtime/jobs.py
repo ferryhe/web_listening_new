@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import threading
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -91,12 +92,18 @@ class JobRepository:
         if database_path is None:
             return
         path = Path(os.path.abspath(os.fspath(database_path)))
+        _reject_symlink_chain(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        _reject_symlink_chain(path)
+        _require_directory(path.parent)
+        _require_regular_file(path, missing_ok=True)
         connection = sqlite3.connect(
             path, isolation_level=None, check_same_thread=False
         )
         connection.row_factory = sqlite3.Row
         try:
+            _reject_symlink_chain(path)
+            _require_regular_file(path, missing_ok=False)
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA journal_mode = DELETE")
             connection.execute("PRAGMA synchronous = FULL")
@@ -332,6 +339,55 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             PRIMARY KEY (job_id, sequence)
         );
         """)
+
+
+def _reject_symlink_chain(path: Path) -> None:
+    for candidate in (*reversed(path.parents), path):
+        try:
+            candidate_stat = os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        if _is_link_like(candidate, candidate_stat):
+            raise JobStateError("path.symlink")
+
+
+def _require_directory(path: Path) -> None:
+    try:
+        path_stat = os.lstat(path)
+    except FileNotFoundError as exc:
+        raise JobStateError("path.missing") from exc
+    if _is_link_like(path, path_stat):
+        raise JobStateError("path.symlink")
+    if not stat.S_ISDIR(path_stat.st_mode):
+        raise JobStateError("path.not_directory")
+
+
+def _require_regular_file(path: Path, *, missing_ok: bool) -> None:
+    try:
+        path_stat = os.lstat(path)
+    except FileNotFoundError as exc:
+        if missing_ok:
+            return
+        raise JobStateError("path.missing") from exc
+    if _is_link_like(path, path_stat):
+        raise JobStateError("path.symlink")
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise JobStateError("path.not_file")
+
+
+def _is_link_like(path: Path, path_stat: os.stat_result) -> bool:
+    """Identify symlinks and Windows junction/reparse traversal points."""
+    link_like = stat.S_ISLNK(path_stat.st_mode)
+    is_junction = getattr(path, "is_junction", None)
+    try:
+        link_like = link_like or bool(is_junction and is_junction())
+    except OSError:
+        link_like = True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    file_attributes = getattr(path_stat, "st_file_attributes", 0)
+    return link_like or bool(
+        (file_attributes & reparse_flag) or getattr(path_stat, "st_reparse_tag", 0)
+    )
 
 
 def _transition_snapshot(  # pylint: disable=too-many-branches

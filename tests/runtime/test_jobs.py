@@ -1,6 +1,6 @@
 """Minimal Runtime Job lifecycle tests."""
 
-# pylint: disable=missing-function-docstring
+# pylint: disable=missing-function-docstring,mixed-line-endings
 
 from __future__ import annotations
 
@@ -31,6 +31,14 @@ _RESULT_FIXTURES = {
     JobStatus.REJECTED: "rejected-boundary.v1.json",
     JobStatus.FAILED: "failed.v1.json",
 }
+
+
+def _make_symlink(link: Path, target: Path, *, directory: bool) -> None:
+    """Create a test symlink or skip where the host denies that capability."""
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
 
 
 def _result(status: JobStatus) -> Result:
@@ -553,3 +561,105 @@ def test_sqlite_repository_close_is_idempotent_and_rejects_future_operations(
         repository.get("job-one")
 
     assert error.value.code == "repository.closed"
+
+
+def test_sqlite_database_symlink_is_rejected_without_mutating_target(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "runtime-data"
+    data_dir.mkdir()
+    victim = tmp_path / "outside.sqlite3"
+    original = b"outside content must remain unchanged"
+    victim.write_bytes(original)
+    _make_symlink(data_dir / "jobs.sqlite3", victim, directory=False)
+
+    with pytest.raises(JobStateError) as error:
+        JobRepository(data_dir / "jobs.sqlite3")
+
+    assert error.value.code == "path.symlink"
+    assert victim.read_bytes() == original
+
+
+def test_sqlite_parent_symlink_is_rejected_without_outside_mutation(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "runtime-data"
+    _make_symlink(link, outside, directory=True)
+
+    with pytest.raises(JobStateError) as error:
+        JobRepository(link / "jobs.sqlite3")
+
+    assert error.value.code == "path.symlink"
+    assert not list(outside.iterdir())
+
+
+def test_sqlite_parent_junction_is_rejected_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir = tmp_path / "runtime-data"
+    data_dir.mkdir()
+    sentinel = data_dir / "sentinel"
+    sentinel.write_bytes(b"preserve")
+    monkeypatch.setattr(
+        Path,
+        "is_junction",
+        lambda candidate: candidate == data_dir,
+        raising=False,
+    )
+
+    with pytest.raises(JobStateError) as error:
+        JobRepository(data_dir / "jobs.sqlite3")
+
+    assert error.value.code == "path.symlink"
+    assert list(data_dir.iterdir()) == [sentinel]
+    assert sentinel.read_bytes() == b"preserve"
+
+
+def test_sqlite_database_must_be_a_regular_file(tmp_path: Path) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    database.mkdir()
+
+    with pytest.raises(JobStateError) as error:
+        JobRepository(database)
+
+    assert error.value.code == "path.not_file"
+    assert not list(database.iterdir())
+
+
+def test_sqlite_existing_regular_file_is_opened(tmp_path: Path) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    database.touch()
+
+    repository = JobRepository(database)
+    submitted = repository.submit("job-one", at=NOW)
+
+    assert submitted.status is JobStatus.SUBMITTED
+    assert database.is_file()
+    repository.close()
+
+
+def test_sqlite_open_failure_does_not_mutate_outside_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir = tmp_path / "runtime-data"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_bytes(b"preserve")
+    attempted: list[Path] = []
+
+    def fail_open(path: Path, **_kwargs: object) -> sqlite3.Connection:
+        attempted.append(path)
+        raise OSError("injected SQLite open failure")
+
+    monkeypatch.setattr(sqlite3, "connect", fail_open)
+
+    with pytest.raises(OSError, match="injected SQLite open failure"):
+        JobRepository(data_dir / "jobs.sqlite3")
+
+    assert attempted == [data_dir / "jobs.sqlite3"]
+    assert list(outside.iterdir()) == [sentinel]
+    assert sentinel.read_bytes() == b"preserve"
+    assert not (data_dir / "jobs.sqlite3").exists()
