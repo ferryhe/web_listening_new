@@ -43,7 +43,7 @@ TARGETS = Path(__file__).with_name("phase_17_site_targets.json")
 TOOL_ID = "acquisition.cloakbrowser"
 VERSION = "0.5.9"
 SITE_KEY = "tnfd"
-CATALOG_SHA256 = "CE378F743C6363F1DC22A25758B958E3ADA695F8996B3F619AFA4CF0CD5D5322"
+CATALOG_SHA256 = "FDD7BA84B83C06D7CF032B50162DD03AFBBA7632CF8037C1D137CC64F8BDCA0C"
 OCI_INDEX = "sha256:e270e34573ca186b71dbcab9320672f2b671e048753921411148865c6530c721"
 AMD64_MANIFEST = (
     "sha256:6c17fac77e4cc7818159d9083c6868cfa220200ab7646036a7cc8861e51d17db"
@@ -276,6 +276,8 @@ def _authorized_context() -> tuple[
     payload = json.loads(TARGETS.read_bytes())
     if payload.get("source_catalog_sha256") != CATALOG_SHA256:
         pytest.fail("the Phase 17 source catalog digest drifted")
+    if payload.get("source_catalog_sha256_basis") != "lf_normalized_bytes":
+        pytest.fail("the Phase 17 source catalog digest basis drifted")
     targets = payload.get("targets")
     if not isinstance(targets, list) or len(targets) != 1:
         pytest.fail("Phase 17 must contain exactly one frozen target")

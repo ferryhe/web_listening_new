@@ -2,7 +2,8 @@
   "schema_version": "phase-17-cloakbrowser-live-targets.v1",
   "phase": "17",
   "source_catalog": "tests/live/catalog/smoke_site_catalog.json",
-  "source_catalog_sha256": "CE378F743C6363F1DC22A25758B958E3ADA695F8996B3F619AFA4CF0CD5D5322",
+  "source_catalog_sha256": "FDD7BA84B83C06D7CF032B50162DD03AFBBA7632CF8037C1D137CC64F8BDCA0C",
+  "source_catalog_sha256_basis": "lf_normalized_bytes",
   "cloakbrowser": {
     "tool_id": "acquisition.cloakbrowser",
     "wrapper_version": "0.5.9",

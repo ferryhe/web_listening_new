@@ -378,12 +378,19 @@ def test_version_manifest_and_describe_are_dependency_lazy() -> None:
 
 def test_live_snapshot_freezes_one_current_tnfd_catalog_row() -> None:
     payload = json.loads(TARGET_SNAPSHOT.read_bytes())
-    catalog = json.loads(CURRENT_CATALOG.read_bytes())
+    raw_catalog = CURRENT_CATALOG.read_bytes()
+    lf_catalog = raw_catalog.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    crlf_catalog = lf_catalog.replace(b"\n", b"\r\n")
+    catalog = json.loads(raw_catalog)
     current = [item for item in catalog["sites"] if item["site_key"] == "tnfd"]
+    expected_digest = "FDD7BA84B83C06D7CF032B50162DD03AFBBA7632CF8037C1D137CC64F8BDCA0C"
+    assert hashlib.sha256(lf_catalog).hexdigest().upper() == expected_digest
     assert (
-        payload["source_catalog_sha256"]
-        == hashlib.sha256(CURRENT_CATALOG.read_bytes()).hexdigest().upper()
+        hashlib.sha256(crlf_catalog.replace(b"\r\n", b"\n")).hexdigest().upper()
+        == expected_digest
     )
+    assert payload["source_catalog_sha256"] == expected_digest
+    assert payload["source_catalog_sha256_basis"] == "lf_normalized_bytes"
     assert payload["targets"] == current
     assert payload["network_limits"] == {
         "max_targets": 1,
