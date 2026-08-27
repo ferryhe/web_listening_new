@@ -20,6 +20,10 @@ from web_listening.tool_registry.acquisition.builtins.web_http import (
 )
 from web_listening.tool_registry.registry import Registry
 from web_listening.tool_registry.runners.in_process import PinnedHttpTransport
+from web_listening.tool_registry.transform.builtins.simple_html_markdown import (
+    SIMPLE_HTML_MARKDOWN_MANIFEST,
+    SimpleHtmlMarkdownTransform,
+)
 
 _OwnedResource = WebHttpAcquisitionTool | ArtifactStore | JobRepository
 
@@ -55,6 +59,8 @@ class RuntimeService:
             resources.append(tool)
             registry = Registry()
             registry.register(WEB_HTTP_MANIFEST, tool)
+            transform = SimpleHtmlMarkdownTransform()
+            registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
             artifact_store = ArtifactStore(root / "artifacts")
             resources.append(artifact_store)
             jobs = JobRepository(root / "jobs.sqlite3")
@@ -99,7 +105,18 @@ class RuntimeService:
                 pass
             raise
         status = JobStatus(result.status.value)
-        failure_code = result.errors[0].code if result.errors else None
+        failure_code = (
+            result.errors[0].code
+            if result.errors
+            else next(
+                (
+                    attempt.error.code
+                    for attempt in result.attempts
+                    if attempt.error is not None
+                ),
+                None,
+            )
+        )
         return self._jobs.transition(
             job_id,
             status,
