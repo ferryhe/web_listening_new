@@ -189,8 +189,10 @@ class SubprocessRunner:
             acquisition_output_bytes=acquisition_output_bytes,
         )
         started = time.monotonic()
+        attempt_directory_ready = False
         try:
             with tempfile.TemporaryDirectory(prefix="web-listening-attempt-") as name:
+                attempt_directory_ready = True
                 attempt_directory = Path(name)
                 process_code, stdout = self._execute(
                     wire, attempt_directory, started, runtime_seconds
@@ -219,7 +221,12 @@ class SubprocessRunner:
                 except Exception:  # pylint: disable=broad-exception-caught
                     return _failure(self._manifest, "runner.protocol_error")
         except OSError:
-            return _failure(self._manifest, "runner.startup_error")
+            code = (
+                "runner.cleanup_error"
+                if attempt_directory_ready
+                else "runner.startup_error"
+            )
+            return _failure(self._manifest, code)
 
     def _execute(
         self,
@@ -278,7 +285,7 @@ class SubprocessRunner:
 
 def _minimal_environment() -> dict[str, str]:
     environment = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-    for name in ("SystemRoot", "WINDIR"):
+    for name in ("PATH", "SystemRoot", "WINDIR"):
         if name in os.environ:
             environment[name] = os.environ[name]
     return environment

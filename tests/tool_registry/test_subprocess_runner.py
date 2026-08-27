@@ -475,6 +475,42 @@ def test_attempt_directory_oserror_returns_stable_failure(monkeypatch) -> None:
     assert "private host path" not in str(result)
 
 
+def test_runner_preserves_host_executable_search_path(monkeypatch) -> None:
+    monkeypatch.setenv("PATH", "fixture-tool-search-path")
+
+    assert subprocess_runner._minimal_environment()["PATH"] == (
+        "fixture-tool-search-path"
+    )
+
+
+def test_attempt_directory_cleanup_oserror_is_not_a_startup_error(
+    monkeypatch, tmp_path: Path
+) -> None:
+    class CleanupFailure:
+        """Temporary-directory context whose cleanup fails."""
+
+        def __enter__(self) -> str:
+            return str(tmp_path)
+
+        def __exit__(self, *_args) -> None:
+            raise OSError("private cleanup path")
+
+    monkeypatch.setattr(
+        subprocess_runner.tempfile,
+        "TemporaryDirectory",
+        lambda **_kwargs: CleanupFailure(),
+    )
+
+    result = _runner(ToolCategory.ACQUISITION, "content_success").invoke(
+        AcquisitionInput(_request(), "https://example.test/report")
+    )
+
+    assert result == AcquisitionFailure(
+        "external.fake", "1.0.0", "runner.cleanup_error"
+    )
+    assert "private cleanup path" not in str(result)
+
+
 def test_fake_fixture_is_versioned_and_has_no_network_code() -> None:
     source = FAKE_TOOL.read_text(encoding="utf-8")
 
