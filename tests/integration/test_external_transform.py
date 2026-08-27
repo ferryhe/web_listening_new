@@ -93,6 +93,12 @@ MIGRATION = (
 )
 
 
+def _phase15_evidence_sha256(contents: bytes) -> str:
+    lf_contents = contents.replace(b"\r\n", b"\n")
+    crlf_contents = lf_contents.replace(b"\n", b"\r\n")
+    return hashlib.sha256(crlf_contents).hexdigest()
+
+
 class _Response:
     def __init__(self, status: int, body: bytes = b"", mime: str = "text/plain"):
         self.status = status
@@ -313,6 +319,16 @@ def test_disabled_external_transform_is_not_active_or_selectable(
     assert lifecycle.active(ToolCategory.TRANSFORM, TOOL_ID) is None
 
 
+def test_phase15_evidence_hash_is_stable_for_lf_and_crlf() -> None:
+    local_bytes = (ROOT / "tests/tool_registry/test_tool_lifecycle.py").read_bytes()
+    lf_bytes = local_bytes.replace(b"\r\n", b"\n")
+    crlf_bytes = lf_bytes.replace(b"\n", b"\r\n")
+
+    assert hashlib.sha256(lf_bytes).hexdigest() != LIFECYCLE_TEST_SHA256
+    assert _phase15_evidence_sha256(lf_bytes) == LIFECYCLE_TEST_SHA256
+    assert _phase15_evidence_sha256(crlf_bytes) == LIFECYCLE_TEST_SHA256
+
+
 def test_fixture_has_no_network_or_cross_module_authority_and_records_migration() -> (
     None
 ):
@@ -343,8 +359,8 @@ def test_fixture_has_no_network_or_cross_module_authority_and_records_migration(
     assert "src/web_listening/runtime/workflow.py" in MIGRATION[2][2]
     assert "tests/integration/test_external_transform.py" not in MIGRATION[2][2]
     assert (
-        hashlib.sha256(
+        _phase15_evidence_sha256(
             (ROOT / "tests/tool_registry/test_tool_lifecycle.py").read_bytes()
-        ).hexdigest()
+        )
         == LIFECYCLE_TEST_SHA256
     )
