@@ -6,7 +6,8 @@ then exposes a qualified manifest only for the exact successful binding.
 """
 
 # pylint: disable=duplicate-code,too-few-public-methods
-# pylint: disable=too-many-instance-attributes,too-many-return-statements
+# pylint: disable=too-many-arguments,too-many-instance-attributes
+# pylint: disable=too-many-return-statements
 # pylint: disable=unidiomatic-typecheck
 
 from __future__ import annotations
@@ -159,6 +160,7 @@ class IsolatedRuntime:
         authorization_window: str | None,
         boundary: NetworkBoundary | None,
         *,
+        tool_directory: str | Path,
         state_reader: Callable[[], object] | None = None,
     ) -> None:
         if type(manifest) is not ToolManifest or (
@@ -175,6 +177,7 @@ class IsolatedRuntime:
             raise ToolRegistryError("isolated_runtime.authorization_required")
         if boundary is not None and type(boundary) is not NetworkBoundary:
             raise ToolRegistryError("isolated_runtime.boundary_invalid")
+        self._tool_directory = _require_tool_directory(tool_directory)
         self._installed_manifest = manifest
         self._manifest = manifest
         self._command = command
@@ -403,6 +406,7 @@ class IsolatedRuntime:
                 input=json.dumps(request, separators=(",", ":")).encode("utf-8"),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                cwd=self._tool_directory,
                 env=_minimal_environment(),
                 timeout=self._installed_manifest.limits.max_runtime_seconds,
             )
@@ -555,6 +559,19 @@ def _require_input(value: AcquisitionInput) -> AcquisitionInput:
     return value
 
 
+def _require_tool_directory(value: object) -> Path:
+    if not isinstance(value, (str, Path)):
+        raise ToolRegistryError("isolated_runtime.tool_directory_invalid")
+    try:
+        candidate = Path(value)
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ToolRegistryError("isolated_runtime.tool_directory_invalid") from exc
+    if not candidate.is_absolute() or not resolved.is_dir():
+        raise ToolRegistryError("isolated_runtime.tool_directory_invalid")
+    return resolved
+
+
 def _authorization_is_valid(value: object) -> bool:
     return type(value) is str and bool(value.strip()) and len(value) <= 512
 
@@ -585,10 +602,15 @@ def _origin_is_valid(value: object) -> bool:
 def _proxy_is_valid(value: object) -> bool:
     if type(value) is not str or len(value) > 2048:
         return False
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
     return (
         parsed.scheme in {"http", "https", "socks5", "socks5h"}
         and parsed.hostname is not None
+        and port != 0
         and parsed.path in {"", "/"}
         and not parsed.query
         and not parsed.fragment

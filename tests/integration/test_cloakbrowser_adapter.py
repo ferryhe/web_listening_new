@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -246,6 +247,29 @@ def _installed(
     return lifecycle, state.manifest, command
 
 
+def _tool_directory(command: tuple[str, ...]) -> Path:
+    assert len(command) == 2 and command[0] == sys.executable
+    return Path(command[1]).parent
+
+
+def _runtime(
+    manifest: ToolManifest,
+    command: tuple[str, ...],
+    authorization: str | None,
+    boundary: NetworkBoundary | None,
+    *,
+    state_reader: Callable[[], object] | None = None,
+) -> IsolatedRuntime:
+    return IsolatedRuntime(
+        manifest,
+        command,
+        authorization,
+        boundary,
+        tool_directory=_tool_directory(command),
+        state_reader=state_reader,
+    )
+
+
 class _ExternalAcquisition:
     def __init__(self, runtime: IsolatedRuntime) -> None:
         self._runtime = runtime
@@ -423,7 +447,7 @@ def test_generic_lifecycle_and_authorization_only_cannot_qualify(
     with pytest.raises(ToolLifecycleError, match="lifecycle.not_activatable"):
         lifecycle.activate(ToolCategory.ACQUISITION, TOOL_ID, VERSION)
 
-    runtime = IsolatedRuntime(manifest, command, "offline-authorized", None)
+    runtime = _runtime(manifest, command, "offline-authorized", None)
     report = runtime.qualify(_request())
     assert report.qualified is False
     assert report.failure_code == "isolated_runtime.network_unrestricted"
@@ -433,6 +457,55 @@ def test_generic_lifecycle_and_authorization_only_cannot_qualify(
     registry = Registry()
     registry.register(manifest, _ExternalAcquisition(runtime))
     assert not registry.eligible(EligibilityRequirements(ToolCategory.ACQUISITION))
+
+
+@pytest.mark.parametrize(
+    "proxy_server",
+    (
+        "http://proxy.test:not-a-port",
+        "http://proxy.test:70000",
+        "http://proxy.test:0",
+        "http://[::1:8080",
+    ),
+)
+def test_invalid_proxy_endpoint_is_a_stable_boundary_rejection(
+    tmp_path: Path, proxy_server: str
+) -> None:
+    with pytest.raises(ToolRegistryError, match="isolated_runtime.boundary_invalid"):
+        NetworkBoundary(
+            kind="controlled_proxy",
+            allowed_origins=(ORIGIN,),
+            proxy_server=proxy_server,
+            browser_profile_home=str(_profile_home(tmp_path)),
+            observation_reader=_unobserved,
+        )
+
+
+def test_control_phase_runs_from_explicit_tool_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _lifecycle, manifest, command = _installed(tmp_path)
+    tool_directory = _tool_directory(command)
+    observed_directories: list[object] = []
+    run = subprocess.run
+
+    def observe_run(
+        *args: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        observed_directories.append(kwargs.get("cwd"))
+        return run(*args, check=False, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(subprocess, "run", observe_run)
+    report = IsolatedRuntime(
+        manifest,
+        command,
+        "offline-authorized",
+        _boundary(command),
+        tool_directory=tool_directory,
+    ).qualify(_request())
+
+    assert report.qualified is True
+    assert observed_directories[:3] == [tool_directory] * 3
 
 
 @pytest.mark.parametrize(
@@ -449,7 +522,7 @@ def test_missing_authorization_or_network_boundary_rejects_before_adapter(
     code: str,
 ) -> None:
     _lifecycle, manifest, command = _installed(tmp_path)
-    runtime = IsolatedRuntime(manifest, command, authorization, boundary)
+    runtime = _runtime(manifest, command, authorization, boundary)
     report = runtime.qualify(_request())
     assert report.qualified is False
     assert isinstance(report.result, AcquisitionFailure)
@@ -536,7 +609,7 @@ def test_bound_runtime_preflights_closes_qualifies_and_runs_protocol(
     }
     lifecycle, manifest, command = _installed(tmp_path, scenario=scenario)
     monkeypatch.setenv("WEB_LISTENING_HOST_SECRET", "must-not-be-inherited")
-    runtime = IsolatedRuntime(
+    runtime = _runtime(
         manifest,
         command,
         "offline-authorized",
@@ -708,7 +781,7 @@ def test_in_scope_redirect_chain_is_parent_rechecked(tmp_path: Path) -> None:
             ],
         },
     )
-    report = IsolatedRuntime(
+    report = _runtime(
         manifest, command, "offline-authorized", _boundary(command)
     ).qualify(_request())
     assert report.qualified is True
@@ -737,7 +810,7 @@ def test_request_bound_aborts_excess_redirect_before_content(tmp_path: Path) -> 
             ],
         },
     )
-    report = IsolatedRuntime(
+    report = _runtime(
         manifest, command, "offline-authorized", _boundary(command)
     ).qualify(_request(max_requests=2))
     assert report.qualified is False
@@ -778,7 +851,7 @@ def test_budget_excess_plain_subresources_are_aborted_but_document_succeeds(
             "subresponses": _allowed_subresponses() + excess,
         },
     )
-    report = IsolatedRuntime(
+    report = _runtime(
         manifest, command, "offline-authorized", _boundary(command)
     ).qualify(_request(max_requests=6, max_bytes=4096))
     assert report.qualified is True
@@ -846,9 +919,7 @@ def test_uncertain_or_navigation_budget_excess_remains_fatal(
             "subresponses": _allowed_subresponses() + [excess],
         },
     )
-    runtime = IsolatedRuntime(
-        manifest, command, "offline-authorized", _boundary(command)
-    )
+    runtime = _runtime(manifest, command, "offline-authorized", _boundary(command))
     report = runtime.qualify(_request(max_requests=6, max_bytes=4096))
     assert report.qualified is False
     assert report.failure_code == "cloakbrowser.request_limit"
@@ -879,7 +950,7 @@ def test_free_form_network_isolation_claim_is_not_a_boundary() -> None:
 
 def test_close_failure_keeps_adapter_unqualified(tmp_path: Path) -> None:
     _lifecycle, manifest, command = _installed(tmp_path, scenario={"close_error": True})
-    report = IsolatedRuntime(
+    report = _runtime(
         manifest, command, "offline-authorized", _boundary(command)
     ).qualify(_request())
     assert report.qualified is False
@@ -910,9 +981,7 @@ def test_out_of_scope_redirect_is_aborted_before_content_read(tmp_path: Path) ->
             ],
         },
     )
-    runtime = IsolatedRuntime(
-        manifest, command, "offline-authorized", _boundary(command)
-    )
+    runtime = _runtime(manifest, command, "offline-authorized", _boundary(command))
     report = runtime.qualify(_request())
     assert report.qualified is False
     assert report.failure_code == "cloakbrowser.scope_rejected"
@@ -945,7 +1014,7 @@ def test_path_subtree_does_not_admit_same_prefix_redirect(tmp_path: Path) -> Non
             "redirects": [{"from_url": start, "to_url": outside, "status_code": 302}],
         },
     )
-    report = IsolatedRuntime(
+    report = _runtime(
         manifest, command, "offline-authorized", _boundary(command)
     ).qualify(_request(target_url=start, include_paths=("/news/**",)))
     assert report.qualified is False
@@ -1245,7 +1314,7 @@ def test_adapter_enforces_timeout_and_output_bound(
     expected: str,
 ) -> None:
     _lifecycle, manifest, command = _installed(tmp_path, scenario=scenario)
-    report = IsolatedRuntime(
+    report = _runtime(
         manifest, command, "offline-authorized", _boundary(command)
     ).qualify(_request(**request_kwargs))
     assert report.qualified is False
@@ -1267,9 +1336,7 @@ def test_proxy_cumulative_response_limit_keeps_tool_unqualified(
             ],
         },
     )
-    runtime = IsolatedRuntime(
-        manifest, command, "offline-authorized", _boundary(command)
-    )
+    runtime = _runtime(manifest, command, "offline-authorized", _boundary(command))
     report = runtime.qualify(_request(max_requests=4, max_bytes=64))
     assert report.qualified is False
     assert report.failure_code == "isolated_runtime.proxy_response_limit"
@@ -1301,7 +1368,7 @@ def test_parent_rechecks_external_url_path_mime_size_and_hash(
 
 def test_disable_and_rollback_remain_effective(tmp_path: Path) -> None:
     lifecycle, manifest, command = _installed(tmp_path)
-    runtime = IsolatedRuntime(
+    runtime = _runtime(
         manifest,
         command,
         "offline-authorized",

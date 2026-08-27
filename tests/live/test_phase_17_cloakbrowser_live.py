@@ -428,22 +428,19 @@ def test_phase_17_cloakbrowser_live(
         shutil.copytree(SOURCE, source)
         lifecycle = ToolLifecycle(tmp_path / "lifecycle")
         installed = lifecycle.install(source)
+        tool_directory = (
+            lifecycle.data_root / "tools" / "acquisition" / TOOL_ID / VERSION
+        )
         command = (
             sys.executable,
-            str(
-                lifecycle.data_root
-                / "tools"
-                / "acquisition"
-                / TOOL_ID
-                / VERSION
-                / "tool.py"
-            ),
+            str(tool_directory / "tool.py"),
         )
         runtime = IsolatedRuntime(
             installed.manifest,
             command,
             authorization,
             boundary,
+            tool_directory=tool_directory,
             state_reader=lambda: lifecycle.inspect(
                 ToolCategory.ACQUISITION, TOOL_ID, VERSION
             ),
