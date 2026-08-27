@@ -1,0 +1,77 @@
+{
+  "schema_version": "phase-17-cloakbrowser-live-targets.v1",
+  "phase": "17",
+  "source_catalog": "tests/live/catalog/smoke_site_catalog.json",
+  "source_catalog_sha256": "FDD7BA84B83C06D7CF032B50162DD03AFBBA7632CF8037C1D137CC64F8BDCA0C",
+  "source_catalog_sha256_basis": "lf_normalized_bytes",
+  "cloakbrowser": {
+    "tool_id": "acquisition.cloakbrowser",
+    "wrapper_version": "0.5.9",
+    "bundled_chromium_version": "146.0.7680.177.5",
+    "reported_chromium_version": "146.0.7680.177",
+    "image": "cloakhq/cloakbrowser:0.5.9",
+    "oci_index_digest": "sha256:e270e34573ca186b71dbcab9320672f2b671e048753921411148865c6530c721",
+    "linux_amd64_manifest_digest": "sha256:6c17fac77e4cc7818159d9083c6868cfa220200ab7646036a7cc8861e51d17db",
+    "runtime_evidence_schema": "phase-17-cloakbrowser-runtime-evidence.v2",
+    "category": "acquisition",
+    "distribution": "installed",
+    "capabilities": [
+      "browser_render",
+      "governed_network"
+    ]
+  },
+  "targets": [
+    {
+      "site_key": "tnfd",
+      "display_name": "Taskforce on Nature-related Financial Disclosures",
+      "urls": {
+        "homepage": "https://tnfd.global/",
+        "monitor": "https://tnfd.global/news/",
+        "document": null,
+        "tree_seed": null
+      },
+      "allowed_origins": [
+        "https://tnfd.global"
+      ],
+      "historical_classification": {
+        "expectation": "pass_http_limited",
+        "website_status": "sheet",
+        "priority": true,
+        "smoke_required": false,
+        "js_heavy_candidate": true
+      },
+      "evidence_thresholds": {
+        "monitor_min_words": 3,
+        "document_min_words": null,
+        "document_min_links": null
+      },
+      "site_skill_case": "tnfd",
+      "site_skill_digest": "sha256:ae1ae58703f633c30c4c23bcd0dba1eb090efd70ee7e4a94aa011fd9ce902b20",
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "tnfd"
+      },
+      "tree_include_paths": [],
+      "tool_facts": {
+        "tool_id": "acquisition.web_http",
+        "version": "1.0.0",
+        "category": "acquisition",
+        "capabilities": [
+          "http_get"
+        ]
+      }
+    }
+  ],
+  "network_limits": {
+    "max_targets": 1,
+    "max_total_requests": 6,
+    "max_total_response_bytes": 4194304,
+    "max_redirects": 5,
+    "timeout_seconds": 60,
+    "concurrency": 1,
+    "retry": 0,
+    "acquisition_fallback": 0
+  }
+}

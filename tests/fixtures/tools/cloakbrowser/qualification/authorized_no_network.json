@@ -1,0 +1,10 @@
+{
+  "schema_version": "web-listening-network-boundary.v1",
+  "authorization_window_id": "f7f2a06c4e905e125347449351d307b90974e99463e27539e8576b70532d55d0",
+  "kind": "none",
+  "allowed_origins": [
+    "https://example.test"
+  ],
+  "proxy_server": null,
+  "isolation_proof": null
+}
