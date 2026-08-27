@@ -1,0 +1,15 @@
+{
+  "source": {"name": "local-fixture", "category": "acquisition", "tool_id": "external.lifecycle", "version": "3.0.0"},
+  "protocol_version": "web-listening-external-tool.v1",
+  "entrypoint": "tool.py",
+  "manifest": {
+    "tool_id": "external.lifecycle",
+    "version": "3.0.0",
+    "category": "acquisition",
+    "distribution": "installed",
+    "capabilities": ["fixture"],
+    "limits": {"max_runtime_seconds": 2, "max_input_bytes": 4096, "max_output_bytes": 4096},
+    "health": "healthy",
+    "qualification": "unqualified"
+  }
+}
