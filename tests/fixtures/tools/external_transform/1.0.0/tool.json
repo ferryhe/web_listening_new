@@ -1,0 +1,26 @@
+{
+  "source": {
+    "name": "phase-16-basic-html-markdown",
+    "category": "transform",
+    "tool_id": "external.basic_html_markdown",
+    "version": "1.0.0"
+  },
+  "protocol_version": "web-listening-external-tool.v1",
+  "entrypoint": "tool.py",
+  "manifest": {
+    "tool_id": "external.basic_html_markdown",
+    "version": "1.0.0",
+    "category": "transform",
+    "distribution": "installed",
+    "capabilities": [
+      "html_to_markdown"
+    ],
+    "limits": {
+      "max_runtime_seconds": 5,
+      "max_input_bytes": 4194304,
+      "max_output_bytes": 4194304
+    },
+    "health": "healthy",
+    "qualification": "unqualified"
+  }
+}
