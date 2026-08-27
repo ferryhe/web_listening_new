@@ -69,11 +69,28 @@ class Attempt:  # pylint: disable=too-many-instance-attributes
             raise ResultValidationError("attempt.error_invalid")
 
         if self.outcome == "succeeded":
-            if (
-                self.error is not None
-                or self.final_url is None
-                or self.http_status is None
-                or self.requests == 0
+            network_effect = any(
+                value is not None and value != 0
+                for value in (
+                    self.final_url,
+                    self.http_status,
+                    self.requests,
+                    self.bytes_received,
+                )
+            )
+            network_success = (
+                self.final_url is not None
+                and self.http_status is not None
+                and self.requests > 0
+            )
+            local_success = (
+                self.final_url is None
+                and self.http_status is None
+                and self.requests == 0
+                and self.bytes_received == 0
+            )
+            if self.error is not None or not (
+                network_success if network_effect else local_success
             ):
                 raise ResultValidationError("attempt.success_invalid")
         elif self.error is None:

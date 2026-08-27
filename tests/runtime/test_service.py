@@ -677,6 +677,9 @@ def test_failed_terminalization_cannot_mask_primary_workflow_error(
 
 def test_runtime_source_is_one_ordered_orchestrator_without_new_authority() -> None:
     workflow = inspect.getsource(workflow_module.run_single_target)
+    transform = inspect.getsource(
+        workflow_module._transform_stored_source  # pylint: disable=protected-access
+    )
     source = (
         inspect.getsource(service_module) + inspect.getsource(workflow_module)
     ).lower()
@@ -688,22 +691,29 @@ def test_runtime_source_is_one_ordered_orchestrator_without_new_authority() -> N
     assert workflow.index("resolve_site_skill(") < workflow.index("registry.invoke(")
     assert workflow.index("registry.invoke(") < workflow.index("commit_observation(")
     assert workflow.index("commit_observation(") < workflow.index(
+        "_transform_stored_source("
+    )
+    assert workflow.index("_transform_stored_source(") < workflow.index(
         "manifest_from_observations("
     )
     assert workflow.count("registry.invoke(") == 1
     assert workflow.count("commit_observation(") == 1
+    assert transform.index("TransformInput(") < transform.index("registry.invoke(")
+    assert transform.index("registry.invoke(") < transform.index("commit_observation(")
+    assert transform.count("registry.invoke(") == 1
+    assert transform.count("commit_observation(") == 1
     forbidden = (
         "import requests",
         "import httpx",
         "import socket",
         "playwright",
         "subprocess",
-        "transforminput",
         "fallback",
         "._connection",
         "._commit_checkpoint",
     )
     assert all(token not in source for token in forbidden)
+    assert "simple_html_markdown" not in inspect.getsource(workflow_module).lower()
     assert "discoveryinput" not in workflow.lower()
 
 

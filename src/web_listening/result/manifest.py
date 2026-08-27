@@ -28,6 +28,7 @@ from web_listening.result.errors import (
 )
 
 MANIFEST_SCHEMA_VERSION = "web-listening-manifest.v1"
+_TRANSFORM_SOURCE_PREFIX = "urn:web-listening:transform:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +302,32 @@ def _validate_collection_lineage(artifacts: tuple[ArtifactEvidence, ...]) -> Non
                 raise ResultValidationError("lineage.source_role_invalid")
 
 
+def _validate_transform_lineage(
+    source: ArtifactEvidence,
+    artifacts: tuple[ArtifactEvidence, ...],
+    attempts: tuple[Attempt, ...],
+) -> None:
+    derived = tuple(artifact for artifact in artifacts if artifact.role == "derived")
+    tagged = tuple(
+        artifact
+        for artifact in derived
+        if artifact.source_url.startswith(_TRANSFORM_SOURCE_PREFIX)
+    )
+    matched: set[str] = set()
+    for attempt in attempts:
+        expected_source = (
+            f"{_TRANSFORM_SOURCE_PREFIX}{attempt.tool_id}:{attempt.tool_version}"
+        )
+        matches = tuple(
+            artifact for artifact in tagged if artifact.source_url == expected_source
+        )
+        if attempt.requested_url != source.source_url or len(matches) != 1:
+            raise ResultValidationError("manifest.transform_lineage_invalid")
+        matched.add(matches[0].artifact_id)
+    if len(matched) != len(tagged):
+        raise ResultValidationError("manifest.transform_lineage_invalid")
+
+
 def _validate_redirect_chain(
     *,
     requested_url: str,
@@ -351,7 +378,9 @@ class Manifest:  # pylint: disable=too-many-instance-attributes
     usage: Usage
     schema_version: str = MANIFEST_SCHEMA_VERSION
 
-    def __post_init__(self) -> None:  # pylint: disable=too-many-branches
+    def __post_init__(  # pylint: disable=too-many-branches,too-many-statements
+        self,
+    ) -> None:
         if self.schema_version != MANIFEST_SCHEMA_VERSION:
             raise ResultValidationError("schema.version_invalid")
         validate_text(self.run_id, code="manifest.run_id_invalid", maximum=128)
@@ -399,16 +428,24 @@ class Manifest:  # pylint: disable=too-many-instance-attributes
         successful_attempts = tuple(
             attempt for attempt in self.attempts if attempt.outcome == "succeeded"
         )
+        acquisition_successes = tuple(
+            attempt for attempt in successful_attempts if attempt.final_url is not None
+        )
+        transform_successes = tuple(
+            attempt for attempt in successful_attempts if attempt.final_url is None
+        )
+        if len(transform_successes) > 1:
+            raise ResultValidationError("manifest.success_cardinality_invalid")
         if self.artifacts:
             sources = tuple(
                 artifact for artifact in self.artifacts if artifact.role == "source"
             )
             if len(sources) != 1:
                 raise ResultValidationError("manifest.source_cardinality_invalid")
-            if len(successful_attempts) != 1:
+            if len(acquisition_successes) != 1:
                 raise ResultValidationError("manifest.success_cardinality_invalid")
             source = sources[0]
-            successful_attempt = successful_attempts[0]
+            successful_attempt = acquisition_successes[0]
             if (
                 self.final_url is None
                 or self.http_status is None
@@ -437,6 +474,11 @@ class Manifest:  # pylint: disable=too-many-instance-attributes
             )
             if result_facts != attempt_facts:
                 raise ResultValidationError("manifest.success_facts_invalid")
+            _validate_transform_lineage(
+                source,
+                self.artifacts,
+                transform_successes,
+            )
             _validate_redirect_chain(
                 requested_url=self.requested_url,
                 current_url=self.current_url,
