@@ -29,6 +29,7 @@ from web_listening.tool_registry.protocols.acquisition import (
     AcquisitionRedirect,
 )
 from web_listening.tool_registry.registry import Registry
+from web_listening.tool_registry.runners import in_process as in_process_runner
 from web_listening.tool_registry.runners.in_process import (
     GatewayEvidence,
     GatewayFailure,
@@ -50,7 +51,12 @@ class _ScriptedResponse:
         }
         self.peer_ip = PUBLIC_IP
         self.read_limits: list[int] = []
+        self.timeouts: list[float] = []
         self.closed = 0
+
+    def set_timeout(self, timeout: float) -> None:
+        """Record the required body deadline contract."""
+        self.timeouts.append(timeout)
 
     def read(self, max_bytes: int) -> bytes:
         """Return the bounded scripted body."""
@@ -155,7 +161,13 @@ def _direct_transport(
     )
 
 
-def _gateway_failure(code: str) -> GatewayFailure:
+def _gateway_failure(
+    code: str,
+    *,
+    requests: int = 0,
+    bytes_received: int = 0,
+    elapsed_seconds: float = 0.01,
+) -> GatewayFailure:
     url = "https://example.test/report"
     return GatewayFailure(
         code,
@@ -166,7 +178,7 @@ def _gateway_failure(code: str) -> GatewayFailure:
             decisions=(),
             redirects=(),
             robots=(),
-            usage=UsageEvidence(0, 0, 0.01),
+            usage=UsageEvidence(requests, bytes_received, elapsed_seconds),
             response_status=None,
             response_mime_type=None,
             content_bytes=0,
@@ -212,9 +224,45 @@ def test_html_and_file_success_preserve_gateway_content_evidence(
     assert output.sha256 == hashlib.sha256(body).hexdigest()
     assert not output.redirects
     assert output.runtime_ms >= 0
+    assert (output.requests, output.bytes_received) == (2, len(body))
     assert transport.requests == ["https://example.test/robots.txt", url]
     assert robots.closed == target.closed == transport.closed == 1
     assert target.read_limits == [len(body)]
+
+
+def test_nonempty_robots_body_is_included_in_success_usage() -> None:
+    """Robots and target work both belong to one acquisition budget."""
+    url = "https://example.test/report"
+    robots_body = b"User-agent: *\nAllow: /\n"
+    target_body = b"short"
+    robots = _ScriptedResponse(
+        200,
+        robots_body,
+        Content_Type="text/plain",
+        Content_Length=str(len(robots_body)),
+    )
+    target = _ScriptedResponse(
+        200,
+        target_body,
+        Content_Type="text/html",
+        Content_Length=str(len(target_body)),
+    )
+    transport = _ScriptedTransport(
+        {
+            "https://example.test/robots.txt": [robots],
+            url: [target],
+        }
+    )
+
+    output = _tool(transport).acquire(AcquisitionInput(_request(url), url))
+
+    assert isinstance(output, AcquisitionOutput)
+    assert output.body == target_body
+    assert (output.requests, output.bytes_received) == (
+        2,
+        len(robots_body) + len(target_body),
+    )
+    assert robots.closed == target.closed == transport.closed == 1
 
 
 def test_manual_target_redirects_map_without_robots_redirects() -> None:
@@ -327,6 +375,36 @@ def test_gateway_timeout_and_transport_failures_keep_safe_codes(
     assert robots.closed == transport.closed == 1
 
 
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        (401, "gateway.http_status"),
+        (403, "gateway.http_status"),
+        (404, "gateway.http_status"),
+        (410, "gateway.http_status"),
+        (503, "gateway.server_error"),
+    ],
+)
+def test_http_status_failure_codes_distinguish_retryable_server_error(
+    status: int, code: str
+) -> None:
+    """Only server failures use the stable continuable status code."""
+    url = "https://example.test/report"
+    transport = _ScriptedTransport(
+        {
+            "https://example.test/robots.txt": [_ScriptedResponse(404)],
+            url: [_ScriptedResponse(status)],
+        }
+    )
+
+    failure = _tool(transport).acquire(AcquisitionInput(_request(url), url))
+
+    assert isinstance(failure, AcquisitionFailure)
+    assert failure.code == code
+    assert failure.requests == 2
+    assert failure.bytes_received == 0
+
+
 def test_ordinary_transport_factory_exception_is_safely_contained() -> None:
     """Unexpected factory diagnostics collapse to one safe stable code."""
     secret = "private-factory-diagnostic"
@@ -362,6 +440,65 @@ def test_invalid_gateway_failure_code_is_contained_without_private_text(
     )
     assert private_code not in str(failure)
     assert hostile.closed == 1
+
+
+def test_gateway_failure_preserves_actual_request_byte_and_runtime_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Actual gateway work remains observable after a typed failure."""
+    hostile = _HostileGateway(
+        _gateway_failure(
+            "gateway.timeout",
+            requests=2,
+            bytes_received=17,
+            elapsed_seconds=0.901,
+        )
+    )
+    monkeypatch.setattr(
+        web_http_module,
+        "GovernedAccessGateway",
+        lambda _request, _transport, resolver=None: hostile,
+    )
+    transport = _ScriptedTransport({})
+
+    failure = _tool(transport).acquire(
+        AcquisitionInput(_request(), "https://example.test/report")
+    )
+
+    assert isinstance(failure, AcquisitionFailure)
+    assert failure.code == "gateway.timeout"
+    assert (failure.requests, failure.bytes_received, failure.runtime_ms) == (
+        2,
+        17,
+        901,
+    )
+    assert hostile.closed == 1
+
+
+def test_partial_gateway_body_usage_reaches_acquisition_failure_once() -> None:
+    """Confirmed partial target bytes flow through the adapter exactly once."""
+
+    class PartialResponse(_ScriptedResponse):
+        """Expose the typed internal partial-read contract to the adapter."""
+
+        def read(self, _max_bytes: int) -> bytes:
+            raise in_process_runner._PartialBodyRead(  # pylint: disable=protected-access
+                b"abcde"
+            )
+
+    url = "https://example.test/report"
+    transport = _ScriptedTransport(
+        {
+            "https://example.test/robots.txt": [_ScriptedResponse(404)],
+            url: [PartialResponse(200, Content_Type="text/html")],
+        }
+    )
+
+    failure = _tool(transport).acquire(AcquisitionInput(_request(url), url))
+
+    assert isinstance(failure, AcquisitionFailure)
+    assert failure.code == "gateway.transport"
+    assert (failure.requests, failure.bytes_received) == (2, 5)
 
 
 def test_registry_requires_explicit_registration_and_invokes_the_adapter() -> None:

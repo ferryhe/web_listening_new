@@ -70,6 +70,14 @@ _CALL_FAILED = object()
 _ATTRIBUTE_MISSING = object()
 
 
+class AcquisitionOutputRejected(ToolRegistryError):
+    """A Registry rejection that retains validated acquisition usage."""
+
+    def __init__(self, code: str, failure: AcquisitionFailure) -> None:
+        self.failure = failure
+        super().__init__(code)
+
+
 class Registry:
     """Register caller-supplied tools without scanning or installation authority."""
 
@@ -327,6 +335,12 @@ def _validate_output(  # pylint: disable=too-many-branches
     if error is not None:
         raise ToolRegistryError(error)
     if output.tool_id != manifest.tool_id or output.tool_version != manifest.version:
+        if isinstance(output, (AcquisitionOutput, AcquisitionFailure)):
+            raise _acquisition_rejection(
+                manifest,
+                output,
+                "registry.output_identity_mismatch",
+            )
         raise ToolRegistryError("registry.output_identity_mismatch")
     if isinstance(output, DiscoveryOutput):
         if any(source != tool_input.source_url for source in output.discovered_from):
@@ -340,9 +354,25 @@ def _validate_output(  # pylint: disable=too-many-branches
             raise ToolRegistryError("registry.output_limit")
     elif isinstance(output, AcquisitionOutput):
         if output.requested_url != tool_input.target_url:
-            raise ToolRegistryError("registry.output_invalid")
-        _validate_acquisition_authority(tool_input, output)
-        _validate_resource_use(manifest, len(output.body), output.runtime_ms)
+            raise _acquisition_rejection(
+                manifest,
+                output,
+                "registry.output_invalid",
+            )
+        rejection = _acquisition_authority_rejection(tool_input, output)
+        if rejection is not None:
+            registry_code, failure_code = rejection
+            raise _acquisition_rejection(
+                manifest,
+                output,
+                registry_code,
+                failure_code,
+            )
+        resource_code = _resource_use_error(
+            manifest, len(output.body), output.runtime_ms
+        )
+        if resource_code is not None:
+            raise _acquisition_rejection(manifest, output, resource_code)
     elif isinstance(output, TransformOutput):
         if output.source_artifact_id != tool_input.source.artifact.artifact_id:
             raise ToolRegistryError("registry.output_invalid")
@@ -361,7 +391,23 @@ def _revalidate_output(output: ToolResult) -> ToolResult:
         )
     if isinstance(output, AcquisitionOutput):
         redirects = tuple(replace(redirect) for redirect in output.redirects)
-        return replace(output, redirects=redirects)
+        return AcquisitionOutput(
+            output.tool_id,
+            output.tool_version,
+            output.requested_url,
+            output.final_url,
+            output.status_code,
+            output.mime_type,
+            output.body,
+            output.sha256,
+            redirects,
+            output.runtime_ms,
+            getattr(output, "requests", None),
+            getattr(output, "bytes_received", None),
+            getattr(output, "_usage_explicit", None),
+            getattr(output, "_inferred_requests", None),
+            getattr(output, "_inferred_bytes", None),
+        )
     return replace(output)
 
 
@@ -377,22 +423,31 @@ def _contained_output(value: object) -> tuple[ToolResult | None, str | None]:
 def _validate_resource_use(
     manifest: ToolManifest, output_bytes: int, runtime_ms: int
 ) -> None:
+    code = _resource_use_error(manifest, output_bytes, runtime_ms)
+    if code is not None:
+        raise ToolRegistryError(code)
+
+
+def _resource_use_error(
+    manifest: ToolManifest, output_bytes: int, runtime_ms: int
+) -> str | None:
     if output_bytes > manifest.limits.max_output_bytes:
-        raise ToolRegistryError("registry.output_limit")
+        return "registry.output_limit"
     if runtime_ms > manifest.limits.max_runtime_seconds * 1000:
-        raise ToolRegistryError("registry.runtime_limit")
+        return "registry.runtime_limit"
+    return None
 
 
-def _validate_acquisition_authority(
+def _acquisition_authority_rejection(
     tool_input: AcquisitionInput, output: AcquisitionOutput
-) -> None:
+) -> tuple[str, str] | None:
     policy = compile_access_policy(tool_input.request)
     for redirect in output.redirects:
         if (
             urlsplit(redirect.from_url).scheme == "https"
             and urlsplit(redirect.to_url).scheme == "http"
         ):
-            raise ToolRegistryError("gateway.https_downgrade")
+            return "gateway.https_downgrade", "gateway.https_downgrade"
     urls = (
         output.requested_url,
         *(
@@ -405,19 +460,45 @@ def _validate_acquisition_authority(
     for url in urls:
         decision = policy.decide_url(url)
         if not decision.allowed:
-            raise ToolRegistryError(decision.code)
+            return decision.code, decision.code
     content_type = (
         ContentType.HTML if output.mime_type == "text/html" else ContentType.FILE
     )
     decision = policy.decide_content_type(content_type)
     if not decision.allowed:
-        raise ToolRegistryError(decision.code)
+        return decision.code, decision.code
     runtime_seconds = (output.runtime_ms + 999) // 1000
-    for name, amount in (
-        ("max_requests", len(output.redirects) + 1),
-        ("max_bytes", len(output.body)),
-        ("max_runtime_seconds", runtime_seconds),
+    assert output.requests is not None
+    assert output.bytes_received is not None
+    for name, amount, failure_code in (
+        ("max_requests", output.requests, "budget.requests"),
+        ("max_bytes", output.bytes_received, "budget.bytes"),
+        ("max_runtime_seconds", runtime_seconds, "budget.runtime"),
     ):
         decision = policy.decide_budget(name, amount)
         if not decision.allowed:
-            raise ToolRegistryError(decision.code)
+            return decision.code, failure_code
+    return None
+
+
+def _acquisition_rejection(
+    manifest: ToolManifest,
+    output: AcquisitionOutput | AcquisitionFailure,
+    registry_code: str,
+    failure_code: str | None = None,
+) -> AcquisitionOutputRejected:
+    requests = output.requests
+    bytes_received = output.bytes_received
+    assert requests is not None
+    assert bytes_received is not None
+    return AcquisitionOutputRejected(
+        registry_code,
+        AcquisitionFailure(
+            manifest.tool_id,
+            manifest.version,
+            failure_code or registry_code,
+            requests=requests,
+            bytes_received=bytes_received,
+            runtime_ms=output.runtime_ms,
+        ),
+    )

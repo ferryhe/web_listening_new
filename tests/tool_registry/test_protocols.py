@@ -478,6 +478,86 @@ def test_failures_are_separate_immutable_safe_values() -> None:
     assert getattr(caught.value, "code", None) == "protocol.error_code_invalid"
 
 
+def test_acquisition_failure_preserves_validated_usage_evidence() -> None:
+    failure = AcquisitionFailure(
+        "acquisition.http",
+        "1.0.0",
+        "gateway.timeout",
+        requests=2,
+        bytes_received=17,
+        runtime_ms=901,
+    )
+
+    assert (failure.requests, failure.bytes_received, failure.runtime_ms) == (
+        2,
+        17,
+        901,
+    )
+    for name in ("requests", "bytes_received", "runtime_ms"):
+        with pytest.raises(ToolRegistryError) as caught:
+            replace(failure, **{name: -1})
+        assert caught.value.code == "protocol.usage_invalid"
+
+
+def test_acquisition_output_usage_is_validated_and_legacy_construction_is_compatible() -> (
+    None
+):
+    body = b"body"
+    legacy = AcquisitionOutput(
+        "acquisition.http",
+        "1.0.0",
+        "https://example.test/",
+        "https://example.test/",
+        200,
+        "text/html",
+        body,
+        hashlib.sha256(body).hexdigest(),
+        (),
+        5,
+    )
+    measured = AcquisitionOutput(
+        "acquisition.http",
+        "1.0.0",
+        "https://example.test/",
+        "https://example.test/",
+        200,
+        "text/html",
+        body,
+        hashlib.sha256(body).hexdigest(),
+        (),
+        5,
+        requests=2,
+        bytes_received=17,
+    )
+
+    assert (legacy.requests, legacy.bytes_received) == (1, len(body))
+    assert (measured.requests, measured.bytes_received) == (2, 17)
+    for values in ((0, 17), (2, 3), (True, 17), (2, False)):
+        with pytest.raises(ToolRegistryError) as caught:
+            replace(measured, requests=values[0], bytes_received=values[1])
+        assert caught.value.code == "protocol.usage_invalid"
+
+
+def test_replace_legacy_acquisition_output_honors_new_explicit_usage() -> None:
+    body = b"body"
+    legacy = AcquisitionOutput(
+        "acquisition.http",
+        "1.0.0",
+        "https://example.test/",
+        "https://example.test/",
+        200,
+        "text/html",
+        body,
+        hashlib.sha256(body).hexdigest(),
+        (),
+        5,
+    )
+
+    measured = replace(legacy, requests=2, bytes_received=17)
+
+    assert (measured.requests, measured.bytes_received) == (2, 17)
+
+
 @pytest.mark.parametrize(
     "mutate, code",
     [

@@ -183,10 +183,10 @@ def test_no_ai_fake_transport_completes_one_exact_acquisition(
     assert len(job.result.attempts) == 1
     attempt = job.result.attempts[0]
     assert attempt.outcome == "succeeded"
-    assert attempt.requests == 1
+    assert attempt.requests == 2
     assert attempt.bytes_received == len(BODY)
     assert job.result.usage.to_dict() == {
-        "requests": 1,
+        "requests": 2,
         "bytes_received": len(BODY),
         "runtime_ms": attempt.runtime_ms,
         "tool_attempts": 1,

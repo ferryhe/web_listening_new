@@ -1499,3 +1499,124 @@ def test_registry_modules_have_no_forbidden_authority_or_discovery_hooks() -> No
         names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
         assert imports.isdisjoint(forbidden_imports), path
         assert names.isdisjoint(forbidden_names), path
+
+
+@pytest.mark.parametrize("dimension", ["requests", "bytes", "runtime"])
+def test_acquisition_budget_rejection_preserves_usage_and_exact_dimension(
+    dimension: str,
+) -> None:
+    manifest = _manifest("acquisition.http", ToolCategory.ACQUISITION)
+    requested_url = "https://example.test/start"
+    final_url = requested_url
+    redirects: tuple[AcquisitionRedirect, ...] = ()
+    body = b"ok"
+    runtime_ms = 1
+    request = _request()
+    if dimension == "requests":
+        final_url = "https://example.test/final"
+        redirects = (AcquisitionRedirect(requested_url, final_url, 302),)
+        request = _request(max_requests=1)
+    elif dimension == "bytes":
+        request = _request(max_bytes=1)
+    else:
+        runtime_ms = 1_001
+        request = _request(max_runtime_seconds=1)
+    output = AcquisitionOutput(
+        manifest.tool_id,
+        manifest.version,
+        requested_url,
+        final_url,
+        200,
+        "text/html",
+        body,
+        hashlib.sha256(body).hexdigest(),
+        redirects,
+        runtime_ms,
+    )
+    registry = Registry()
+    registry.register(manifest, _AcquisitionFake(manifest, output))
+
+    with pytest.raises(ToolRegistryError) as caught:
+        registry.invoke(
+            manifest.tool_id,
+            AcquisitionInput(request, requested_url),
+        )
+
+    assert caught.value.code == "budget.exceeded"
+    failure = caught.value.failure
+    assert failure.code == f"budget.{dimension}"
+    assert (
+        failure.requests,
+        failure.bytes_received,
+        failure.runtime_ms,
+    ) == (len(redirects) + 1, len(body), runtime_ms)
+
+
+def test_acquisition_budget_rejection_uses_reported_output_usage() -> None:
+    manifest = _manifest("acquisition.http", ToolCategory.ACQUISITION)
+    body = b"ok"
+    output = AcquisitionOutput(
+        manifest.tool_id,
+        manifest.version,
+        "https://example.test/",
+        "https://example.test/",
+        200,
+        "text/html",
+        body,
+        hashlib.sha256(body).hexdigest(),
+        (),
+        7,
+        requests=2,
+        bytes_received=17,
+    )
+    registry = Registry()
+    registry.register(manifest, _AcquisitionFake(manifest, output))
+
+    with pytest.raises(ToolRegistryError) as caught:
+        registry.invoke(
+            manifest.tool_id,
+            AcquisitionInput(_request(max_requests=1), "https://example.test/"),
+        )
+
+    assert caught.value.code == "budget.exceeded"
+    failure = caught.value.failure
+    assert failure.code == "budget.requests"
+    assert (failure.requests, failure.bytes_received, failure.runtime_ms) == (
+        2,
+        17,
+        7,
+    )
+
+
+def test_acquisition_budget_rejection_uses_usage_replaced_onto_legacy_output() -> None:
+    manifest = _manifest("acquisition.http", ToolCategory.ACQUISITION)
+    body = b"body"
+    legacy = AcquisitionOutput(
+        manifest.tool_id,
+        manifest.version,
+        "https://example.test/",
+        "https://example.test/",
+        200,
+        "text/html",
+        body,
+        hashlib.sha256(body).hexdigest(),
+        (),
+        7,
+    )
+    output = replace(legacy, requests=2, bytes_received=17)
+    registry = Registry()
+    registry.register(manifest, _AcquisitionFake(manifest, output))
+
+    with pytest.raises(ToolRegistryError) as caught:
+        registry.invoke(
+            manifest.tool_id,
+            AcquisitionInput(_request(max_requests=1), "https://example.test/"),
+        )
+
+    failure = caught.value.failure
+    assert failure.code == "budget.requests"
+    assert (failure.requests, failure.bytes_received, failure.runtime_ms) == (
+        2,
+        17,
+        7,
+    )

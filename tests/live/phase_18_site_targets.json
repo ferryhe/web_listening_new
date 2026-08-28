@@ -1,0 +1,102 @@
+{
+  "schema_version": "phase-18-explore-tools-live-targets.v1",
+  "phase": "18",
+  "source_catalog": "tests/live/catalog/smoke_site_catalog.json",
+  "source_catalog_sha256": "CE378F743C6363F1DC22A25758B958E3ADA695F8996B3F619AFA4CF0CD5D5322",
+  "source_catalog_sha256_basis": "raw_bytes",
+  "targets": [
+    {
+      "site_key": "ipcc",
+      "display_name": "Intergovernmental Panel on Climate Change",
+      "urls": {
+        "homepage": "https://www.ipcc.ch/",
+        "monitor": "https://www.ipcc.ch/",
+        "document": null,
+        "tree_seed": null
+      },
+      "allowed_origins": [
+        "https://www.ipcc.ch"
+      ],
+      "historical_classification": {
+        "expectation": "pass_http",
+        "website_status": "sheet",
+        "priority": true,
+        "smoke_required": true,
+        "js_heavy_candidate": false
+      },
+      "evidence_thresholds": {
+        "monitor_min_words": 300,
+        "document_min_words": null,
+        "document_min_links": null
+      },
+      "site_skill_case": "ipcc",
+      "site_skill_digest": "sha256:65886846062d93ebe8e4d9edef63c1c65fc37774749d731db086ed3a408b97be",
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "ipcc"
+      },
+      "tree_include_paths": [],
+      "tool_facts": {
+        "tool_id": "acquisition.web_http",
+        "version": "1.0.0",
+        "category": "acquisition",
+        "capabilities": [
+          "http_get"
+        ],
+        "recipe_id": "catalog-http"
+      }
+    },
+    {
+      "site_key": "tnfd",
+      "display_name": "Taskforce on Nature-related Financial Disclosures",
+      "urls": {
+        "homepage": "https://tnfd.global/",
+        "monitor": "https://tnfd.global/news/",
+        "document": null,
+        "tree_seed": null
+      },
+      "allowed_origins": [
+        "https://tnfd.global"
+      ],
+      "historical_classification": {
+        "expectation": "pass_http_limited",
+        "website_status": "sheet",
+        "priority": true,
+        "smoke_required": false,
+        "js_heavy_candidate": true
+      },
+      "evidence_thresholds": {
+        "monitor_min_words": 3,
+        "document_min_words": null,
+        "document_min_links": null
+      },
+      "site_skill_case": "tnfd",
+      "site_skill_digest": "sha256:ae1ae58703f633c30c4c23bcd0dba1eb090efd70ee7e4a94aa011fd9ce902b20",
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "tnfd"
+      },
+      "tree_include_paths": [],
+      "tool_facts": {
+        "tool_id": "acquisition.web_http",
+        "version": "1.0.0",
+        "category": "acquisition",
+        "capabilities": [
+          "http_get"
+        ]
+      }
+    }
+  ],
+  "network_limits": {
+    "max_targets": 2,
+    "max_total_requests": 12,
+    "max_total_response_bytes": 8388608,
+    "timeout_seconds": 60,
+    "concurrency": 1,
+    "retry": 0
+  }
+}
