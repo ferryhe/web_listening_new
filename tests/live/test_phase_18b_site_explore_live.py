@@ -40,6 +40,11 @@ SMOKE_SHA256 = "CE378F743C6363F1DC22A25758B958E3ADA695F8996B3F619AFA4CF0CD5D5322
 SKILL_SHA256 = "AE1CE1126EB475A21839FFEF178B68DC0806C19300C5347181197CD922E90BEC"
 
 
+def _catalog_sha256(content: bytes) -> str:
+    canonical = content.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    return hashlib.sha256(canonical).hexdigest().upper()
+
+
 def _load_snapshot() -> tuple[dict[str, object], dict[str, object]]:
     payload = json.loads(TARGETS.read_bytes())
     target = payload.get("target")
@@ -50,9 +55,9 @@ def _load_snapshot() -> tuple[dict[str, object], dict[str, object]]:
         pytest.fail("Phase 18B smoke catalog digest drifted")
     if payload.get("source_site_skill_catalog_sha256") != SKILL_SHA256:
         pytest.fail("Phase 18B Site Skill catalog digest drifted")
-    if hashlib.sha256(SMOKE_CATALOG.read_bytes()).hexdigest().upper() != SMOKE_SHA256:
+    if _catalog_sha256(SMOKE_CATALOG.read_bytes()) != SMOKE_SHA256:
         pytest.fail("Phase 18B smoke source bytes drifted")
-    if hashlib.sha256(SKILL_CATALOG.read_bytes()).hexdigest().upper() != SKILL_SHA256:
+    if _catalog_sha256(SKILL_CATALOG.read_bytes()) != SKILL_SHA256:
         pytest.fail("Phase 18B Site Skill source bytes drifted")
     smoke_rows = json.loads(SMOKE_CATALOG.read_bytes()).get("sites")
     skill_rows = json.loads(SKILL_CATALOG.read_bytes()).get("cases")
@@ -197,6 +202,20 @@ def test_phase_18b_snapshot_is_exact_and_bounded() -> None:
     assert forbidden_token not in source
     runtime_call = "run_site_" + "explore("
     assert source.count(runtime_call) == 1
+
+
+@pytest.mark.parametrize(
+    ("catalog", "expected"),
+    ((SMOKE_CATALOG, SMOKE_SHA256), (SKILL_CATALOG, SKILL_SHA256)),
+)
+def test_phase_18b_catalog_hashes_are_checkout_line_ending_stable(
+    catalog: Path, expected: str
+) -> None:
+    lf_bytes = catalog.read_bytes().replace(b"\r\n", b"\n")
+    crlf_bytes = lf_bytes.replace(b"\n", b"\r\n")
+
+    assert _catalog_sha256(lf_bytes) == expected
+    assert _catalog_sha256(crlf_bytes) == expected
 
 
 @pytest.mark.live
