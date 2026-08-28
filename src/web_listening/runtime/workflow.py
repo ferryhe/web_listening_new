@@ -1,13 +1,20 @@
 """One governed single-target workflow connecting existing public modules."""
 
-# pylint: disable=duplicate-code,too-many-locals,too-many-return-statements
+# pylint: disable=duplicate-code,too-few-public-methods,too-many-lines,too-many-locals
+# pylint: disable=too-many-return-statements
 # pylint: disable=unidiomatic-typecheck
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Protocol
+from urllib.parse import (
+    urlsplit,
+    urlunsplit,
+)
 
 from web_listening.artifact.model import (
     ArtifactRole,
@@ -16,8 +23,10 @@ from web_listening.artifact.model import (
 )
 from web_listening.artifact.observation import ObservationProposal
 from web_listening.artifact.store import ArtifactStore
-from web_listening.request.model import Budgets, Request
-from web_listening.request.validate import validate_request
+from web_listening.request.budgets import validate_budgets
+from web_listening.request.model import Budgets, Request, RequestValidationError
+from web_listening.request.scope import canonicalize_url
+from web_listening.request.validate import compile_access_policy, validate_request
 from web_listening.result.attempts import Attempt
 from web_listening.result.errors import SafeError
 from web_listening.result.manifest import (
@@ -28,15 +37,26 @@ from web_listening.result.manifest import (
     manifest_from_observations,
 )
 from web_listening.result.model import Result, ResultStatus
-from web_listening.site_skill.model import SiteSkillError
+from web_listening.site_skill.model import (
+    SiteSkill,
+    SiteSkillError,
+    SuccessChecks,
+    ToolReference,
+)
 from web_listening.site_skill.resolve import resolve_site_skill
+from web_listening.site_skill.update import SiteSkillCandidate, create_candidate
 from web_listening.tool_registry.eligibility import (
     EligibilityFacts,
     EligibilityRequirements,
     acquisition_failure_allows_switch,
     rank_eligible_tools,
 )
-from web_listening.tool_registry.manifest import ToolCategory, ToolRegistryError
+from web_listening.tool_registry.manifest import (
+    ToolCategory,
+    ToolManifest,
+    ToolRegistryError,
+    validate_tool_id,
+)
 from web_listening.tool_registry.protocols.acquisition import (
     AcquisitionFailure,
     AcquisitionInput,
@@ -68,11 +88,69 @@ class DiscoveredCandidateResult:
 
 
 @dataclass(frozen=True, slots=True)
+class BoundedActionProposal:
+    """One inert external proposal; it carries no execution capability."""
+
+    action: str
+    target_url: str
+    tool_id: str
+    budgets: Budgets
+
+
+@dataclass(frozen=True, slots=True)
+class ExplorationMetadata:  # pylint: disable=too-many-instance-attributes
+    """Safe failure metadata exposed to an optional external explorer."""
+
+    failure_code: str
+    requested_url: str
+    current_url: str
+    tool_id: str | None
+    tool_version: str | None
+    http_status: int | None
+    requests_used: int
+    bytes_received: int
+    runtime_ms: int
+    tool_attempts_used: int
+    remaining_requests: int
+    remaining_bytes: int
+    remaining_runtime_ms: int
+    remaining_tool_attempts_per_target: int
+    active_site_skill_digest: str | None
+
+
+class ExplorerPort(Protocol):
+    """Core-external proposer port with no Registry, Store, or network handle."""
+
+    def propose(self, metadata: ExplorationMetadata) -> object:
+        """Return at most one inert proposal from safe metadata."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExplorationDecision:
+    """One immutable authorization/execution outcome plus optional candidate."""
+
+    proposal: BoundedActionProposal | None
+    allowed: bool
+    code: str
+    result: Result
+    candidate: SiteSkillCandidate | None
+
+
+@dataclass(frozen=True, slots=True)
 class _TransformResult:
     attempt: Attempt | None = None
     observation: StoredObservation | None = None
     errors: tuple[SafeError, ...] = ()
     completed_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthorizedAction:
+    proposal: BoundedActionProposal
+    request: Request
+    manifest: ToolManifest
+    previous: SiteSkill | None
+    scope_request: Request
 
 
 def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
@@ -527,6 +605,461 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
     )
 
 
+def run_agent_assisted_target(  # pylint: disable=too-many-arguments
+    request: Request,
+    registry: Registry,
+    artifact_store: ArtifactStore,
+    *,
+    run_id: str,
+    clock: Callable[[], str],
+    explorer: ExplorerPort | None = None,
+) -> ExplorationDecision:
+    """Run once normally, then authorize at most one external proposal."""
+    request = validate_request(request)
+    if explorer is None:
+        initial = run_single_target(
+            request,
+            registry,
+            artifact_store,
+            run_id=run_id,
+            clock=clock,
+        )
+        return _exploration_decision("exploration.not_requested", initial)
+    initial = run_single_target(
+        request,
+        registry,
+        artifact_store,
+        run_id=run_id,
+        clock=clock,
+        target_url=request.scope.seeds[0],
+    )
+    if not _is_acquisition_failure(initial):
+        return _exploration_decision("exploration.not_needed", initial)
+
+    try:
+        scope_request, previous = _exploration_authority(request, registry)
+    except (RequestValidationError, SiteSkillError, ToolRegistryError) as exc:
+        return _exploration_decision(exc.code, initial)
+    metadata = _exploration_metadata(initial, scope_request, previous)
+    proposer_started_ns = time.perf_counter_ns()
+    try:
+        proposed = explorer.propose(metadata)
+    except asyncio.CancelledError:
+        return _exploration_decision("exploration.proposer_cancelled", initial)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return _exploration_decision("exploration.proposer_exception", initial)
+    proposer_runtime_ms = _elapsed_runtime_ms(
+        proposer_started_ns, time.perf_counter_ns()
+    )
+    authorization_metadata = replace(
+        metadata,
+        runtime_ms=metadata.runtime_ms + proposer_runtime_ms,
+        remaining_runtime_ms=max(
+            0, metadata.remaining_runtime_ms - proposer_runtime_ms
+        ),
+    )
+
+    proposal, rejection = _snapshot_proposal(proposed)
+    if rejection is not None:
+        return _exploration_decision(rejection, initial)
+    assert proposal is not None
+    authorized, rejection = _authorize_action(
+        proposal,
+        registry,
+        scope_request=scope_request,
+        previous=previous,
+        metadata=authorization_metadata,
+        prior_attempts=initial.attempts,
+    )
+    if rejection is not None:
+        return _exploration_decision(rejection, initial, proposal=proposal)
+    assert authorized is not None
+    action_started_at = clock()
+    action_started_ns = time.perf_counter_ns()
+    try:
+        execution = run_single_target(
+            authorized.request,
+            registry,
+            artifact_store,
+            run_id=_exploration_run_id(run_id),
+            clock=clock,
+            target_url=authorized.proposal.target_url,
+        )
+    except asyncio.CancelledError:
+        action_finished_at = clock()
+        cancelled = _cancelled_exploration_result(
+            authorized,
+            run_id=run_id,
+            started_at=action_started_at,
+            finished_at=action_finished_at,
+            runtime_ms=_elapsed_runtime_ms(action_started_ns, time.perf_counter_ns()),
+        )
+        return ExplorationDecision(
+            authorized.proposal,
+            True,
+            "exploration.execution_cancelled",
+            _combine_exploration_results(initial, cancelled, None),
+            None,
+        )
+    if not execution.artifacts:
+        return ExplorationDecision(
+            authorized.proposal,
+            True,
+            "exploration.execution_failed",
+            _combine_exploration_results(initial, execution, None),
+            None,
+        )
+
+    try:
+        candidate = _create_exploration_candidate(authorized, execution, artifact_store)
+    except (ArtifactStoreError, SiteSkillError):
+        return ExplorationDecision(
+            authorized.proposal,
+            True,
+            "exploration.candidate_verification_failed",
+            _combine_exploration_results(initial, execution, None),
+            None,
+        )
+    if candidate is None:
+        return ExplorationDecision(
+            authorized.proposal,
+            True,
+            "exploration.candidate_quality_unverified",
+            _combine_exploration_results(initial, execution, None),
+            None,
+        )
+    evidence = SiteSkillEvidence(
+        str(candidate.skill.version),
+        candidate.skill.digest.removeprefix("sha256:"),
+    )
+    return ExplorationDecision(
+        authorized.proposal,
+        True,
+        "exploration.succeeded",
+        _combine_exploration_results(initial, execution, evidence),
+        candidate,
+    )
+
+
+def _exploration_authority(
+    request: Request, registry: Registry
+) -> tuple[Request, SiteSkill | None]:
+    if request.site_skill is None:
+        return request, None
+    resolution = resolve_site_skill(request, request.site_skill, registry)
+    if not resolution.eligible:
+        raise SiteSkillError(_ineligible_code(resolution.reasons))
+    return resolution.request, resolution.skill
+
+
+def _is_acquisition_failure(result: Result) -> bool:
+    return (
+        result.status is ResultStatus.FAILED
+        and not result.artifacts
+        and bool(result.errors)
+        and result.errors[-1].message == "Acquisition did not complete."
+        and any(attempt.outcome == "failed" for attempt in result.attempts)
+    )
+
+
+def _exploration_metadata(
+    result: Result,
+    request: Request,
+    previous: SiteSkill | None,
+) -> ExplorationMetadata:
+    failed = next(
+        attempt for attempt in reversed(result.attempts) if attempt.outcome == "failed"
+    )
+    assert failed.error is not None
+    runtime_limit_ms = request.budgets.max_runtime_seconds * 1_000
+    return ExplorationMetadata(
+        failure_code=failed.error.code,
+        requested_url=_safe_exploration_url(failed.requested_url),
+        current_url=_safe_exploration_url(
+            failed.final_url or result.manifest.current_url
+        ),
+        tool_id=failed.tool_id,
+        tool_version=failed.tool_version,
+        http_status=failed.http_status,
+        requests_used=result.usage.requests,
+        bytes_received=result.usage.bytes_received,
+        runtime_ms=result.usage.runtime_ms,
+        tool_attempts_used=result.usage.tool_attempts,
+        remaining_requests=max(0, request.budgets.max_requests - result.usage.requests),
+        remaining_bytes=max(0, request.budgets.max_bytes - result.usage.bytes_received),
+        remaining_runtime_ms=max(0, runtime_limit_ms - result.usage.runtime_ms),
+        # This limit is per target; the proposal names a different target.
+        remaining_tool_attempts_per_target=(
+            request.budgets.max_tool_attempts_per_target
+        ),
+        active_site_skill_digest=(None if previous is None else previous.digest),
+    )
+
+
+def _safe_exploration_url(value: str) -> str:
+    parsed = urlsplit(value)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _authorize_action(  # pylint: disable=too-many-arguments
+    proposal: BoundedActionProposal,
+    registry: Registry,
+    *,
+    scope_request: Request,
+    previous: SiteSkill | None,
+    metadata: ExplorationMetadata,
+    prior_attempts: tuple[Attempt, ...],
+) -> tuple[_AuthorizedAction | None, str | None]:
+    if proposal.action != "acquire_url":
+        return None, "exploration.action_unknown"
+    decision = compile_access_policy(scope_request).decide_url(proposal.target_url)
+    if not decision.allowed:
+        return None, decision.code
+    if proposal.budgets.max_tool_attempts_per_target != 1:
+        return None, "exploration.action_contract_invalid"
+    target_attempts_used = sum(
+        attempt.outcome != "skipped"
+        and canonicalize_url(attempt.requested_url) == proposal.target_url
+        for attempt in prior_attempts
+    )
+    remaining_target_attempts = max(
+        0,
+        scope_request.budgets.max_tool_attempts_per_target - target_attempts_used,
+    )
+    if proposal.budgets.max_tool_attempts_per_target > remaining_target_attempts:
+        return None, "eligibility.attempt_budget_exhausted"
+    if (
+        proposal.budgets.max_requests > metadata.remaining_requests
+        or proposal.budgets.max_bytes > metadata.remaining_bytes
+        or proposal.budgets.max_runtime_seconds * 1_000 > metadata.remaining_runtime_ms
+        or proposal.budgets.max_tool_attempts_per_target
+        > metadata.remaining_tool_attempts_per_target
+    ):
+        return None, "exploration.budget_exceeded"
+    try:
+        manifests = registry.query(category=ToolCategory.ACQUISITION)
+    except ToolRegistryError as exc:
+        return None, exc.code
+    manifest = next(
+        (item for item in manifests if item.tool_id == proposal.tool_id), None
+    )
+    if manifest is None:
+        return None, "exploration.tool_unknown"
+    tool_ids = frozenset(item.tool_id for item in manifests)
+    selection = rank_eligible_tools(
+        manifests,
+        EligibilityRequirements(category=ToolCategory.ACQUISITION),
+        EligibilityFacts(
+            tool_ids,
+            tool_ids,
+            proposal.budgets.max_requests,
+            proposal.budgets.max_bytes,
+            proposal.budgets.max_runtime_seconds * 1_000,
+            proposal.budgets.max_tool_attempts_per_target,
+        ),
+        preferred_tool_id=proposal.tool_id,
+        include_alternates=False,
+    )
+    if not selection.ranked:
+        tool_decision = next(
+            item for item in selection.decisions if item.tool_id == proposal.tool_id
+        )
+        return None, (
+            tool_decision.reasons[0]
+            if tool_decision.reasons
+            else "eligibility.ineligible"
+        )
+    if proposal.tool_id != _DEFAULT_ACQUISITION_TOOL_ID:
+        return None, "exploration.tool_not_permitted"
+    action_request = Request(
+        scope_request.scope,
+        None,
+        False,
+        proposal.budgets,
+    )
+    return (
+        _AuthorizedAction(
+            proposal,
+            action_request,
+            manifest,
+            previous,
+            scope_request,
+        ),
+        None,
+    )
+
+
+def _snapshot_proposal(
+    value: object,
+) -> tuple[BoundedActionProposal | None, str | None]:
+    if (
+        type(value) is not BoundedActionProposal
+        or type(value.action) is not str
+        or type(value.target_url) is not str
+        or type(value.tool_id) is not str
+        or type(value.budgets) is not Budgets
+    ):
+        return None, "exploration.proposal_invalid"
+    try:
+        target_url = canonicalize_url(value.target_url)
+        validate_tool_id(value.tool_id)
+        budgets = validate_budgets(value.budgets)
+    except (RequestValidationError, ToolRegistryError) as exc:
+        return None, exc.code
+    return (
+        BoundedActionProposal(value.action, target_url, value.tool_id, budgets),
+        None,
+    )
+
+
+def _create_exploration_candidate(
+    authorized: _AuthorizedAction,
+    result: Result,
+    artifact_store: ArtifactStore,
+) -> SiteSkillCandidate | None:
+    previous = authorized.previous
+    mime_type = result.manifest.mime_type
+    assert mime_type is not None
+    source = next(
+        artifact for artifact in result.artifacts if artifact.role == "source"
+    )
+    stored = artifact_store.read_artifact(source.artifact_id)
+    observed_words = len(stored.content.decode("utf-8", errors="ignore").split())
+    if observed_words == 0:
+        return None
+    if previous is not None and (
+        mime_type not in previous.success_checks.allowed_mime_types
+        or observed_words < previous.success_checks.minimum_words
+    ):
+        return None
+    minimum_words = (
+        observed_words if previous is None else previous.success_checks.minimum_words
+    )
+    checks = SuccessChecks((mime_type,), minimum_words)
+    candidate_scope = replace(
+        authorized.scope_request.scope,
+        seeds=(authorized.proposal.target_url,),
+    )
+    hostname = urlsplit(authorized.proposal.target_url).hostname
+    assert hostname is not None
+    return create_candidate(
+        site_key=(
+            _site_key_from_hostname(hostname) if previous is None else previous.site_key
+        ),
+        version=1 if previous is None else previous.version + 1,
+        previous=previous,
+        scope=candidate_scope,
+        budgets=authorized.proposal.budgets,
+        tool=ToolReference(
+            authorized.manifest.tool_id,
+            authorized.manifest.version,
+            authorized.manifest.category,
+            authorized.manifest.capabilities,
+        ),
+        success_checks=checks,
+        verified_at=result.manifest.generated_at,
+    )
+
+
+def _site_key_from_hostname(hostname: str) -> str:
+    for candidate in (hostname, f"site-{hostname}"):
+        try:
+            return validate_tool_id(candidate)
+        except ToolRegistryError:
+            continue
+    encoded = f"site-{hostname.encode('utf-8').hex()}"
+    try:
+        return validate_tool_id(encoded)
+    except ToolRegistryError as exc:
+        raise SiteSkillError("site_skill.site_key_invalid") from exc
+
+
+def _combine_exploration_results(
+    initial: Result,
+    execution: Result,
+    candidate: SiteSkillEvidence | None,
+) -> Result:
+    start = len(initial.attempts)
+    action_attempts = tuple(
+        replace(attempt, order=start + index)
+        for index, attempt in enumerate(execution.attempts)
+    )
+    attempts = initial.attempts + action_attempts
+    usage = _usage(attempts)
+    manifest = replace(
+        execution.manifest,
+        run_id=initial.manifest.run_id,
+        site_skill=initial.site_skill_used,
+        attempts=attempts,
+        usage=usage,
+    )
+    return Result(
+        status=(ResultStatus.PARTIAL if execution.artifacts else ResultStatus.FAILED),
+        manifest=manifest,
+        site_skill_used=initial.site_skill_used,
+        site_skill_update=candidate,
+        attempts=attempts,
+        errors=initial.errors + execution.errors,
+        usage=usage,
+    )
+
+
+def _exploration_decision(
+    code: str,
+    result: Result,
+    *,
+    proposal: BoundedActionProposal | None = None,
+) -> ExplorationDecision:
+    return ExplorationDecision(proposal, False, code, result, None)
+
+
+def _exploration_run_id(run_id: str) -> str:
+    suffix = "-explore"
+    return f"{run_id[: 128 - len(suffix)]}{suffix}"
+
+
+def _cancelled_exploration_result(  # pylint: disable=too-many-arguments
+    authorized: _AuthorizedAction,
+    *,
+    run_id: str,
+    started_at: str,
+    finished_at: str,
+    runtime_ms: int,
+) -> Result:
+    action_run_id = _exploration_run_id(run_id)
+    code = "exploration.execution_cancelled"
+    error = SafeError(code, "Exploration action was cancelled.")
+    attempt = _attempt(
+        run_id=action_run_id,
+        attempt_id=_ordered_attempt_id(action_run_id, "acquisition", 0),
+        order=0,
+        outcome="failed",
+        requested_url=authorized.proposal.target_url,
+        started_at=started_at,
+        finished_at=finished_at,
+        tool_id=authorized.manifest.tool_id,
+        tool_version=authorized.manifest.version,
+        final_url=None,
+        http_status=None,
+        error=error,
+        requests=0,
+        bytes_received=0,
+        runtime_ms=runtime_ms,
+    )
+    return _failure_result(
+        status=ResultStatus.FAILED,
+        run_id=action_run_id,
+        generated_at=finished_at,
+        requested_url=authorized.proposal.target_url,
+        current_url=authorized.proposal.target_url,
+        code=code,
+        message="Exploration action was cancelled.",
+        tool_id=authorized.manifest.tool_id,
+        tool_version=authorized.manifest.version,
+        attempts=(attempt,),
+    )
+
+
 def _transform_stored_source(  # pylint: disable=too-many-arguments
     registry: Registry,
     artifact_store: ArtifactStore,
@@ -964,8 +1497,13 @@ def _ineligible_code(reasons: tuple[str, ...]) -> str:
 
 
 __all__ = [
+    "BoundedActionProposal",
     "DiscoveredCandidateResult",
+    "ExplorationDecision",
+    "ExplorationMetadata",
+    "ExplorerPort",
     "acquire_discovered_candidates",
     "discover_candidates",
+    "run_agent_assisted_target",
     "run_single_target",
 ]
