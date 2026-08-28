@@ -796,23 +796,69 @@ def test_incomplete_body_deducts_usage_then_switches_to_alternate(
 def test_auth_and_not_found_http_statuses_remain_terminal(
     tmp_path: Path, status: int
 ) -> None:
-    preferred = _Tool(
-        PREFERRED,
-        _failure(PREFERRED, "gateway.http_status", requests=2),
+    class Response:
+        peer_ip = "93.184.216.34"
+
+        def __init__(self, response_status: int) -> None:
+            self.status = response_status
+            self.headers: dict[str, str] = {}
+            self.reads = 0
+            self.closed = 0
+
+        def set_timeout(self, _timeout: float) -> None:
+            return None
+
+        def read(self, _max_bytes: int) -> bytes:
+            self.reads += 1
+            return b"must-not-be-read"
+
+        def close(self) -> None:
+            self.closed += 1
+
+    class StatusTransport:
+        def __init__(self) -> None:
+            self.requests: list[str] = []
+            self.target = Response(status)
+            self.closed = 0
+
+        def send(
+            self, url: str, *, timeout: float, addresses: tuple[str, ...]
+        ) -> object:
+            del timeout, addresses
+            self.requests.append(url)
+            if url.endswith("/robots.txt"):
+                return Response(404)
+            return self.target
+
+        def close(self) -> None:
+            self.closed += 1
+
+    transport = StatusTransport()
+    preferred = WebHttpAcquisitionTool(
+        lambda: transport,
+        resolver=lambda _host, _port: ("93.184.216.34",),
     )
     alternate_manifest = _manifest("acquisition.alternate")
     alternate = _Tool(alternate_manifest, _output(alternate_manifest))
 
-    result, store = _run(
+    result, store = _run_request(
         tmp_path,
-        (alternate, preferred),
-        explore=True,
+        (alternate, preferred),  # type: ignore[arg-type]
+        _request_without_site_skill(explore=True),
     )
 
-    assert status in {401, 403, 404, 410}
+    assert result.status.value == "failed"
+    assert [attempt.tool_id for attempt in result.attempts] == [
+        WEB_HTTP_MANIFEST.tool_id
+    ]
     assert result.errors[0].code == "gateway.http_status"
     assert result.usage.requests == 2
     assert alternate.calls == 0
+    assert transport.requests == [f"{ORIGIN}/robots.txt", URL]
+    assert transport.target.status == status
+    assert transport.target.reads == 0
+    assert transport.target.closed == 1
+    assert transport.closed == 1
     store.close()
 
 

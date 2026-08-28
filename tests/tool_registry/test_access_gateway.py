@@ -1488,6 +1488,44 @@ def test_external_runtime_deadline_bounds_body_read_with_remaining_time() -> Non
     assert target.closed == 1
 
 
+def test_completion_exactly_at_runtime_deadline_is_not_over_budget() -> None:
+    clock = ManualClock()
+
+    class ExactDeadlineResponse(FakeResponse):
+        def read(self, max_bytes: int) -> bytes:
+            clock.value = 1.0
+            return super().read(max_bytes)
+
+    target = ExactDeadlineResponse(
+        200,
+        b"body",
+        Content_Type="text/html",
+        Content_Length="4",
+    )
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [FakeResponse(404)],
+            "https://example.com/public": [target],
+        }
+    )
+    access = GovernedAccessGateway(
+        request_for(max_runtime_seconds=30),
+        transport,
+        resolver=Resolver(),
+        clock=clock,
+        runtime_deadline=1.0,
+    )
+
+    result = access.read("https://example.com/public")
+
+    assert result.body == b"body"
+    assert result.evidence.usage.requests == 2
+    assert result.evidence.usage.bytes == 4
+    assert result.evidence.usage.elapsed_seconds == 1.0
+    assert target.timeouts == [1.0]
+    assert target.closed == 1
+
+
 def test_body_response_without_deadline_contract_is_rejected_before_read() -> None:
     class NoDeadlineResponse:
         status = 200

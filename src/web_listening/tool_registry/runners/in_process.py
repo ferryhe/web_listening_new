@@ -1135,7 +1135,7 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
         return remaining
 
     def _ensure_runtime(self, state: _ReadState) -> None:
-        if self._clock() >= self._runtime_deadline:
+        if self._clock() > self._runtime_deadline:
             self._raise("budget.runtime", state)
 
     def _evidence(self, state: _ReadState) -> GatewayEvidence:
