@@ -1,7 +1,7 @@
 """Deterministic governed orchestration for one bounded site exploration."""
 
 # pylint: disable=broad-exception-caught,duplicate-code,missing-function-docstring
-# pylint: disable=too-many-branches,too-many-locals,too-many-statements
+# pylint: disable=too-many-branches,too-many-lines,too-many-locals,too-many-statements
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from web_listening.artifact.site_state import SiteState, SiteStatePage
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import Budgets, Request
+from web_listening.request.scope import canonicalize_url
 from web_listening.request.validate import validate_request
 from web_listening.result.attempts import Attempt
 from web_listening.result.errors import ResultValidationError, SafeError
@@ -58,6 +59,9 @@ _BUDGET_TERMINAL_CODES = frozenset(
         "eligibility.runtime_budget_exhausted",
         "eligibility.attempt_budget_exhausted",
     }
+)
+_SHARED_BUDGET_TERMINAL_CODES = _BUDGET_TERMINAL_CODES - frozenset(
+    {"eligibility.attempt_budget_exhausted"}
 )
 
 
@@ -181,14 +185,25 @@ def run_site_explore(  # pylint: disable=too-many-arguments
     discovery_terminal_errors: list[SafeError] = []
     discovered: dict[str, tuple[str, ToolManifest]] = {}
     budget_exhausted = False
+    target_attempt_budget_exhausted = False
     cancelled = False
     discovery_all_processed = True
     for index, manifest in enumerate(manifests):
         if not _discovery_budget_available(
-            request.budgets, results, discovery_attempts
+            request.budgets,
+            results,
+            discovery_attempts,
+            seed_source.source_url,
         ):
-            budget_exhausted = True
             discovery_all_processed = False
+            if _shared_budget_exhausted(
+                request.budgets,
+                results,
+                discovery_attempts,
+            ):
+                budget_exhausted = True
+            else:
+                target_attempt_budget_exhausted = True
             break
         started_at = clock()
         invocation_started_ns = monotonic_ns()
@@ -244,8 +259,11 @@ def run_site_explore(  # pylint: disable=too-many-arguments
                 discovery_all_processed = False
                 break
             if error.code in _BUDGET_TERMINAL_CODES:
-                budget_exhausted = True
                 discovery_all_processed = False
+                if error.code in _SHARED_BUDGET_TERMINAL_CODES:
+                    budget_exhausted = True
+                else:
+                    target_attempt_budget_exhausted = True
                 break
             if _shared_budget_exhausted(request.budgets, results, discovery_attempts):
                 budget_exhausted = True
@@ -357,7 +375,7 @@ def run_site_explore(  # pylint: disable=too-many-arguments
     )
     available_candidates = tuple(sorted(discovered.items()))
     extra_errors = list(discovery_terminal_errors)
-    if budget_exhausted:
+    if budget_exhausted or target_attempt_budget_exhausted:
         extra_errors.append(
             SafeError("budget.exhausted", "Exploration budget was exhausted.")
         )
@@ -365,7 +383,12 @@ def run_site_explore(  # pylint: disable=too-many-arguments
         extra_errors.append(
             SafeError("runtime.discovery_unavailable", "Discovery did not complete.")
         )
-    if not available_candidates and not budget_exhausted and not cancelled:
+    if (
+        not available_candidates
+        and not budget_exhausted
+        and not target_attempt_budget_exhausted
+        and not cancelled
+    ):
         extra_errors.append(
             SafeError("discovery.no_candidates", "Discovery did not find candidates.")
         )
@@ -394,14 +417,27 @@ def run_site_explore(  # pylint: disable=too-many-arguments
             )
             processed_candidates += 1
             continue
-        remaining = _remaining_budgets(request.budgets, results, discovery_attempts)
+        remaining = _remaining_budgets(
+            request.budgets,
+            results,
+            discovery_attempts,
+            candidate_url,
+        )
         if remaining is None:
-            budget_exhausted = True
             acquired_all = False
             extra_errors.append(
                 SafeError("budget.exhausted", "Exploration budget was exhausted.")
             )
-            break
+            if _shared_budget_exhausted(
+                request.budgets,
+                results,
+                discovery_attempts,
+            ):
+                budget_exhausted = True
+                break
+            target_attempt_budget_exhausted = True
+            processed_candidates += 1
+            continue
         candidate_request = Request(
             request.scope,
             None,
@@ -421,12 +457,14 @@ def run_site_explore(  # pylint: disable=too-many-arguments
         if _entered_acquisition(candidate_result, candidate_url):
             acquired_candidates += 1
         if _has_budget_terminal(candidate_result):
-            budget_exhausted = True
             acquired_all = False
             extra_errors.append(
                 SafeError("budget.exhausted", "Exploration budget was exhausted.")
             )
-            break
+            if _has_shared_budget_terminal(candidate_result):
+                budget_exhausted = True
+                break
+            target_attempt_budget_exhausted = True
         if _was_cancelled(candidate_result):
             cancelled = True
             acquired_all = False
@@ -484,7 +522,7 @@ def run_site_explore(  # pylint: disable=too-many-arguments
     elif cancelled:
         status = ResultStatus.PARTIAL
         stop_reason = "cancelled"
-    elif budget_exhausted:
+    elif budget_exhausted or target_attempt_budget_exhausted:
         status = ResultStatus.PARTIAL
         stop_reason = "budget_exhausted"
     elif discovery_failed or not selected:
@@ -633,12 +671,17 @@ def _remaining_budgets(
     limits: Budgets,
     results: list[Result],
     discovery_attempts: list[Attempt],
+    target_url: str,
 ) -> Budgets | None:
     usage = _usage_from_results(results, discovery_attempts)
     requests = limits.max_requests - usage.requests
     bytes_remaining = limits.max_bytes - usage.bytes_received
     runtime_seconds = (limits.max_runtime_seconds * 1_000 - usage.runtime_ms) // 1_000
-    attempts = limits.max_tool_attempts_per_target - usage.tool_attempts
+    attempts = limits.max_tool_attempts_per_target - _tool_attempts_for_target(
+        results,
+        discovery_attempts,
+        target_url,
+    )
     if requests <= 0 or bytes_remaining <= 0 or runtime_seconds <= 0 or attempts <= 0:
         return None
     return Budgets(
@@ -653,13 +696,15 @@ def _discovery_budget_available(
     limits: Budgets,
     results: list[Result],
     discovery_attempts: list[Attempt],
+    source_url: str,
 ) -> bool:
     usage = _usage_from_results(results, discovery_attempts)
     return (
         usage.requests < limits.max_requests
         and usage.bytes_received < limits.max_bytes
         and usage.runtime_ms < limits.max_runtime_seconds * 1_000
-        and usage.tool_attempts < limits.max_tool_attempts_per_target
+        and _tool_attempts_for_target(results, discovery_attempts, source_url)
+        < limits.max_tool_attempts_per_target
     )
 
 
@@ -673,7 +718,6 @@ def _shared_budget_exhausted(
         usage.requests >= limits.max_requests
         or usage.bytes_received >= limits.max_bytes
         or usage.runtime_ms >= limits.max_runtime_seconds * 1_000
-        or usage.tool_attempts >= limits.max_tool_attempts_per_target
     )
 
 
@@ -820,6 +864,22 @@ def _usage_from_results(
     )
 
 
+def _tool_attempts_for_target(
+    results: list[Result],
+    discovery_attempts: list[Attempt],
+    target_url: str,
+) -> int:
+    canonical_target = canonicalize_url(target_url)
+    attempts = tuple(
+        attempt for result in results for attempt in result.attempts
+    ) + tuple(discovery_attempts)
+    return sum(
+        attempt.outcome != "skipped"
+        and canonicalize_url(attempt.requested_url) == canonical_target
+        for attempt in attempts
+    )
+
+
 def _source_artifact(result: Result) -> ArtifactEvidence | None:
     return next(
         (artifact for artifact in result.artifacts if artifact.role == "source"), None
@@ -832,6 +892,10 @@ def _was_cancelled(result: Result) -> bool:
 
 def _has_budget_terminal(result: Result) -> bool:
     return any(error.code in _BUDGET_TERMINAL_CODES for error in result.errors)
+
+
+def _has_shared_budget_terminal(result: Result) -> bool:
+    return any(error.code in _SHARED_BUDGET_TERMINAL_CODES for error in result.errors)
 
 
 def _entered_acquisition(result: Result, candidate_url: str) -> bool:
