@@ -1,6 +1,8 @@
 """Focused offline tests for the one governed in-process access gateway."""
 
 # pylint: disable=protected-access,too-few-public-methods,too-many-arguments,too-many-lines
+# pylint: disable=too-many-instance-attributes
+# pylint: disable=missing-class-docstring,missing-function-docstring
 
 from __future__ import annotations
 
@@ -9,6 +11,7 @@ import http.client
 import inspect
 import io
 import json
+import ssl
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -52,7 +55,12 @@ class FakeResponse:
         self.body = body
         self.close_raises = close_raises
         self.read_limits: list[int] = []
+        self.timeouts: list[float] = []
         self.closed = 0
+
+    def set_timeout(self, timeout: float) -> None:
+        """Record the required body deadline contract."""
+        self.timeouts.append(timeout)
 
     def read(self, max_bytes: int) -> bytes:
         """Record the bound and emulate a transport that honors it."""
@@ -196,6 +204,12 @@ class RecordingConnection:
 
     def __init__(self) -> None:
         self.closed = 0
+        self.timeouts: list[float] = []
+        self.sock = self
+
+    def settimeout(self, timeout: float) -> None:
+        """Record the response-body socket timeout."""
+        self.timeouts.append(timeout)
 
     def close(self) -> None:
         """Record wrapper-owned connection cleanup."""
@@ -989,9 +1003,19 @@ def test_content_scope_and_mime_reject_before_target_body_read(
     assert failure.evidence.decisions[-1].code == code
 
 
-@pytest.mark.parametrize("status", [401, 403, 404, 500, 503])
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [
+        (401, "gateway.http_status"),
+        (403, "gateway.http_status"),
+        (404, "gateway.http_status"),
+        (410, "gateway.http_status"),
+        (500, "gateway.server_error"),
+        (503, "gateway.server_error"),
+    ],
+)
 def test_non_success_status_rejects_without_body_and_preserves_evidence(
-    status: int,
+    status: int, expected_code: str
 ) -> None:
     """A target non-2xx response is auditable but never consumed as success."""
     target = FakeResponse(
@@ -1011,7 +1035,7 @@ def test_non_success_status_rejects_without_body_and_preserves_evidence(
         lambda: gateway(transport).read("https://example.com/public")
     )
 
-    assert failure.code == "gateway.http_status"
+    assert failure.code == expected_code
     assert not target.read_limits
     assert target.closed == 1
     assert failure.evidence.response_status == status
@@ -1207,6 +1231,49 @@ def test_timeout_and_transport_failures_are_typed_and_redacted() -> None:
 
 
 @pytest.mark.parametrize(
+    ("during_robots", "expected_requests"),
+    [(True, 1), (False, 2)],
+)
+def test_certificate_verification_failure_has_terminal_gateway_code(
+    during_robots: bool, expected_requests: int
+) -> None:
+    certificate_failure = ssl.SSLCertVerificationError(
+        1, "private certificate diagnostic"
+    )
+    target_url = "https://example.com/public"
+    scripts: dict[str, list[TransportResponse | BaseException]] = {
+        "https://example.com/robots.txt": [
+            certificate_failure if during_robots else FakeResponse(404)
+        ]
+    }
+    if not during_robots:
+        scripts[target_url] = [certificate_failure]
+    transport = FakeTransport(scripts)
+
+    failure = failure_code(lambda: gateway(transport).read(target_url))
+
+    assert failure.code == "gateway.tls_certificate_invalid"
+    assert failure.evidence.usage.requests == expected_requests
+    assert failure.evidence.usage.bytes == 0
+    assert len(transport.requests) == expected_requests
+
+
+def test_ordinary_tls_failure_remains_recoverable_gateway_tls() -> None:
+    target_url = "https://example.com/public"
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [FakeResponse(404)],
+            target_url: [ssl.SSLError(1, "private transient tls diagnostic")],
+        }
+    )
+
+    failure = failure_code(lambda: gateway(transport).read(target_url))
+
+    assert failure.code == "gateway.tls"
+    assert failure.evidence.usage.requests == 2
+
+
+@pytest.mark.parametrize(
     ("error", "expected_code"),
     [
         (TimeoutError("private robots timeout"), "robots.timeout"),
@@ -1238,6 +1305,27 @@ def test_robots_body_io_failures_keep_robots_specific_codes(
     assert len(transport.requests) == 1
     encoded = json.dumps(asdict(failure.evidence), sort_keys=True)
     assert "private robots" not in encoded
+
+
+def test_robots_partial_body_counts_usage_without_target_content_evidence() -> None:
+    class PartialRobotsBody(FakeResponse):
+        def read(self, max_bytes: int) -> bytes:
+            self.read_limits.append(max_bytes)
+            raise in_process_runner._PartialBodyRead(b"abc")
+
+    robots = PartialRobotsBody(200, Content_Type="text/plain")
+    transport = FakeTransport({"https://example.com/robots.txt": [robots]})
+
+    failure = failure_code(
+        lambda: gateway(transport).read("https://example.com/public")
+    )
+
+    assert failure.code == "robots.network_error"
+    assert failure.evidence.usage.bytes == 3
+    assert failure.evidence.content_bytes == 0
+    assert failure.evidence.content_sha256 is None
+    assert len(transport.requests) == 1
+    assert robots.closed == 1
 
 
 def test_success_closes_responses_and_gateway_close_is_idempotent() -> None:
@@ -1333,3 +1421,476 @@ def test_gateway_source_has_no_artifact_runtime_fallback_or_parser_authority() -
         "rag",
     )
     assert all(token not in source.casefold() for token in forbidden)
+
+
+def test_external_runtime_deadline_covers_dns_before_any_send() -> None:
+    clock = ManualClock()
+    transport = FakeTransport({})
+
+    def slow_resolver(_host: str, _port: int) -> tuple[str, ...]:
+        clock.value = 2.0
+        return (PUBLIC_IP,)
+
+    access = GovernedAccessGateway(
+        request_for(max_runtime_seconds=30),
+        transport,
+        resolver=slow_resolver,
+        clock=clock,
+        runtime_deadline=1.0,
+    )
+
+    failure = failure_code(lambda: access.read("https://example.com/public"))
+
+    assert failure.code == "budget.runtime"
+    assert not transport.requests
+
+
+def test_external_runtime_deadline_bounds_body_read_with_remaining_time() -> None:
+    clock = ManualClock()
+
+    class SlowBodyResponse(FakeResponse):
+        def __init__(self) -> None:
+            super().__init__(
+                200,
+                b"body",
+                Content_Type="text/html",
+                Content_Length="4",
+            )
+            self.timeouts: list[float] = []
+
+        def set_timeout(self, timeout: float) -> None:
+            self.timeouts.append(timeout)
+
+        def read(self, max_bytes: int) -> bytes:
+            clock.value = 2.0
+            return super().read(max_bytes)
+
+    target = SlowBodyResponse()
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [FakeResponse(404)],
+            "https://example.com/public": [target],
+        }
+    )
+    access = GovernedAccessGateway(
+        request_for(max_runtime_seconds=30),
+        transport,
+        resolver=Resolver(),
+        clock=clock,
+        runtime_deadline=1.0,
+    )
+
+    failure = failure_code(lambda: access.read("https://example.com/public"))
+
+    assert failure.code == "budget.runtime"
+    assert failure.evidence.usage.bytes == 4
+    assert target.timeouts == [1.0]
+    assert target.closed == 1
+
+
+def test_completion_exactly_at_runtime_deadline_is_not_over_budget() -> None:
+    clock = ManualClock()
+
+    class ExactDeadlineResponse(FakeResponse):
+        def read(self, max_bytes: int) -> bytes:
+            clock.value = 1.0
+            return super().read(max_bytes)
+
+    target = ExactDeadlineResponse(
+        200,
+        b"body",
+        Content_Type="text/html",
+        Content_Length="4",
+    )
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [FakeResponse(404)],
+            "https://example.com/public": [target],
+        }
+    )
+    access = GovernedAccessGateway(
+        request_for(max_runtime_seconds=30),
+        transport,
+        resolver=Resolver(),
+        clock=clock,
+        runtime_deadline=1.0,
+    )
+
+    result = access.read("https://example.com/public")
+
+    assert result.body == b"body"
+    assert result.evidence.usage.requests == 2
+    assert result.evidence.usage.bytes == 4
+    assert result.evidence.usage.elapsed_seconds == 1.0
+    assert target.timeouts == [1.0]
+    assert target.closed == 1
+
+
+def test_body_response_without_deadline_contract_is_rejected_before_read() -> None:
+    class NoDeadlineResponse:
+        status = 200
+        headers = {"content-type": "text/html", "content-length": "4"}
+        peer_ip = PUBLIC_IP
+
+        def __init__(self) -> None:
+            self.reads = 0
+            self.closed = 0
+
+        def read(self, _max_bytes: int) -> bytes:
+            self.reads += 1
+            return b"body"
+
+        def close(self) -> None:
+            self.closed += 1
+
+    target = NoDeadlineResponse()
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [FakeResponse(404)],
+            "https://example.com/public": [target],  # type: ignore[list-item]
+        }
+    )
+
+    failure = failure_code(
+        lambda: gateway(transport).read("https://example.com/public")
+    )
+
+    assert failure.code == "gateway.transport_contract"
+    assert target.reads == 0
+    assert target.closed == 1
+
+
+def test_materialized_body_without_deadline_hook_never_calls_unbounded_read() -> None:
+    class MaterializedResponse:
+        status = 200
+        headers = {"content-type": "text/html", "content-length": "4"}
+        peer_ip = PUBLIC_IP
+
+        def __init__(self) -> None:
+            self.body = b"body"
+            self.reads = 0
+            self.closed = 0
+
+        def read(self, _max_bytes: int) -> bytes:
+            self.reads += 1
+            raise AssertionError("already-buffered responses must not perform I/O")
+
+        def close(self) -> None:
+            self.closed += 1
+
+    target = MaterializedResponse()
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [FakeResponse(404)],
+            "https://example.com/public": [target],  # type: ignore[list-item]
+        }
+    )
+
+    result = gateway(transport).read("https://example.com/public")
+
+    assert result.body == b"body"
+    assert target.reads == 0
+    assert target.closed == 1
+
+
+def test_http_response_deadline_uses_response_socket_when_connection_socket_is_none() -> (
+    None
+):
+    class TimeoutSocket:
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeouts.append(timeout)
+
+    class ResponseFile:
+        def __init__(self, sock: TimeoutSocket) -> None:
+            self.raw = type("SocketRaw", (), {"_sock": sock})()
+
+    sock = TimeoutSocket()
+    response = RecordingHttpResponse(b"body")
+    setattr(response, "fp", ResponseFile(sock))
+    connection = RecordingConnection()
+    connection.sock = None  # type: ignore[assignment]
+    wrapped = in_process_runner._HttpResponse(response, connection, PUBLIC_IP)
+
+    wrapped.set_timeout(0.25)
+
+    assert sock.timeouts == [0.25]
+
+
+def test_interrupted_chunked_body_preserves_confirmed_partial_bytes() -> None:
+    target, connection = concrete_http_response(
+        b"Content-Type: text/html\r\nTransfer-Encoding: chunked\r\n",
+        b"3\r\nabc\r\n5\r\nde",
+    )
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [FakeResponse(404)],
+            "https://example.com/public": [target],
+        }
+    )
+
+    failure = failure_code(
+        lambda: gateway(transport).read("https://example.com/public")
+    )
+
+    assert failure.code == "gateway.transport"
+    assert failure.evidence.usage.bytes == 5
+    assert failure.evidence.content_bytes == 5
+    assert failure.evidence.content_sha256 == hashlib.sha256(b"abcde").hexdigest()
+    assert connection.closed == 1
+
+
+@pytest.mark.parametrize(
+    ("outer_partial", "cause_partial", "expected"),
+    [
+        (b"abc", b"de", b"abcde"),
+        (b"abc", b"abc", b"abcabc"),
+    ],
+)
+def test_incomplete_read_combines_disjoint_exception_chain_partials_once(
+    outer_partial: bytes, cause_partial: bytes, expected: bytes
+) -> None:
+    try:
+        try:
+            raise http.client.IncompleteRead(cause_partial)
+        except http.client.IncompleteRead as cause:
+            raise http.client.IncompleteRead(outer_partial) from cause
+    except http.client.IncompleteRead as outer:
+        assert in_process_runner._incomplete_read_partial(outer) == expected
+
+
+def test_pinned_transport_recomputes_one_deadline_across_blocking_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ManualClock()
+
+    class StageSocket:
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+            self.closed = 0
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeouts.append(timeout)
+
+        def getpeername(self) -> tuple[str, int]:
+            return (PUBLIC_IP, 443)
+
+        def close(self) -> None:
+            self.closed += 1
+
+    raw = StageSocket()
+    response = RecordingHttpResponse(b"body")
+    connections: list[object] = []
+
+    def connect(_address: tuple[str, int], *, timeout: float) -> StageSocket:
+        assert timeout == 60
+        clock.value = 20.0
+        return raw
+
+    class Context:
+        def wrap_socket(
+            self, sock: StageSocket, *, server_hostname: str
+        ) -> StageSocket:
+            assert sock is raw
+            assert server_hostname == "example.com"
+            clock.value = 45.0
+            return sock
+
+    class StageConnection:
+        def __init__(self, _host: str, _port: int, *, timeout: float) -> None:
+            self.timeout = timeout
+            self.sock: object | None = None
+            self.closed = 0
+            connections.append(self)
+
+        def putrequest(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def putheader(self, *_args: object) -> None:
+            return None
+
+        def endheaders(self) -> None:
+            clock.value = 55.0
+
+        def getresponse(self) -> RecordingHttpResponse:
+            clock.value = 61.0
+            return response
+
+        def close(self) -> None:
+            self.closed += 1
+            if self.sock is not None:
+                self.sock.close()  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(in_process_runner.socket, "create_connection", connect)
+    monkeypatch.setattr(in_process_runner.ssl, "create_default_context", Context)
+    monkeypatch.setattr(
+        in_process_runner.http.client, "HTTPSConnection", StageConnection
+    )
+    transport = PinnedHttpTransport(clock=clock)
+
+    with pytest.raises(TimeoutError):
+        transport.send(
+            "https://example.com/public",
+            timeout=60,
+            addresses=(PUBLIC_IP,),
+        )
+
+    assert raw.timeouts[-3:] == [40.0, 15.0, 5.0]
+    assert connections and connections[0].timeout == 15.0
+    assert response.closed == 1
+    assert connections[0].closed == 1
+    assert raw.closed == 1
+
+
+def test_pinned_transport_recomputes_deadline_before_each_body_receive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ManualClock()
+    headers = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: text/html\r\n"
+        b"Content-Length: 4\r\n\r\n"
+    )
+
+    class SlowWireSocket:
+        def __init__(self) -> None:
+            self.wire = headers + b"body"
+            self.position = 0
+            self.timeouts: list[float] = []
+            self.body_receives = 0
+            self.closed = 0
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeouts.append(timeout)
+
+        def getpeername(self) -> tuple[str, int]:
+            return (PUBLIC_IP, 80)
+
+        def sendall(self, _content: bytes) -> None:
+            return None
+
+        def recv_into(self, buffer: object) -> int:
+            view = memoryview(buffer)
+            if self.position >= len(self.wire):
+                return 0
+            if self.position < len(headers):
+                content = self.wire[self.position : len(headers)]
+            else:
+                content = self.wire[self.position : self.position + 1]
+                self.body_receives += 1
+                clock.value += 2.0
+            view[: len(content)] = content
+            self.position += len(content)
+            return len(content)
+
+        def close(self) -> None:
+            self.closed += 1
+
+    raw = SlowWireSocket()
+
+    def connect(_address: tuple[str, int], *, timeout: float) -> SlowWireSocket:
+        assert timeout == 5
+        return raw
+
+    monkeypatch.setattr(in_process_runner.socket, "create_connection", connect)
+    transport = PinnedHttpTransport(clock=clock)
+    response = transport.send(
+        "http://example.com/public",
+        timeout=5,
+        addresses=(PUBLIC_IP,),
+    )
+    scripted = FakeTransport(
+        {
+            "https://example.com/robots.txt": [FakeResponse(404)],
+            "https://example.com/public": [response],
+        }
+    )
+
+    failure = failure_code(lambda: gateway(scripted).read("https://example.com/public"))
+
+    assert failure.code == "gateway.timeout"
+    assert failure.evidence.usage.bytes == 3
+    assert failure.evidence.content_bytes == 3
+    assert failure.evidence.content_sha256 == hashlib.sha256(b"bod").hexdigest()
+    assert raw.body_receives == 3
+    assert raw.timeouts[-3:] == [5.0, 3.0, 1.0]
+    assert raw.closed == 1
+
+
+def test_pinned_transport_connection_close_keeps_response_file_socket_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ManualClock()
+    headers = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: text/html\r\n"
+        b"Content-Length: 4\r\n"
+        b"Connection: close\r\n\r\n"
+    )
+
+    class ClosingWireSocket:
+        def __init__(self) -> None:
+            self.wire = headers + b"body"
+            self.position = 0
+            self.timeouts: list[float] = []
+            self.body_timeouts: list[float] = []
+            self.closed = 0
+            self.is_closed = False
+
+        def settimeout(self, timeout: float) -> None:
+            if self.is_closed:
+                raise OSError("socket already closed")
+            self.timeouts.append(timeout)
+
+        def getpeername(self) -> tuple[str, int]:
+            return (PUBLIC_IP, 80)
+
+        def sendall(self, _content: bytes) -> None:
+            if self.is_closed:
+                raise OSError("socket already closed")
+
+        def recv_into(self, buffer: object) -> int:
+            if self.is_closed:
+                raise OSError("socket already closed")
+            view = memoryview(buffer)
+            if self.position >= len(self.wire):
+                return 0
+            if self.position < len(headers):
+                content = self.wire[self.position : len(headers)]
+            else:
+                content = self.wire[self.position : self.position + 1]
+                self.body_timeouts.append(self.timeouts[-1])
+                clock.value += 1.0
+            view[: len(content)] = content
+            self.position += len(content)
+            return len(content)
+
+        def close(self) -> None:
+            self.closed += 1
+            self.is_closed = True
+
+    raw = ClosingWireSocket()
+
+    def connect(_address: tuple[str, int], *, timeout: float) -> ClosingWireSocket:
+        assert timeout == 10
+        return raw
+
+    monkeypatch.setattr(in_process_runner.socket, "create_connection", connect)
+    transport = PinnedHttpTransport(clock=clock)
+    response = transport.send(
+        "http://example.com/public",
+        timeout=10,
+        addresses=(PUBLIC_IP,),
+    )
+
+    try:
+        assert response.status == 200
+        response.set_timeout(10)
+        assert response.read(4) == b"body"
+    finally:
+        response.close()
+
+    assert raw.body_timeouts == [10.0, 9.0, 8.0, 7.0]
+    assert raw.closed == 1

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from web_listening.artifact.identity import validate_mime_type as validate_artifact_mime
@@ -110,6 +110,11 @@ class AcquisitionOutput:  # pylint: disable=too-many-instance-attributes
     sha256: str
     redirects: tuple[AcquisitionRedirect, ...]
     runtime_ms: int
+    requests: int | None = None
+    bytes_received: int | None = None
+    _usage_explicit: bool | None = field(default=None, repr=False, compare=False)
+    _inferred_requests: int | None = field(default=None, repr=False, compare=False)
+    _inferred_bytes: int | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         validate_tool_id(self.tool_id)
@@ -132,6 +137,57 @@ class AcquisitionOutput:  # pylint: disable=too-many-instance-attributes
         if current_url != self.final_url:
             raise ToolRegistryError("protocol.redirects_invalid")
         validate_runtime(self.runtime_ms)
+        minimum_requests = len(self.redirects) + 1
+        minimum_bytes = len(self.body)
+        if self._usage_explicit is None:
+            usage_explicit = (
+                self.requests is not None or self.bytes_received is not None
+            )
+        elif type(self._usage_explicit) is bool:
+            usage_explicit = self._usage_explicit
+        else:
+            raise ToolRegistryError("protocol.usage_invalid")
+        inferred_values = (self._inferred_requests, self._inferred_bytes)
+        if any(
+            value is not None and (type(value) is not int or value < 0)
+            for value in inferred_values
+        ):
+            raise ToolRegistryError("protocol.usage_invalid")
+        if not usage_explicit and all(value is not None for value in inferred_values):
+            usage_explicit = (
+                self.requests != self._inferred_requests
+                or self.bytes_received != self._inferred_bytes
+            )
+        requests = (
+            self.requests
+            if usage_explicit and self.requests is not None
+            else minimum_requests
+        )
+        bytes_received = (
+            self.bytes_received
+            if usage_explicit and self.bytes_received is not None
+            else minimum_bytes
+        )
+        if (
+            type(requests) is not int
+            or requests < minimum_requests
+            or type(bytes_received) is not int
+            or bytes_received < minimum_bytes
+        ):
+            raise ToolRegistryError("protocol.usage_invalid")
+        object.__setattr__(self, "requests", requests)
+        object.__setattr__(self, "bytes_received", bytes_received)
+        object.__setattr__(self, "_usage_explicit", usage_explicit)
+        object.__setattr__(
+            self,
+            "_inferred_requests",
+            None if usage_explicit else requests,
+        )
+        object.__setattr__(
+            self,
+            "_inferred_bytes",
+            None if usage_explicit else bytes_received,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,11 +197,19 @@ class AcquisitionFailure:
     tool_id: str
     tool_version: str
     code: str
+    requests: int = field(default=0, compare=False)
+    bytes_received: int = field(default=0, compare=False)
+    runtime_ms: int = field(default=0, compare=False)
 
     def __post_init__(self) -> None:
         validate_tool_id(self.tool_id)
         validate_tool_version(self.tool_version)
         validate_safe_code(self.code)
+        if any(
+            type(value) is not int or value < 0
+            for value in (self.requests, self.bytes_received, self.runtime_ms)
+        ):
+            raise ToolRegistryError("protocol.usage_invalid")
 
 
 @runtime_checkable

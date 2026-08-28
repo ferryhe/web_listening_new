@@ -1,9 +1,12 @@
 """The governed in-process HTTP execution boundary."""
 
+# pylint: disable=too-many-lines
+
 from __future__ import annotations
 
 import hashlib
 import http.client
+import io
 import ipaddress
 import re
 import socket
@@ -24,8 +27,10 @@ _USER_AGENT = "web-listening/0.1"
 _MEDIA_TYPE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
 _MAX_CONTENT_LENGTH = (1 << 63) - 1
 _ROBOTS_NETWORK_FAILURE_CODES = {
+    "gateway.body_incomplete": "robots.network_error",
     "gateway.dns": "robots.dns_error",
     "gateway.timeout": "robots.timeout",
+    "gateway.tls": "robots.network_error",
     "gateway.transport": "robots.network_error",
 }
 
@@ -36,6 +41,9 @@ class TransportResponse(Protocol):
     status: int
     headers: Mapping[str, str]
     peer_ip: str
+
+    def set_timeout(self, timeout: float) -> None:
+        """Apply the current absolute-deadline remainder to body reads."""
 
     def read(self, max_bytes: int) -> bytes:
         """Read at most the supplied governed byte boundary."""
@@ -190,7 +198,186 @@ class _TransportSafetyError(RuntimeError):
         super().__init__(code)
 
 
-class _HttpResponse:
+class _PartialBodyRead(RuntimeError):
+    """A failed response read with confirmed bytes that still count as usage."""
+
+    def __init__(self, partial: bytes, code: str = "gateway.transport") -> None:
+        self.partial = partial
+        self.code = code
+        super().__init__(code)
+
+
+def _incomplete_read_partial(exc: http.client.IncompleteRead) -> bytes:
+    """Combine each disjoint stdlib partial in one exception chain once."""
+    parts: list[bytes] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while isinstance(current, http.client.IncompleteRead) and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current.partial, bytes):
+            parts.append(current.partial)
+        current = current.__cause__
+    return b"".join(parts)
+
+
+class _AbsoluteDeadline:  # pylint: disable=missing-function-docstring
+    """One monotonic deadline shared by every blocking HTTP stage."""
+
+    def __init__(self, deadline: float, clock: Callable[[], float]) -> None:
+        self._deadline = deadline
+        self._clock = clock
+
+    def remaining(self) -> float:
+        remaining = self._deadline - self._clock()
+        if remaining <= 0:
+            raise TimeoutError
+        return remaining
+
+    def cap(self, timeout: float) -> None:
+        if timeout <= 0:
+            raise TimeoutError
+        self._deadline = min(self._deadline, self._clock() + timeout)
+
+    def apply(self, sock: object) -> None:
+        setter = getattr(sock, "settimeout", None)
+        if not callable(setter):
+            raise _TransportSafetyError("gateway.transport_contract")
+        setter(self.remaining())
+
+
+class _DeadlineSocket:  # pylint: disable=missing-function-docstring
+    """Refresh the same deadline immediately before each socket operation."""
+
+    def __init__(self, sock: object, deadline: _AbsoluteDeadline) -> None:
+        self._sock = sock
+        self._deadline = deadline
+        self._file_references = 0
+        self._closed = False
+        self._raw_closed = False
+
+    def settimeout(self, timeout: float) -> None:
+        self._deadline.cap(timeout)
+        self._deadline.apply(self._sock)
+
+    def sendall(self, content: bytes) -> None:
+        self._deadline.apply(self._sock)
+        sender = getattr(self._sock, "sendall", None)
+        if not callable(sender):
+            raise _TransportSafetyError("gateway.transport_contract")
+        sender(content)
+
+    def recv_into(self, buffer: object) -> int:
+        self._deadline.apply(self._sock)
+        receiver = getattr(self._sock, "recv_into", None)
+        if not callable(receiver):
+            raise _TransportSafetyError("gateway.transport_contract")
+        return receiver(buffer)
+
+    def makefile(
+        self, mode: str, buffering: int | None = None
+    ) -> io.BufferedReader | io.RawIOBase:
+        if mode != "rb":
+            raise _TransportSafetyError("gateway.transport_contract")
+        reader = _DeadlineSocketReader(self)
+        if buffering == 0:
+            return reader
+        buffer_size = (
+            buffering
+            if isinstance(buffering, int) and buffering > 0
+            else io.DEFAULT_BUFFER_SIZE
+        )
+        return io.BufferedReader(reader, buffer_size)
+
+    def close(self) -> None:
+        self._closed = True
+        self._close_raw_if_unused()
+
+    def _retain_file(self) -> None:
+        self._file_references += 1
+
+    def _release_file(self) -> None:
+        self._file_references -= 1
+        self._close_raw_if_unused()
+
+    def _close_raw_if_unused(self) -> None:
+        if not self._closed or self._file_references or self._raw_closed:
+            return
+        self._raw_closed = True
+        closer = getattr(self._sock, "close", None)
+        if callable(closer):
+            closer()
+
+
+class _DeadlineSocketReader(  # pylint: disable=missing-function-docstring
+    io.RawIOBase
+):  # pylint: disable=protected-access
+    """Let HTTPResponse parse framing while every recv keeps the deadline."""
+
+    def __init__(self, sock: _DeadlineSocket) -> None:
+        super().__init__()
+        self._sock = sock
+        self._released = False
+        self._sock._retain_file()
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: object) -> int:
+        return self._sock.recv_into(buffer)
+
+    def close(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        try:
+            super().close()
+        finally:
+            self._sock._release_file()
+
+
+def _http_response_socket(response: http.client.HTTPResponse) -> object | None:
+    """Return the socket retained by HTTPResponse after Connection: close."""
+    try:
+        response_file = getattr(response, "fp", None)
+        raw = getattr(response_file, "raw", None)
+        return getattr(raw, "_sock", None) or getattr(response_file, "_sock", None)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+
+
+def _response_timeout_setter(response: object) -> Callable[[float], None] | None:
+    """Find a deadline setter on a response or a transparent wrapper."""
+    current = response
+    seen: set[int] = set()
+    while id(current) not in seen:
+        seen.add(id(current))
+        setter = getattr(current, "set_timeout", None)
+        if callable(setter):
+            return setter
+        try:
+            wrapped = vars(current).get("_response")
+        except TypeError:
+            return None
+        if wrapped is None:
+            return None
+        current = wrapped
+    return None
+
+
+def _materialized_response_body(response: object) -> bytes | None:
+    """Return already-buffered bytes without invoking a potentially blocking read."""
+    try:
+        values = vars(response)
+    except TypeError:
+        return None
+    for name in ("body", "_body"):
+        value = values.get(name)
+        if isinstance(value, bytes):
+            return value
+    return None
+
+
+class _HttpResponse:  # pylint: disable=too-many-instance-attributes
     """Own a standard-library response and its pinned connection."""
 
     def __init__(
@@ -198,6 +385,7 @@ class _HttpResponse:
         response: http.client.HTTPResponse,
         connection: http.client.HTTPConnection,
         peer_ip: str,
+        deadline: _AbsoluteDeadline | None = None,
     ) -> None:
         self.status = response.status
         self.headers: dict[str, str] = {}
@@ -211,11 +399,65 @@ class _HttpResponse:
         self.peer_ip = peer_ip
         self._response = response
         self._connection = connection
+        self._socket = _http_response_socket(response) or getattr(
+            connection, "sock", None
+        )
+        self._deadline = deadline
         self._closed = False
 
     def read(self, max_bytes: int) -> bytes:
         """Read through exactly the governed upper bound."""
-        return self._response.read(max_bytes)
+        incremental_reader = getattr(self._response, "read1", None)
+        if callable(incremental_reader):
+            return self._read_incrementally(incremental_reader, max_bytes)
+        try:
+            if self._deadline is not None:
+                self._deadline.remaining()
+            return self._response.read(max_bytes)
+        except http.client.IncompleteRead as exc:
+            raise _PartialBodyRead(_incomplete_read_partial(exc)) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise _PartialBodyRead(b"", "gateway.timeout") from exc
+        except (ConnectionError, OSError, _TransportSafetyError) as exc:
+            raise _PartialBodyRead(b"") from exc
+
+    def _read_incrementally(
+        self,
+        reader: Callable[[int], bytes],
+        max_bytes: int,
+    ) -> bytes:
+        chunks: list[bytes] = []
+        remaining = max_bytes
+        while remaining > 0:
+            try:
+                if self._deadline is not None:
+                    self._deadline.remaining()
+                chunk = reader(remaining)
+            except http.client.IncompleteRead as exc:
+                partial = b"".join(chunks) + _incomplete_read_partial(exc)
+                raise _PartialBodyRead(partial) from exc
+            except (TimeoutError, socket.timeout) as exc:
+                raise _PartialBodyRead(b"".join(chunks), "gateway.timeout") from exc
+            except (ConnectionError, OSError, _TransportSafetyError) as exc:
+                raise _PartialBodyRead(b"".join(chunks)) from exc
+            if not isinstance(chunk, bytes):
+                raise _PartialBodyRead(b"".join(chunks), "gateway.transport_contract")
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def set_timeout(self, timeout: float) -> None:
+        """Apply the current shared deadline to the connected socket."""
+        if self._deadline is not None:
+            self._deadline.cap(timeout)
+            self._deadline.apply(self._socket)
+            return
+        setter = getattr(self._socket, "settimeout", None)
+        if not callable(setter):
+            raise _TransportSafetyError("gateway.transport_contract")
+        setter(timeout)
 
     def close(self) -> None:
         """Close both the response and its pinned connection exactly once."""
@@ -231,7 +473,10 @@ class _HttpResponse:
 class PinnedHttpTransport:
     """Minimal no-proxy HTTP transport with a pre-request pinned-peer check."""
 
-    def send(
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+
+    def send(  # pylint: disable=too-many-locals,too-many-statements
         self, url: str, *, timeout: float, addresses: tuple[str, ...]
     ) -> TransportResponse:
         """Perform one GET through the first already-approved DNS address."""
@@ -243,24 +488,31 @@ class PinnedHttpTransport:
         raw: socket.socket | ssl.SSLSocket | None = None
         connection: http.client.HTTPConnection | None = None
         response: http.client.HTTPResponse | None = None
+        deadline = _AbsoluteDeadline(self._clock() + timeout, self._clock)
         try:
-            raw = socket.create_connection((addresses[0], port), timeout=timeout)
-            raw.settimeout(timeout)
+            raw = socket.create_connection(
+                (addresses[0], port), timeout=deadline.remaining()
+            )
+            deadline.apply(raw)
             peer = str(ipaddress.ip_address(raw.getpeername()[0]))
             if peer not in addresses or not _is_public_address(peer):
                 raise _TransportSafetyError("gateway.peer_not_public")
             if parsed.scheme == "https":
+                deadline.apply(raw)
                 raw = ssl.create_default_context().wrap_socket(
                     raw, server_hostname=host
                 )
+                deadline.remaining()
+
+            governed_socket = _DeadlineSocket(raw, deadline)
 
             connection_type = (
                 http.client.HTTPSConnection
                 if parsed.scheme == "https"
                 else http.client.HTTPConnection
             )
-            connection = connection_type(host, port, timeout=timeout)
-            connection.sock = raw
+            connection = connection_type(host, port, timeout=deadline.remaining())
+            connection.sock = governed_socket
             target = parsed.path or "/"
             if parsed.query:
                 target += f"?{parsed.query}"
@@ -271,9 +523,13 @@ class PinnedHttpTransport:
             connection.putheader("User-Agent", _USER_AGENT)
             connection.putheader("Accept-Encoding", "identity")
             connection.putheader("Connection", "close")
+            deadline.apply(raw)
             connection.endheaders()
+            deadline.remaining()
+            deadline.apply(raw)
             response = connection.getresponse()
-            result = _HttpResponse(response, connection, peer)
+            deadline.remaining()
+            result = _HttpResponse(response, connection, peer, deadline)
             response = None
             connection = None
             raw = None
@@ -300,7 +556,7 @@ class PinnedHttpTransport:
         """The transport keeps no resources between responses."""
 
 
-class GovernedAccessGateway:
+class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
     """Apply Request policy, robots, safety, and budgets before every target."""
 
     def __init__(
@@ -310,12 +566,20 @@ class GovernedAccessGateway:
         *,
         resolver: Callable[[str, int], tuple[str, ...]] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        runtime_deadline: float | None = None,
     ) -> None:
         self._policy: CompiledAccessPolicy = compile_access_policy(request)
         self._transport = transport
         self._resolver = resolver or _resolve_public_addresses
         self._clock = clock
-        self._usage = _Usage(started_at=clock())
+        started_at = clock()
+        self._usage = _Usage(started_at=started_at)
+        request_deadline = started_at + self._policy.budgets.max_runtime_seconds
+        self._runtime_deadline = (
+            request_deadline
+            if runtime_deadline is None
+            else min(request_deadline, runtime_deadline)
+        )
         self._robots: dict[str, _RobotsPolicy] = {}
         self._closed = False
 
@@ -497,7 +761,12 @@ class GovernedAccessGateway:
         state: _ReadState,
     ) -> None:
         status_allowed = 200 <= response.status < 300
-        status_code = "policy.allowed" if status_allowed else "gateway.http_status"
+        if status_allowed:
+            status_code = "policy.allowed"
+        elif 500 <= response.status < 600:
+            status_code = "gateway.server_error"
+        else:
+            status_code = "gateway.http_status"
         state.decisions.append(
             DecisionEvidence(
                 "target.status", _safe_url(current), status_allowed, status_code
@@ -687,6 +956,8 @@ class GovernedAccessGateway:
             self._raise(exc.code, state)
         except (TimeoutError, socket.timeout):
             self._raise("gateway.timeout", state)
+        except ssl.SSLCertVerificationError:
+            self._raise("gateway.tls_certificate_invalid", state)
         except ssl.SSLError:
             self._raise("gateway.tls", state)
         except (ConnectionError, OSError):
@@ -725,7 +996,7 @@ class GovernedAccessGateway:
             self._raise("budget.bytes", state)
         return timeout
 
-    def _read_body(
+    def _read_body(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self,
         response: TransportResponse,
         url: str,
@@ -775,21 +1046,29 @@ class GovernedAccessGateway:
                 )
             )
             self._raise("budget.bytes", state)
-        try:
-            read_limit = declared_length if declared_length is not None else remaining
-            body = response.read(read_limit)
-        except (TimeoutError, socket.timeout):
-            self._raise("gateway.timeout", state)
-        except (ConnectionError, OSError):
-            self._raise("gateway.transport", state)
-        except Exception:  # pylint: disable=broad-exception-caught
-            self._raise("gateway.transport", state)
+        timeout = self._remaining_runtime(state)
+        read_limit = declared_length if declared_length is not None else remaining
+        if self._set_body_timeout(response, timeout, state):
+            try:
+                body = response.read(read_limit)
+            except _PartialBodyRead as exc:
+                self._record_body_bytes(exc.partial, state, target_content)
+                self._raise(exc.code, state)
+            except (TimeoutError, socket.timeout):
+                self._raise("gateway.timeout", state)
+            except (ConnectionError, OSError):
+                self._raise("gateway.transport", state)
+            except Exception:  # pylint: disable=broad-exception-caught
+                self._raise("gateway.transport", state)
+        else:
+            buffered = _materialized_response_body(response)
+            if buffered is None:
+                self._raise("gateway.transport_contract", state)
+            body = buffered[:read_limit]
         if not isinstance(body, bytes):
             self._raise("gateway.transport_contract", state)
-        self._usage.bytes += len(body)
-        if target_content:
-            state.content_bytes = len(body)
-            state.content_sha256 = hashlib.sha256(body).hexdigest()
+        self._record_body_bytes(body, state, target_content)
+        self._ensure_runtime(state)
         if len(body) > remaining:
             self._raise("budget.bytes", state)
         if declared_length is not None and len(body) != declared_length:
@@ -797,6 +1076,38 @@ class GovernedAccessGateway:
         if declared_length is None and len(body) == remaining:
             self._raise("budget.bytes", state)
         return body
+
+    def _record_body_bytes(
+        self,
+        body: bytes,
+        state: _ReadState,
+        target_content: bool,
+    ) -> None:
+        self._usage.bytes += len(body)
+        if target_content:
+            state.content_bytes = len(body)
+            state.content_sha256 = hashlib.sha256(body).hexdigest()
+
+    def _set_body_timeout(
+        self,
+        response: TransportResponse,
+        timeout: float,
+        state: _ReadState,
+    ) -> bool:
+        setter = _response_timeout_setter(response)
+        if setter is None:
+            return False
+        try:
+            setter(timeout)
+        except _TransportSafetyError as exc:
+            self._raise(exc.code, state)
+        except (TimeoutError, socket.timeout):
+            self._raise("gateway.timeout", state)
+        except (ConnectionError, OSError):
+            self._raise("gateway.transport", state)
+        except Exception:  # pylint: disable=broad-exception-caught
+            self._raise("gateway.transport", state)
+        return True
 
     def _check_peer(
         self,
@@ -818,18 +1129,13 @@ class GovernedAccessGateway:
             self._raise(code, state)
 
     def _remaining_runtime(self, state: _ReadState) -> float:
-        remaining = self._policy.budgets.max_runtime_seconds - (
-            self._clock() - self._usage.started_at
-        )
+        remaining = self._runtime_deadline - self._clock()
         if remaining <= 0:
             self._raise("budget.runtime", state)
         return remaining
 
     def _ensure_runtime(self, state: _ReadState) -> None:
-        if (
-            self._clock() - self._usage.started_at
-            > self._policy.budgets.max_runtime_seconds
-        ):
+        if self._clock() > self._runtime_deadline:
             self._raise("budget.runtime", state)
 
     def _evidence(self, state: _ReadState) -> GatewayEvidence:

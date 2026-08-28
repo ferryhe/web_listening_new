@@ -16,7 +16,7 @@ from web_listening.artifact.model import (
 )
 from web_listening.artifact.observation import ObservationProposal
 from web_listening.artifact.store import ArtifactStore
-from web_listening.request.model import Request
+from web_listening.request.model import Budgets, Request
 from web_listening.request.validate import validate_request
 from web_listening.result.attempts import Attempt
 from web_listening.result.errors import SafeError
@@ -30,7 +30,12 @@ from web_listening.result.manifest import (
 from web_listening.result.model import Result, ResultStatus
 from web_listening.site_skill.model import SiteSkillError
 from web_listening.site_skill.resolve import resolve_site_skill
-from web_listening.tool_registry.eligibility import EligibilityRequirements
+from web_listening.tool_registry.eligibility import (
+    EligibilityFacts,
+    EligibilityRequirements,
+    acquisition_failure_allows_switch,
+    rank_eligible_tools,
+)
 from web_listening.tool_registry.manifest import ToolCategory, ToolRegistryError
 from web_listening.tool_registry.protocols.acquisition import (
     AcquisitionFailure,
@@ -47,9 +52,10 @@ from web_listening.tool_registry.protocols.transform import (
     TransformInput,
     TransformOutput,
 )
-from web_listening.tool_registry.registry import Registry
+from web_listening.tool_registry.registry import AcquisitionOutputRejected, Registry
 
 _MAX_DISCOVERY_CANDIDATES = 100
+_DEFAULT_ACQUISITION_TOOL_ID = "acquisition.web_http"
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +75,8 @@ class _TransformResult:
     completed_at: str | None = None
 
 
-def run_single_target(  # pylint: disable=too-many-arguments
+def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
+    # pylint: disable=too-many-statements
     request: Request,
     registry: Registry,
     artifact_store: ArtifactStore,
@@ -78,7 +85,7 @@ def run_single_target(  # pylint: disable=too-many-arguments
     clock: Callable[[], str],
     target_url: str | None = None,
 ) -> Result:
-    """Validate, resolve, invoke once, commit once, and assemble one Result."""
+    """Validate, resolve, run the controlled acquisition, and assemble a Result."""
     request = validate_request(request)
     requested_url = target_url or request.scope.seeds[0]
     if target_url is None and len(request.scope.seeds) != 1:
@@ -91,40 +98,53 @@ def run_single_target(  # pylint: disable=too-many-arguments
             code="runtime.single_target_required",
             message="Runtime request requires exactly one target.",
         )
-    try:
-        resolution = resolve_site_skill(request, request.site_skill, registry)
-    except SiteSkillError as exc:
-        return _failure_result(
-            status=ResultStatus.REJECTED,
-            run_id=run_id,
-            generated_at=clock(),
-            requested_url=requested_url,
-            current_url=requested_url,
-            code=exc.code,
-            message="Runtime request was rejected.",
+    if request.site_skill is None:
+        effective_request = request
+        site_skill = None
+        preferred_tool_id = _DEFAULT_ACQUISITION_TOOL_ID
+        preferred_tool_version = None
+        allowed_mime_types = None
+        minimum_words = 0
+    else:
+        try:
+            resolution = resolve_site_skill(request, request.site_skill, registry)
+        except SiteSkillError as exc:
+            return _failure_result(
+                status=ResultStatus.REJECTED,
+                run_id=run_id,
+                generated_at=clock(),
+                requested_url=requested_url,
+                current_url=requested_url,
+                code=exc.code,
+                message="Runtime request was rejected.",
+            )
+        site_skill = SiteSkillEvidence(
+            str(resolution.skill.version),
+            resolution.skill.digest.removeprefix("sha256:"),
         )
-    site_skill = SiteSkillEvidence(
-        str(resolution.skill.version),
-        resolution.skill.digest.removeprefix("sha256:"),
-    )
-    if not resolution.eligible:
-        return _failure_result(
-            status=ResultStatus.REJECTED,
-            run_id=run_id,
-            generated_at=clock(),
-            requested_url=requested_url,
-            current_url=requested_url,
-            code=_ineligible_code(resolution.reasons),
-            message="Runtime request was rejected.",
-            tool_id=resolution.skill.tool.tool_id,
-            tool_version=resolution.skill.tool.version,
-            site_skill=site_skill,
-        )
-    effective_request = resolution.request
+        preferred_tool_id = resolution.skill.tool.tool_id
+        preferred_tool_version = resolution.skill.tool.version
+        allowed_mime_types = resolution.skill.success_checks.allowed_mime_types
+        minimum_words = resolution.skill.success_checks.minimum_words
+        if not resolution.eligible:
+            return _failure_result(
+                status=ResultStatus.REJECTED,
+                run_id=run_id,
+                generated_at=clock(),
+                requested_url=requested_url,
+                current_url=requested_url,
+                code=_ineligible_code(resolution.reasons),
+                message="Runtime request was rejected.",
+                tool_id=preferred_tool_id,
+                tool_version=preferred_tool_version,
+                site_skill=site_skill,
+            )
+        effective_request = resolution.request
     if target_url is None:
         requested_url = effective_request.scope.seeds[0]
     try:
         tool_input = AcquisitionInput(effective_request, requested_url)
+        acquisition_manifests = registry.query(category=ToolCategory.ACQUISITION)
     except ToolRegistryError as exc:
         return _failure_result(
             status=ResultStatus.REJECTED,
@@ -134,42 +154,264 @@ def run_single_target(  # pylint: disable=too-many-arguments
             current_url=requested_url,
             code=exc.code,
             message="Runtime request was rejected.",
-            tool_id=resolution.skill.tool.tool_id,
-            tool_version=resolution.skill.tool.version,
+            tool_id=(preferred_tool_id if preferred_tool_version is not None else None),
+            tool_version=preferred_tool_version,
             site_skill=site_skill,
         )
 
     requested_url = tool_input.target_url
-    started_at = clock()
-    try:
-        acquisition = registry.invoke(resolution.skill.tool.tool_id, tool_input)
-    except ToolRegistryError as exc:
-        finished_at = clock()
-        return _acquisition_failure_result(
-            run_id=run_id,
-            generated_at=finished_at,
-            requested_url=requested_url,
-            started_at=started_at,
-            finished_at=finished_at,
-            tool_id=resolution.skill.tool.tool_id,
-            tool_version=resolution.skill.tool.version,
-            code=exc.code,
-            site_skill=site_skill,
+    registered_tool_ids = frozenset(
+        manifest.tool_id for manifest in acquisition_manifests
+    )
+    remaining_requests = effective_request.budgets.max_requests
+    remaining_bytes = effective_request.budgets.max_bytes
+    remaining_runtime_ms = effective_request.budgets.max_runtime_seconds * 1_000
+    remaining_tool_attempts = effective_request.budgets.max_tool_attempts_per_target
+    attempted_tool_ids: set[str] = set()
+    recorded_skips: set[str] = set()
+    acquisition_attempts: list[Attempt] = []
+    acquisition_errors: list[SafeError] = []
+    last_failure_code = "runtime.acquisition_unavailable"
+    last_tool_id = preferred_tool_id
+    last_tool_version = preferred_tool_version
+    finished_at: str | None = None
+    while True:
+        selection = rank_eligible_tools(
+            acquisition_manifests,
+            EligibilityRequirements(category=ToolCategory.ACQUISITION),
+            EligibilityFacts(
+                # Registry registration is the current executable/installed seam.
+                registered_tool_ids,
+                # Every Acquisition registration executes under the same Request gate.
+                registered_tool_ids,
+                remaining_requests,
+                remaining_bytes,
+                remaining_runtime_ms,
+                remaining_tool_attempts,
+            ),
+            preferred_tool_id=preferred_tool_id,
+            include_alternates=effective_request.explore_all_tools,
+            attempted_tool_ids=frozenset(attempted_tool_ids),
         )
-    finished_at = clock()
-    if isinstance(acquisition, AcquisitionFailure):
-        return _acquisition_failure_result(
+        if (attempted_tool_ids or not selection.ranked) and not (
+            selection.budget_exhausted
+        ):
+            for decision in selection.skipped:
+                if decision.tool_id in recorded_skips:
+                    continue
+                skipped_at = clock()
+                error = _eligibility_error(decision.reasons)
+                acquisition_errors.append(error)
+                acquisition_attempts.append(
+                    _attempt(
+                        run_id=run_id,
+                        attempt_id=_ordered_attempt_id(
+                            run_id, "acquisition", len(acquisition_attempts)
+                        ),
+                        order=len(acquisition_attempts),
+                        outcome="skipped",
+                        requested_url=requested_url,
+                        started_at=skipped_at,
+                        finished_at=skipped_at,
+                        tool_id=decision.tool_id,
+                        tool_version=decision.tool_version,
+                        final_url=None,
+                        http_status=None,
+                        error=error,
+                        requests=0,
+                        bytes_received=0,
+                        runtime_ms=0,
+                    )
+                )
+                recorded_skips.add(decision.tool_id)
+        if not selection.ranked:
+            if not attempted_tool_ids:
+                decision = next(
+                    (
+                        item
+                        for item in selection.decisions
+                        if item.tool_id == preferred_tool_id
+                    ),
+                    None,
+                )
+                code = (
+                    "runtime.default_tool_missing"
+                    if decision is None
+                    else _ineligible_code(decision.reasons)
+                )
+                if decision is not None:
+                    preferred_tool_version = decision.tool_version
+                return _failure_result(
+                    status=ResultStatus.REJECTED,
+                    run_id=run_id,
+                    generated_at=clock(),
+                    requested_url=requested_url,
+                    current_url=requested_url,
+                    code=code,
+                    message="Runtime request was rejected.",
+                    tool_id=(
+                        preferred_tool_id
+                        if preferred_tool_version is not None
+                        else None
+                    ),
+                    tool_version=preferred_tool_version,
+                    site_skill=site_skill,
+                    attempts=tuple(acquisition_attempts),
+                )
+            assert last_tool_version is not None
+            budget_code = _acquisition_budget_exhaustion_code(
+                remaining_requests,
+                remaining_bytes,
+                remaining_runtime_ms,
+                remaining_tool_attempts,
+            )
+            return _acquisition_failure_result(
+                run_id=run_id,
+                generated_at=finished_at or clock(),
+                requested_url=requested_url,
+                tool_id=last_tool_id,
+                tool_version=last_tool_version,
+                code=budget_code or last_failure_code,
+                site_skill=site_skill,
+                attempts=tuple(acquisition_attempts),
+            )
+        manifest = selection.ranked[0]
+        last_tool_id = manifest.tool_id
+        last_tool_version = manifest.version
+        attempt_request = Request(
+            effective_request.scope,
+            effective_request.site_skill,
+            effective_request.explore_all_tools,
+            Budgets(
+                remaining_requests,
+                remaining_bytes,
+                remaining_runtime_ms // 1_000,
+                remaining_tool_attempts,
+            ),
+        )
+        tool_input = AcquisitionInput(attempt_request, requested_url)
+        started_at = clock()
+        invocation_started_ns = time.perf_counter_ns()
+        try:
+            acquisition = registry.invoke(manifest.tool_id, tool_input)
+        except AcquisitionOutputRejected as exc:
+            acquisition = exc.failure
+        except ToolRegistryError as exc:
+            acquisition = AcquisitionFailure(
+                manifest.tool_id,
+                manifest.version,
+                exc.code,
+                runtime_ms=0,
+            )
+        invocation_runtime_ms = _elapsed_runtime_ms(
+            invocation_started_ns, time.perf_counter_ns()
+        )
+        finished_at = clock()
+        attempt_runtime_ms = max(acquisition.runtime_ms, invocation_runtime_ms)
+        reported_failure_code = (
+            acquisition.code if isinstance(acquisition, AcquisitionFailure) else None
+        )
+        post_invoke_budget_code: str | None = None
+        if acquisition.requests > remaining_requests:
+            post_invoke_budget_code = (
+                "budget.requests"
+                if reported_failure_code == "budget.requests"
+                else "eligibility.request_budget_exhausted"
+            )
+        elif acquisition.bytes_received > remaining_bytes:
+            post_invoke_budget_code = (
+                "budget.bytes"
+                if reported_failure_code == "budget.bytes"
+                else "eligibility.byte_budget_exhausted"
+            )
+        elif attempt_runtime_ms > remaining_runtime_ms:
+            post_invoke_budget_code = (
+                "budget.runtime"
+                if reported_failure_code == "budget.runtime"
+                else "eligibility.runtime_budget_exhausted"
+            )
+        failure_code = (
+            post_invoke_budget_code
+            if post_invoke_budget_code is not None
+            else (
+                acquisition.code
+                if isinstance(acquisition, AcquisitionFailure)
+                else (
+                    None
+                    if allowed_mime_types is None
+                    else _quality_failure_code(
+                        acquisition, allowed_mime_types, minimum_words
+                    )
+                )
+            )
+        )
+        error = (
+            None
+            if failure_code is None
+            else SafeError(
+                failure_code,
+                (
+                    "Acquisition did not complete."
+                    if isinstance(acquisition, AcquisitionFailure)
+                    or post_invoke_budget_code is not None
+                    else "Acquisition quality checks failed."
+                ),
+            )
+        )
+        output = acquisition if isinstance(acquisition, AcquisitionOutput) else None
+        attempt = _attempt(
             run_id=run_id,
-            generated_at=finished_at,
+            attempt_id=_ordered_attempt_id(
+                run_id, "acquisition", len(acquisition_attempts)
+            ),
+            order=len(acquisition_attempts),
+            outcome="succeeded" if error is None else "failed",
             requested_url=requested_url,
             started_at=started_at,
             finished_at=finished_at,
             tool_id=acquisition.tool_id,
             tool_version=acquisition.tool_version,
-            code=acquisition.code,
-            site_skill=site_skill,
+            final_url=None if output is None else output.final_url,
+            http_status=None if output is None else output.status_code,
+            error=error,
+            requests=(
+                acquisition.requests
+                if isinstance(acquisition, AcquisitionFailure)
+                else acquisition.requests
+            ),
+            bytes_received=(
+                acquisition.bytes_received
+                if isinstance(acquisition, AcquisitionFailure)
+                else acquisition.bytes_received
+            ),
+            runtime_ms=attempt_runtime_ms,
         )
+        acquisition_attempts.append(attempt)
+        attempted_tool_ids.add(manifest.tool_id)
+        remaining_requests = max(0, remaining_requests - attempt.requests)
+        remaining_bytes = max(0, remaining_bytes - attempt.bytes_received)
+        remaining_runtime_ms = max(0, remaining_runtime_ms - attempt.runtime_ms)
+        remaining_tool_attempts -= 1
+        if attempt.outcome == "succeeded":
+            break
+        assert error is not None and failure_code is not None
+        acquisition_errors.append(error)
+        last_failure_code = failure_code
+        if not effective_request.explore_all_tools or not (
+            acquisition_failure_allows_switch(failure_code)
+        ):
+            return _acquisition_failure_result(
+                run_id=run_id,
+                generated_at=finished_at,
+                requested_url=requested_url,
+                tool_id=manifest.tool_id,
+                tool_version=manifest.version,
+                code=failure_code,
+                site_skill=site_skill,
+                attempts=tuple(acquisition_attempts),
+            )
     assert isinstance(acquisition, AcquisitionOutput)
+    assert finished_at is not None
     redirects = tuple(
         RedirectEvidence(
             order=index,
@@ -180,22 +422,7 @@ def run_single_target(  # pylint: disable=too-many-arguments
         )
         for index, redirect in enumerate(acquisition.redirects)
     )
-    requests = len(redirects) + 1
-    attempt = _attempt(
-        run_id=run_id,
-        outcome="succeeded",
-        requested_url=requested_url,
-        started_at=started_at,
-        finished_at=finished_at,
-        tool_id=acquisition.tool_id,
-        tool_version=acquisition.tool_version,
-        final_url=acquisition.final_url,
-        http_status=acquisition.status_code,
-        error=None,
-        requests=requests,
-        bytes_received=len(acquisition.body),
-        runtime_ms=acquisition.runtime_ms,
-    )
+    attempt = acquisition_attempts[-1]
     # The public Store boundary rolls back before propagating commit failures.
     try:
         observation = artifact_store.commit_observation(
@@ -218,6 +445,8 @@ def run_single_target(  # pylint: disable=too-many-arguments
         error = SafeError(code, "Artifact commit did not complete.")
         attempt = _attempt(
             run_id=run_id,
+            attempt_id=attempt.attempt_id,
+            order=attempt.order,
             outcome="failed",
             requested_url=requested_url,
             started_at=started_at,
@@ -227,9 +456,9 @@ def run_single_target(  # pylint: disable=too-many-arguments
             final_url=acquisition.final_url,
             http_status=acquisition.status_code,
             error=error,
-            requests=requests,
-            bytes_received=len(acquisition.body),
-            runtime_ms=acquisition.runtime_ms,
+            requests=attempt.requests,
+            bytes_received=attempt.bytes_received,
+            runtime_ms=attempt.runtime_ms,
         )
         return _failure_result(
             status=ResultStatus.FAILED,
@@ -243,7 +472,7 @@ def run_single_target(  # pylint: disable=too-many-arguments
             tool_version=acquisition.tool_version,
             site_skill=site_skill,
             redirects=redirects,
-            attempts=(attempt,),
+            attempts=tuple(acquisition_attempts[:-1]) + (attempt,),
         )
     transformed = _transform_stored_source(
         registry,
@@ -252,14 +481,16 @@ def run_single_target(  # pylint: disable=too-many-arguments
         run_id=run_id,
         clock=clock,
         tool_attempts_remaining=(
-            effective_request.budgets.max_tool_attempts_per_target - 1
+            effective_request.budgets.max_tool_attempts_per_target
+            - sum(item.outcome != "skipped" for item in acquisition_attempts)
         ),
         runtime_ms_remaining=(
             effective_request.budgets.max_runtime_seconds * 1_000
-            - acquisition.runtime_ms
+            - sum(item.runtime_ms for item in acquisition_attempts)
         ),
+        attempt_order=len(acquisition_attempts),
     )
-    attempts = (attempt,) + (
+    attempts = tuple(acquisition_attempts) + (
         () if transformed.attempt is None else (transformed.attempt,)
     )
     observations = (observation,) + (
@@ -284,15 +515,14 @@ def run_single_target(  # pylint: disable=too-many-arguments
     return Result(
         status=(
             ResultStatus.PARTIAL
-            if transformed.attempt is not None
-            and transformed.attempt.outcome != "succeeded"
+            if any(item.outcome != "succeeded" for item in attempts)
             else ResultStatus.COMPLETED
         ),
         manifest=manifest,
         site_skill_used=site_skill,
         site_skill_update=None,
         attempts=attempts,
-        errors=transformed.errors,
+        errors=tuple(acquisition_errors) + transformed.errors,
         usage=usage,
     )
 
@@ -306,6 +536,7 @@ def _transform_stored_source(  # pylint: disable=too-many-arguments
     clock: Callable[[], str],
     tool_attempts_remaining: int,
     runtime_ms_remaining: int,
+    attempt_order: int,
 ) -> _TransformResult:
     """Invoke at most one eligible generic Transform over stored HTML."""
     if tool_attempts_remaining <= 0 or runtime_ms_remaining <= 0:
@@ -343,6 +574,7 @@ def _transform_stored_source(  # pylint: disable=too-many-arguments
                 else exc.code
             ),
             runtime_ms=invocation_runtime_ms,
+            attempt_order=attempt_order,
         )
     invocation_runtime_ms = _elapsed_runtime_ms(invocation_started_ns)
     finished_at = clock()
@@ -360,6 +592,7 @@ def _transform_stored_source(  # pylint: disable=too-many-arguments
                 else transformed.code
             ),
             runtime_ms=invocation_runtime_ms,
+            attempt_order=attempt_order,
         )
     assert isinstance(transformed, TransformOutput)
     if transformed.runtime_ms > runtime_ms_remaining:
@@ -372,6 +605,7 @@ def _transform_stored_source(  # pylint: disable=too-many-arguments
             tool_version=transformed.tool_version,
             code="runtime.transform_runtime_budget_exceeded",
             runtime_ms=transformed.runtime_ms,
+            attempt_order=attempt_order,
         )
     if transformed.mime_type != "text/markdown":
         return _transform_failure_result(
@@ -383,6 +617,7 @@ def _transform_stored_source(  # pylint: disable=too-many-arguments
             tool_version=transformed.tool_version,
             code="runtime.transform_output_mime_invalid",
             runtime_ms=transformed.runtime_ms,
+            attempt_order=attempt_order,
         )
     try:
         derived = artifact_store.commit_observation(
@@ -416,12 +651,13 @@ def _transform_stored_source(  # pylint: disable=too-many-arguments
             tool_version=transformed.tool_version,
             code=code,
             runtime_ms=transformed.runtime_ms,
+            attempt_order=attempt_order,
         )
     return _TransformResult(
         attempt=_attempt(
             run_id=run_id,
-            attempt_id=f"{run_id}-transform",
-            order=1,
+            attempt_id=_ordered_attempt_id(run_id, "transform", attempt_order),
+            order=attempt_order,
             outcome="succeeded",
             requested_url=source.observation.source_url,
             started_at=started_at,
@@ -450,13 +686,14 @@ def _transform_failure_result(  # pylint: disable=too-many-arguments
     tool_version: str,
     code: str,
     runtime_ms: int = 0,
+    attempt_order: int = 1,
 ) -> _TransformResult:
     error = SafeError(code, "Transform did not complete.")
     return _TransformResult(
         attempt=_attempt(
             run_id=run_id,
-            attempt_id=f"{run_id}-transform",
-            order=1,
+            attempt_id=_ordered_attempt_id(run_id, "transform", attempt_order),
+            order=attempt_order,
             outcome="failed",
             requested_url=source.observation.source_url,
             started_at=started_at,
@@ -556,29 +793,12 @@ def _acquisition_failure_result(  # pylint: disable=too-many-arguments
     run_id: str,
     generated_at: str,
     requested_url: str,
-    started_at: str,
-    finished_at: str,
     tool_id: str,
     tool_version: str,
     code: str,
-    site_skill: SiteSkillEvidence,
+    site_skill: SiteSkillEvidence | None,
+    attempts: tuple[Attempt, ...],
 ) -> Result:
-    error = SafeError(code, "Acquisition did not complete.")
-    attempt = _attempt(
-        run_id=run_id,
-        outcome="failed",
-        requested_url=requested_url,
-        started_at=started_at,
-        finished_at=finished_at,
-        tool_id=tool_id,
-        tool_version=tool_version,
-        final_url=None,
-        http_status=None,
-        error=error,
-        requests=0,
-        bytes_received=0,
-        runtime_ms=0,
-    )
     return _failure_result(
         status=ResultStatus.FAILED,
         run_id=run_id,
@@ -590,7 +810,7 @@ def _acquisition_failure_result(  # pylint: disable=too-many-arguments
         tool_id=tool_id,
         tool_version=tool_version,
         site_skill=site_skill,
-        attempts=(attempt,),
+        attempts=attempts,
     )
 
 
@@ -676,6 +896,52 @@ def _attempt(  # pylint: disable=too-many-arguments
     )
 
 
+def _ordered_attempt_id(run_id: str, kind: str, order: int) -> str:
+    if order == 0 and kind == "acquisition":
+        return run_id
+    suffix = f"-{kind}-{order}"
+    return f"{run_id[: 128 - len(suffix)]}{suffix}"
+
+
+def _eligibility_error(reasons: tuple[str, ...]) -> SafeError:
+    safe_reasons = reasons or ("eligibility.ineligible",)
+    return SafeError(
+        safe_reasons[0].partition(":")[0],
+        "Acquisition tool was not eligible.",
+        tuple((f"reason_{index}", reason) for index, reason in enumerate(safe_reasons)),
+    )
+
+
+def _quality_failure_code(
+    acquisition: AcquisitionOutput,
+    allowed_mime_types: tuple[str, ...],
+    minimum_words: int,
+) -> str | None:
+    if acquisition.mime_type not in allowed_mime_types:
+        return "runtime.quality_mime_mismatch"
+    words = acquisition.body.decode("utf-8", errors="ignore").split()
+    if len(words) < minimum_words:
+        return "runtime.quality_minimum_words"
+    return None
+
+
+def _acquisition_budget_exhaustion_code(
+    remaining_requests: int,
+    remaining_bytes: int,
+    remaining_runtime_ms: int,
+    remaining_tool_attempts: int,
+) -> str | None:
+    if remaining_requests == 0:
+        return "eligibility.request_budget_exhausted"
+    if remaining_bytes == 0:
+        return "eligibility.byte_budget_exhausted"
+    if remaining_runtime_ms < 1_000:
+        return "eligibility.runtime_budget_exhausted"
+    if remaining_tool_attempts == 0:
+        return "eligibility.attempt_budget_exhausted"
+    return None
+
+
 def _usage(attempts: tuple[Attempt, ...]) -> Usage:
     return Usage(
         requests=sum(attempt.requests for attempt in attempts),
@@ -685,8 +951,10 @@ def _usage(attempts: tuple[Attempt, ...]) -> Usage:
     )
 
 
-def _elapsed_runtime_ms(started_ns: int) -> int:
-    return max(0, (time.monotonic_ns() - started_ns) // 1_000_000)
+def _elapsed_runtime_ms(started_ns: int, finished_ns: int | None = None) -> int:
+    if finished_ns is None:
+        finished_ns = time.monotonic_ns()
+    return max(0, (finished_ns - started_ns) // 1_000_000)
 
 
 def _ineligible_code(reasons: tuple[str, ...]) -> str:

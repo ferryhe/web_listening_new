@@ -22,6 +22,7 @@ from web_listening.tool_registry.runners.in_process import (
     GatewayFailure,
     GovernedAccessGateway,
     Transport,
+    UsageEvidence,
 )
 
 WEB_HTTP_MANIFEST = ToolManifest(
@@ -50,9 +51,11 @@ class WebHttpAcquisitionTool:
         transport_factory: Callable[[], Transport],
         *,
         resolver: Callable[[str, int], tuple[str, ...]] | None = None,
+        runtime_deadline: float | None = None,
     ) -> None:
         self._transport_factory = transport_factory
         self._resolver = resolver
+        self._runtime_deadline = runtime_deadline
         self._closed = False
 
     def acquire(
@@ -63,16 +66,26 @@ class WebHttpAcquisitionTool:
             return self._failure("gateway.closed")
         transport: Transport | None = None
         gateway: GovernedAccessGateway | None = None
+        usage: UsageEvidence | None = None
         try:
             transport = self._transport_factory()
-            gateway = GovernedAccessGateway(
-                tool_input.request,
-                transport,
-                resolver=self._resolver,
-            )
+            if self._runtime_deadline is None:
+                gateway = GovernedAccessGateway(
+                    tool_input.request,
+                    transport,
+                    resolver=self._resolver,
+                )
+            else:
+                gateway = GovernedAccessGateway(
+                    tool_input.request,
+                    transport,
+                    resolver=self._resolver,
+                    runtime_deadline=self._runtime_deadline,
+                )
             result = gateway.read(tool_input.target_url)
+            usage = result.evidence.usage
             if result.requested_url != tool_input.target_url:
-                return self._failure("web_http.url_redacted")
+                return self._failure("web_http.url_redacted", usage)
             redirects = tuple(
                 AcquisitionRedirect(
                     from_url=redirect.source_url,
@@ -93,14 +106,13 @@ class WebHttpAcquisitionTool:
                 sha256=result.sha256,
                 redirects=redirects,
                 runtime_ms=round(result.evidence.usage.elapsed_seconds * 1000),
+                requests=result.evidence.usage.requests,
+                bytes_received=result.evidence.usage.bytes,
             )
         except GatewayFailure as exc:
-            try:
-                return self._failure(exc.code)
-            except Exception:  # pylint: disable=broad-exception-caught
-                return self._failure("web_http.failure")
+            return self._safe_failure(exc.code, exc.evidence.usage)
         except Exception:  # pylint: disable=broad-exception-caught
-            return self._failure("web_http.failure")
+            return self._safe_failure("web_http.failure", usage)
         finally:
             if gateway is not None:
                 self._close_resource(gateway)
@@ -120,12 +132,28 @@ class WebHttpAcquisitionTool:
         except Exception:  # pylint: disable=broad-exception-caught
             pass
 
-    def _failure(self, code: str) -> AcquisitionFailure:
+    def _failure(
+        self, code: str, usage: UsageEvidence | None = None
+    ) -> AcquisitionFailure:
         return AcquisitionFailure(
             tool_id=self.manifest.tool_id,
             tool_version=self.manifest.version,
             code=code,
+            requests=0 if usage is None else usage.requests,
+            bytes_received=0 if usage is None else usage.bytes,
+            runtime_ms=(0 if usage is None else round(usage.elapsed_seconds * 1_000)),
         )
+
+    def _safe_failure(
+        self, code: str, usage: UsageEvidence | None
+    ) -> AcquisitionFailure:
+        try:
+            return self._failure(code, usage)
+        except Exception:  # pylint: disable=broad-exception-caught
+            try:
+                return self._failure("web_http.failure", usage)
+            except Exception:  # pylint: disable=broad-exception-caught
+                return self._failure("web_http.failure")
 
 
 __all__ = ["WEB_HTTP_MANIFEST", "WebHttpAcquisitionTool"]
