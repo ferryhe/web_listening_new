@@ -19,11 +19,18 @@ from web_listening.request.budgets import budgets_from_mapping, validate_budgets
 from web_listening.request.model import (
     Budgets,
     ContentType,
+    Request,
     RequestValidationError,
     Scope,
 )
-from web_listening.request.scope import scope_from_mapping, validate_scope
+from web_listening.request.scope import (
+    canonicalize_url,
+    scope_from_mapping,
+    validate_scope,
+)
+from web_listening.request.validate import compile_access_policy
 from web_listening.site_skill.model import (
+    DiscoveryRecipe,
     SiteSkill,
     SiteSkillError,
     SuccessChecks,
@@ -71,6 +78,8 @@ _KNOWN_FIELDS = frozenset(
         "success_checks",
         "verified_at",
         "digest",
+        "discovery",
+        "source_url",
         "seeds",
         "allowed_origins",
         "include_paths",
@@ -100,9 +109,11 @@ _ROOT_FIELDS = frozenset(
         "digest",
     }
 )
+_ROOT_OPTIONAL_FIELDS = frozenset({"discovery"})
 _TOOL_FIELDS = frozenset({"tool_id", "version", "category", "capabilities"})
 _TOOL_OPTIONAL_FIELDS = frozenset({"recipe_id"})
 _CHECK_FIELDS = frozenset({"allowed_mime_types", "minimum_words"})
+_DISCOVERY_FIELDS = frozenset({"tool", "source_url"})
 
 
 def _decoded_forms(value: str) -> tuple[str, ...]:
@@ -242,6 +253,25 @@ def _parse_checks(value: object) -> SuccessChecks:
     return SuccessChecks(canonical_mime_types, minimum_words)
 
 
+def _parse_discovery(value: object, scope: Scope, budgets: Budgets) -> DiscoveryRecipe:
+    mapping = _require_fields(value, _DISCOVERY_FIELDS)
+    tool = _parse_tool(mapping["tool"])
+    if tool.category is not ToolCategory.DISCOVERY:
+        raise SiteSkillError("site_skill.discovery_invalid")
+    source_url = mapping["source_url"]
+    if type(source_url) is not str:
+        raise SiteSkillError("site_skill.discovery_invalid")
+    try:
+        policy = compile_access_policy(Request(scope, None, False, budgets))
+        canonical_source = canonicalize_url(source_url)
+    except RequestValidationError as exc:
+        raise SiteSkillError(exc.code) from None
+    decision = policy.decide_url(canonical_source)
+    if not decision.allowed:
+        raise SiteSkillError(decision.code)
+    return DiscoveryRecipe(tool, canonical_source)
+
+
 def _validated_mime_types(values: list[str]) -> tuple[str, ...] | None:
     try:
         return tuple(validate_mime_type(item) for item in values)
@@ -251,7 +281,7 @@ def _validated_mime_types(values: list[str]) -> tuple[str, ...] | None:
 
 def _site_skill_from_mapping(value: object, *, check_digest: bool) -> SiteSkill:
     _scan_safe_data(value)
-    mapping = _require_fields(value, _ROOT_FIELDS)
+    mapping = _require_fields(value, _ROOT_FIELDS, _ROOT_OPTIONAL_FIELDS)
     site_key = mapping["site_key"]
     version = mapping["version"]
     previous_digest = mapping["previous_digest"]
@@ -273,6 +303,11 @@ def _site_skill_from_mapping(value: object, *, check_digest: bool) -> SiteSkill:
     if isinstance(validated_request_values, str):
         raise SiteSkillError(validated_request_values)
     scope, budgets, verified_at = validated_request_values
+    discovery = (
+        None
+        if "discovery" not in mapping
+        else _parse_discovery(mapping["discovery"], scope, budgets)
+    )
     skill = SiteSkill(
         site_key,
         version,
@@ -283,6 +318,7 @@ def _site_skill_from_mapping(value: object, *, check_digest: bool) -> SiteSkill:
         _parse_checks(mapping["success_checks"]),
         verified_at,
         _validate_digest(mapping["digest"]),
+        discovery,
     )
     if check_digest and skill.digest != _computed_digest(skill):
         raise SiteSkillError("site_skill.digest_mismatch")
@@ -342,6 +378,9 @@ def _model_mapping(value: SiteSkill) -> dict[str, object]:
         type(value) is not SiteSkill
         or type(value.tool) is not ToolReference
         or type(value.success_checks) is not SuccessChecks
+        or (
+            value.discovery is not None and type(value.discovery) is not DiscoveryRecipe
+        )
     ):
         raise SiteSkillError("site_skill.invalid")
     if (
@@ -356,7 +395,7 @@ def _model_mapping(value: SiteSkill) -> dict[str, object]:
         raise SiteSkillError("site_skill.invalid")
     tool = _direct_tool_mapping(value.tool)
     checks = _direct_checks_mapping(value.success_checks)
-    return {
+    mapping: dict[str, object] = {
         "site_key": value.site_key,
         "version": value.version,
         "previous_digest": value.previous_digest,
@@ -367,6 +406,11 @@ def _model_mapping(value: SiteSkill) -> dict[str, object]:
         "verified_at": value.verified_at,
         "digest": value.digest,
     }
+    if value.discovery is not None:
+        mapping["discovery"] = _direct_discovery_mapping(
+            value.discovery, value.scope, value.budgets
+        )
+    return mapping
 
 
 def _direct_tool_mapping(value: ToolReference) -> dict[str, object]:
@@ -415,6 +459,19 @@ def _direct_checks_mapping(value: SuccessChecks) -> dict[str, object]:
         "allowed_mime_types": list(value.allowed_mime_types),
         "minimum_words": value.minimum_words,
     }
+
+
+def _direct_discovery_mapping(
+    value: DiscoveryRecipe, scope: Scope, budgets: Budgets
+) -> dict[str, object]:
+    if type(value) is not DiscoveryRecipe or type(value.tool) is not ToolReference:
+        raise SiteSkillError("site_skill.discovery_invalid")
+    if value.tool.category is not ToolCategory.DISCOVERY:
+        raise SiteSkillError("site_skill.discovery_invalid")
+    mapping = {"tool": _direct_tool_mapping(value.tool), "source_url": value.source_url}
+    if _parse_discovery(mapping, scope, budgets) != value:
+        raise SiteSkillError("site_skill.discovery_invalid")
+    return mapping
 
 
 def _validated_request_values(

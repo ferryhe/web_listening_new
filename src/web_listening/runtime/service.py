@@ -12,11 +12,17 @@ from pathlib import Path
 from web_listening.artifact.model import StoredArtifact
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import Request, RequestValidationError
+from web_listening.result.site_explore import SiteExploreResult
 from web_listening.runtime.jobs import Job, JobRepository, JobStatus
+from web_listening.runtime.site_explore import run_site_explore
 from web_listening.runtime.workflow import run_single_target
 from web_listening.tool_registry.acquisition.builtins.web_http import (
     WEB_HTTP_MANIFEST,
     WebHttpAcquisitionTool,
+)
+from web_listening.tool_registry.discovery.builtins.html_links import (
+    HTML_LINKS_MANIFEST,
+    HtmlLinksDiscoveryTool,
 )
 from web_listening.tool_registry.registry import Registry
 from web_listening.tool_registry.runners.in_process import PinnedHttpTransport
@@ -59,6 +65,8 @@ class RuntimeService:
             resources.append(tool)
             registry = Registry()
             registry.register(WEB_HTTP_MANIFEST, tool)
+            discovery = HtmlLinksDiscoveryTool()
+            registry.register(HTML_LINKS_MANIFEST, discovery)
             transform = SimpleHtmlMarkdownTransform()
             registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
             artifact_store = ArtifactStore(root / "artifacts")
@@ -129,6 +137,17 @@ class RuntimeService:
         """Return one Job without adding Runtime-owned interpretation."""
         self._ensure_open()
         return self._jobs.get(job_id)
+
+    def explore_site(self, request: Request) -> SiteExploreResult:
+        """Run deterministic exploration through the shared Runtime workflow."""
+        self._ensure_open()
+        return run_site_explore(
+            request,
+            self._registry,
+            self._artifact_store,
+            run_id=self._job_id_factory(),
+            clock=self._clock,
+        )
 
     def read_artifact(self, artifact_id: str) -> StoredArtifact:
         """Return one verified Artifact through the Store's public boundary."""

@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 
 from web_listening.request.model import Budgets, Scope
 from web_listening.site_skill.model import (
+    DiscoveryRecipe,
     SiteSkill,
     SiteSkillError,
     SuccessChecks,
@@ -36,6 +37,7 @@ def create_candidate(  # pylint: disable=too-many-arguments
     tool: ToolReference,
     success_checks: SuccessChecks,
     verified_at: str,
+    discovery: DiscoveryRecipe | None = None,
 ) -> SiteSkillCandidate:
     """Create an immutable candidate with explicit predecessor lineage."""
     if type(site_key) is not str:
@@ -60,6 +62,7 @@ def create_candidate(  # pylint: disable=too-many-arguments
         success_checks,
         verified_at,
         "sha256:" + "0" * 64,
+        discovery,
     )
     skill = replace(draft, digest=compute_site_skill_digest(draft))
     return SiteSkillCandidate(validate_site_skill(skill))

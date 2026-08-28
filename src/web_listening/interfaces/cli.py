@@ -38,7 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{acquire,get-job,read-artifact}",
+        metavar="{acquire,site-explore,get-job,read-artifact}",
     )
 
     acquire = commands.add_parser("acquire", help="Submit one validated Request file.")
@@ -46,6 +46,13 @@ def _parser() -> argparse.ArgumentParser:
     acquire.add_argument("--site-skill", type=Path)
     acquire.add_argument("--output", required=True, type=Path)
     acquire.add_argument("--json", action="store_true", help="Emit JSON.")
+
+    site_explore = commands.add_parser(
+        "site-explore", help="Explore one site with a validated Request file."
+    )
+    site_explore.add_argument("--request", required=True, type=Path)
+    site_explore.add_argument("--output", required=True, type=Path)
+    site_explore.add_argument("--json", action="store_true", help="Emit JSON.")
 
     get_job = commands.add_parser("get-job", help="Read one Runtime Job by ID.")
     get_job.add_argument("job_id")
@@ -156,6 +163,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             request = _load_request(args.request, args.site_skill)
             payload = _run_with_runtime(
                 args.output, lambda runtime: _job_payload(runtime.run(request))
+            )
+        elif args.command == "site-explore":
+            request = _load_request(args.request, None)
+            payload = _run_with_runtime(
+                args.output, lambda runtime: runtime.explore_site(request).to_dict()
             )
         elif args.command == "get-job":
             payload = _run_with_runtime(

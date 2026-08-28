@@ -807,6 +807,48 @@ def test_get_job_and_read_artifact_are_identity_preserving_delegations() -> None
     assert store.calls == ["artifact-one"]
 
 
+def test_explore_site_is_one_public_delegation_with_fresh_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = object()
+    calls: list[tuple[object, object, object, str, object]] = []
+    registry = object()
+    store = object()
+    jobs = JobRepository()
+    service = RuntimeService(
+        registry,  # type: ignore[arg-type]
+        store,  # type: ignore[arg-type]
+        jobs,
+        clock=lambda: NOW,
+        job_id_factory=lambda: "job-site-explore",
+    )
+    request = _request(None)
+
+    def fake_run(request_arg, registry_arg, store_arg, *, run_id, clock):
+        calls.append((request_arg, registry_arg, store_arg, run_id, clock))
+        return expected
+
+    monkeypatch.setattr(service_module, "run_site_explore", fake_run)
+
+    assert service.explore_site(request) is expected
+    assert len(calls) == 1
+    assert calls[0][:4] == (request, registry, store, "job-site-explore")
+    assert calls[0][4]() == NOW
+
+
+def test_open_registers_html_link_discovery_for_site_explore(tmp_path: Path) -> None:
+    service = RuntimeService.open(tmp_path / "runtime-data")
+
+    discovery = service._registry.query(  # pylint: disable=protected-access
+        category=ToolCategory.DISCOVERY
+    )
+
+    assert [(item.tool_id, item.version) for item in discovery] == [
+        ("discovery.html_links", "1.0.0")
+    ]
+    service.close()
+
+
 def test_close_is_idempotent_guards_operations_and_does_not_close_injections(
     tmp_path: Path,
 ) -> None:
@@ -818,6 +860,7 @@ def test_close_is_idempotent_guards_operations_and_does_not_close_injections(
 
     for operation in (
         lambda: service.run(_request(_skill())),
+        lambda: service.explore_site(_request(None)),
         lambda: service.get_job("job-one"),
         lambda: service.read_artifact("artifact-one"),
     ):

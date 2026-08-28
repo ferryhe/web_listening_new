@@ -23,8 +23,12 @@ from fastapi.testclient import TestClient  # pylint: disable=import-error
 import web_listening.interfaces.cli as cli
 import web_listening.interfaces.rest as rest
 from web_listening.artifact.model import ArtifactStoreError, StoredArtifact
+from web_listening.artifact.site_state import SiteState
 from web_listening.request.model import Request, RequestValidationError
+from web_listening.result.errors import SafeError
+from web_listening.result.manifest import Usage
 from web_listening.result.model import Result
+from web_listening.result.site_explore import SiteExploreResult
 from web_listening.runtime.jobs import Job, JobStateError, JobStatus
 from web_listening.site_skill.model import SiteSkill, SiteSkillError
 
@@ -50,6 +54,21 @@ def _job(name: str = "completed.v1.json") -> Job:
         finished_at="2026-08-25T12:00:01Z",
         result=result,
         failure_code=failure_code,
+    )
+
+
+def _explore_result() -> SiteExploreResult:
+    return SiteExploreResult(
+        status="rejected",
+        exploration_complete=False,
+        site_state=SiteState("www.ipcc.ch", "2026-08-26T12:00:00Z", None, False, ()),
+        site_skill_candidate=None,
+        site_skill_used=None,
+        discovery=(),
+        attempts=(),
+        usage=Usage(0, 0, 0, 0),
+        stop_reason="rejected",
+        errors=(SafeError("test.rejected", "Exploration was rejected."),),
     )
 
 
@@ -94,10 +113,12 @@ class FakeRuntime:
             content=content,
         )
         self.run_error: Exception | None = None
+        self.explore_error: Exception | None = None
         self.get_error: Exception | None = None
         self.read_error: Exception | None = None
         self.requests: list[Request] = []
         self.run_thread_ids: list[int] = []
+        self.explore_thread_ids: list[int] = []
         self.job_ids: list[str] = []
         self.artifact_ids: list[str] = []
 
@@ -113,6 +134,13 @@ class FakeRuntime:
         if self.get_error is not None:
             raise self.get_error
         return self.get_job_result
+
+    def explore_site(self, request: Request) -> SiteExploreResult:
+        self.explore_thread_ids.append(get_ident())
+        self.requests.append(request)
+        if self.explore_error is not None:
+            raise self.explore_error
+        return _explore_result()
 
     def read_artifact(self, artifact_id: str) -> StoredArtifact:
         self.artifact_ids.append(artifact_id)
@@ -130,7 +158,7 @@ def _client(runtime: FakeRuntime) -> TestClient:
     return TestClient(rest.create_app(lambda: runtime))
 
 
-def test_app_exposes_exactly_the_three_readme_routes_and_disables_docs(
+def test_app_exposes_exactly_the_four_readme_routes_and_disables_docs(
     runtime: FakeRuntime,
 ) -> None:
     app = rest.create_app(lambda: runtime)
@@ -140,6 +168,7 @@ def test_app_exposes_exactly_the_three_readme_routes_and_disables_docs(
         ("/v1/acquisitions", ("POST",)),
         ("/v1/jobs/{run_id}", ("GET",)),
         ("/v1/artifacts/{artifact_id}", ("GET",)),
+        ("/v1/site-explorations", ("POST",)),
     }
     client = TestClient(app)
     assert client.get("/docs").status_code == 404
@@ -175,6 +204,27 @@ def test_acquire_offloads_runtime_run_from_the_handler_thread(
     assert response.status_code == 201
     assert len(provider_thread_ids) == len(runtime.run_thread_ids) == 1
     assert runtime.run_thread_ids[0] != provider_thread_ids[0]
+
+
+def test_site_explore_maps_request_to_one_runtime_call_with_contract_parity(
+    runtime: FakeRuntime,
+) -> None:
+    provider_thread_ids: list[int] = []
+
+    def provider() -> FakeRuntime:
+        provider_thread_ids.append(get_ident())
+        return runtime
+
+    response = TestClient(rest.create_app(provider)).post(
+        "/v1/site-explorations", json=_request_payload()
+    )
+
+    assert response.status_code == 422
+    assert len(runtime.requests) == 1
+    assert runtime.requests[0].site_skill is None
+    assert response.json() == _explore_result().to_dict()
+    assert len(provider_thread_ids) == len(runtime.explore_thread_ids) == 1
+    assert runtime.explore_thread_ids[0] != provider_thread_ids[0]
 
 
 def test_acquire_validates_embedded_site_skill_before_runtime(
@@ -457,6 +507,7 @@ def test_rest_source_has_only_interface_dto_and_public_runtime_authority() -> No
     assert "RuntimeService" in source
     assert "runtime_provider" in source
     assert "run_in_threadpool(runtime.run, request)" in source
+    assert "run_in_threadpool(runtime.explore_site, request)" in source
     assert "runtime.get_job(" in source
     assert "runtime.read_artifact(" in source
     assert "RuntimeService.open" not in source
