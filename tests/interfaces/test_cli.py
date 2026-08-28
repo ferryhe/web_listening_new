@@ -18,8 +18,12 @@ import pytest
 
 import web_listening.interfaces.cli as cli
 from web_listening.artifact.model import ArtifactStoreError, StoredArtifact
+from web_listening.artifact.site_state import SiteState
 from web_listening.request.model import Request
+from web_listening.result.errors import SafeError
+from web_listening.result.manifest import Usage
 from web_listening.result.model import Result
+from web_listening.result.site_explore import SiteExploreResult
 from web_listening.runtime.jobs import Job, JobStateError, JobStatus
 from web_listening.site_skill.model import SiteSkill
 
@@ -40,6 +44,21 @@ def _job() -> Job:
         started_at="2026-08-26T12:00:00Z",
         finished_at="2026-08-26T12:00:01Z",
         result=_result(),
+    )
+
+
+def _explore_result() -> SiteExploreResult:
+    return SiteExploreResult(
+        status="rejected",
+        exploration_complete=False,
+        site_state=SiteState("www.ipcc.ch", "2026-08-26T12:00:00Z", None, False, ()),
+        site_skill_candidate=None,
+        site_skill_used=None,
+        discovery=(),
+        attempts=(),
+        usage=Usage(0, 0, 0, 0),
+        stop_reason="rejected",
+        errors=(SafeError("test.rejected", "Exploration was rejected."),),
     )
 
 
@@ -76,6 +95,7 @@ class FakeRuntime:
     instances: list["FakeRuntime"] = []
     open_error: Exception | None = None
     run_error: Exception | None = None
+    explore_error: Exception | None = None
     get_error: Exception | None = None
     read_error: Exception | None = None
 
@@ -91,6 +111,7 @@ class FakeRuntime:
         cls.instances = []
         cls.open_error = None
         cls.run_error = None
+        cls.explore_error = None
         cls.get_error = None
         cls.read_error = None
 
@@ -114,6 +135,12 @@ class FakeRuntime:
         if self.get_error is not None:
             raise self.get_error
         return _job()
+
+    def explore_site(self, request: Request) -> SiteExploreResult:
+        self.requests.append(request)
+        if self.explore_error is not None:
+            raise self.explore_error
+        return _explore_result()
 
     def read_artifact(self, artifact_id: str) -> StoredArtifact:
         self.artifact_ids.append(artifact_id)
@@ -143,7 +170,7 @@ def _write_json(path: Path, payload: object) -> Path:
     return path
 
 
-def test_help_lists_exactly_the_three_phase_9_commands(
+def test_help_lists_the_four_public_commands(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as caught:
@@ -151,10 +178,9 @@ def test_help_lists_exactly_the_three_phase_9_commands(
 
     output = capsys.readouterr()
     assert caught.value.code == 0
-    assert "{acquire,get-job,read-artifact}" in output.out
+    assert "{acquire,site-explore,get-job,read-artifact}" in output.out
     assert output.err == ""
     for dropped in (
-        "discover",
         "search",
         "parse",
         "rag",
@@ -163,6 +189,32 @@ def test_help_lists_exactly_the_three_phase_9_commands(
         "validate-site-skill",
     ):
         assert dropped not in output.out.lower()
+
+
+def test_site_explore_calls_only_runtime_and_emits_the_strict_contract(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    request_path = _write_json(tmp_path / "request.json", _request_payload())
+    output_dir = tmp_path / "runtime-data"
+
+    exit_code = cli.main(
+        [
+            "site-explore",
+            "--request",
+            str(request_path),
+            "--output",
+            str(output_dir),
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == 0
+    assert output.err == ""
+    assert FakeRuntime.opened_with == [output_dir]
+    assert FakeRuntime.instances[0].closed is True
+    assert FakeRuntime.instances[0].requests[0].site_skill is None
+    assert SiteExploreResult.from_dict(json.loads(output.out)) == _explore_result()
 
 
 def test_acquire_parses_request_and_emits_the_unified_job_and_result_contract(

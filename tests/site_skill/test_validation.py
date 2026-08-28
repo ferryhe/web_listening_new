@@ -14,7 +14,12 @@ from pathlib import Path
 import pytest
 
 from web_listening.request.model import Budgets, ContentType, Scope
-from web_listening.site_skill.model import SiteSkillError, SuccessChecks, ToolReference
+from web_listening.site_skill.model import (
+    DiscoveryRecipe,
+    SiteSkillError,
+    SuccessChecks,
+    ToolReference,
+)
 from web_listening.site_skill.update import create_candidate
 from web_listening.site_skill.validate import (
     canonical_site_skill_bytes,
@@ -334,6 +339,95 @@ def test_recipe_identifier_is_inert_canonical_data_and_strictly_validated() -> N
     _assert_stable_rejection(
         lambda: site_skill_from_mapping(mapping), "site_skill.tool_invalid", ""
     )
+
+
+def test_optional_discovery_recipe_round_trips_and_participates_in_digest() -> None:
+    existing = _candidate().skill
+    assert "discovery" not in site_skill_to_mapping(existing)
+
+    recipe = DiscoveryRecipe(
+        ToolReference(
+            "discovery.html_links",
+            "1.0.0",
+            ToolCategory.DISCOVERY,
+            frozenset({"html_links"}),
+        ),
+        "https://example.test/reports/",
+    )
+    candidate = create_candidate(
+        site_key="example.test",
+        version=1,
+        previous=None,
+        scope=_scope(),
+        budgets=Budgets(4, 4096, 20, 1),
+        tool=existing.tool,
+        discovery=recipe,
+        success_checks=existing.success_checks,
+        verified_at=existing.verified_at,
+    ).skill
+    mapping = site_skill_to_mapping(candidate)
+
+    assert mapping["discovery"] == {
+        "tool": {
+            "tool_id": "discovery.html_links",
+            "version": "1.0.0",
+            "category": "discovery",
+            "capabilities": ["html_links"],
+        },
+        "source_url": "https://example.test/reports/",
+    }
+    assert site_skill_from_mapping(mapping) == candidate
+    assert candidate.digest != existing.digest
+
+
+@pytest.mark.parametrize(
+    ("mutation", "code"),
+    [
+        (
+            lambda value: value["discovery"].update({"hidden": True}),
+            "site_skill.unknown_field",
+        ),
+        (
+            lambda value: value["discovery"]["tool"].update(
+                {"category": "acquisition"}
+            ),
+            "site_skill.discovery_invalid",
+        ),
+        (
+            lambda value: value["discovery"].update(
+                {"source_url": "https://outside.test/"}
+            ),
+            "scope.origin_not_allowed",
+        ),
+    ],
+)
+def test_discovery_recipe_is_strict_and_cannot_expand_scope(
+    mutation, code: str
+) -> None:
+    base = _candidate().skill
+    candidate = create_candidate(
+        site_key="example.test",
+        version=1,
+        previous=None,
+        scope=base.scope,
+        budgets=base.budgets,
+        tool=base.tool,
+        discovery=DiscoveryRecipe(
+            ToolReference(
+                "discovery.html_links",
+                "1.0.0",
+                ToolCategory.DISCOVERY,
+                frozenset({"html_links"}),
+            ),
+            "https://example.test/reports/",
+        ),
+        success_checks=base.success_checks,
+        verified_at=base.verified_at,
+    ).skill
+    mapping = site_skill_to_mapping(candidate)
+    mutation(mapping)
+
+    _assert_stable_rejection(lambda: site_skill_from_mapping(mapping), code, "")
 
 
 def test_production_modules_have_no_io_or_dynamic_execution_authority() -> None:

@@ -36,6 +36,14 @@ class SuccessChecks:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveryRecipe:
+    """One exact, inert Discovery recipe verified for a governed source."""
+
+    tool: ToolReference
+    source_url: str
+
+
+@dataclass(frozen=True, slots=True)
 class SiteSkill:  # pylint: disable=too-many-instance-attributes
     """One immutable, versioned piece of verified site knowledge."""
 
@@ -48,3 +56,4 @@ class SiteSkill:  # pylint: disable=too-many-instance-attributes
     success_checks: SuccessChecks
     verified_at: str
     digest: str
+    discovery: DiscoveryRecipe | None = None

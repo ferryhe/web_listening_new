@@ -71,7 +71,7 @@ def _runtime_error_response(exc: Exception) -> JSONResponse:
 
 
 def create_app(runtime_provider: RuntimeProvider) -> FastAPI:
-    """Create exactly three routes using an explicitly provided Runtime."""
+    """Create thin routes using an explicitly provided Runtime."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.post("/v1/acquisitions", status_code=201)
@@ -116,6 +116,31 @@ def create_app(runtime_provider: RuntimeProvider) -> FastAPI:
         except Exception as exc:  # pylint: disable=broad-exception-caught
             return _runtime_error_response(exc)
         return JSONResponse(status_code=200, content=_artifact_payload(artifact))
+
+    @app.post("/v1/site-explorations", status_code=201)
+    async def site_explore(http_request: HttpRequest) -> JSONResponse:
+        try:
+            payload = (await http_request.body()).decode("utf-8")
+            request = request_from_json(payload)
+            if request.site_skill is not None:
+                request = replace(
+                    request,
+                    site_skill=site_skill_from_mapping(request.site_skill),
+                )
+        except UnicodeDecodeError:
+            return _error_response(422, "request.invalid_json", "Request is invalid.")
+        except (RequestValidationError, SiteSkillError) as exc:
+            return _error_response(422, exc.code, "Request is invalid.")
+        try:
+            runtime = runtime_provider()
+            result = await run_in_threadpool(runtime.explore_site, request)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            return _runtime_error_response(exc)
+        status_code = {
+            "rejected": 422,
+            "failed": 500,
+        }.get(result.status.value, 201)
+        return JSONResponse(status_code=status_code, content=result.to_dict())
 
     return app
 
