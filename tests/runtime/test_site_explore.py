@@ -300,7 +300,11 @@ def test_complete_exploration_builds_state_and_inactive_reusable_candidate(
     )
 
     result = run_site_explore(
-        _request(), registry, store, run_id="explore", clock=lambda: NOW
+        _request(max_attempts=2),
+        registry,
+        store,
+        run_id="explore",
+        clock=lambda: NOW,
     )
 
     assert result.status is ResultStatus.COMPLETED
@@ -316,6 +320,21 @@ def test_complete_exploration_builds_state_and_inactive_reusable_candidate(
         "https://example.test/b",
     ]
     assert [budget.max_requests for budget in acquisition.budgets] == [3, 2, 1]
+    assert [budget.max_bytes for budget in acquisition.budgets] == [
+        4096,
+        4096 - len(b"<a href='/b'>b</a><a href='/a'>a</a>"),
+        4096 - len(b"<a href='/b'>b</a><a href='/a'>a</a>") - len(b"page a"),
+    ]
+    assert [budget.max_runtime_seconds for budget in acquisition.budgets] == [
+        30,
+        29,
+        29,
+    ]
+    assert [budget.max_tool_attempts_per_target for budget in acquisition.budgets] == [
+        2,
+        2,
+        2,
+    ]
     candidate = result.site_skill_candidate
     assert candidate is not None
     candidate_skill = site_skill_from_mapping(candidate.to_dict())
@@ -430,6 +449,16 @@ def test_shared_budget_stops_unprocessed_candidates_and_returns_no_candidate(
         "https://example.test/a",
     ]
     assert result.usage.requests == 2
+    assert [budget.max_requests for budget in acquisition.budgets] == [2, 1]
+    assert [budget.max_bytes for budget in acquisition.budgets] == [
+        4096,
+        4096 - len(b"<a href='/b'>b</a><a href='/a'>a</a>"),
+    ]
+    assert [budget.max_runtime_seconds for budget in acquisition.budgets] == [30, 29]
+    assert [budget.max_tool_attempts_per_target for budget in acquisition.budgets] == [
+        4,
+        4,
+    ]
     store.close()
 
 
@@ -749,7 +778,7 @@ def test_all_unrepresentable_discovery_urls_return_partial_without_candidate(
     store.close()
 
 
-def test_shared_attempt_ledger_stops_after_seed_without_resetting_per_target(
+def test_discovery_stops_when_its_source_target_has_no_attempts_remaining(
     tmp_path: Path,
 ) -> None:
     acquisition = _Acquisition({"https://example.test/": b"<a href='/a'>a</a>"})
@@ -773,13 +802,62 @@ def test_shared_attempt_ledger_stops_after_seed_without_resetting_per_target(
     assert acquisition.targets == ["https://example.test/"]
     assert discovery.calls == 0
     assert result.site_skill_candidate is None
+    assert "discovery.no_candidates" not in {error.code for error in result.errors}
     store.close()
 
 
-def test_seed_and_discovery_exhaust_attempt_budget_before_candidate(
+def test_discovery_source_attempt_limit_does_not_block_discovered_candidate(
     tmp_path: Path,
 ) -> None:
-    acquisition = _Acquisition({"https://example.test/": b"<a href='/a'>a</a>"})
+    second_manifest = replace(HTML_LINKS_MANIFEST, tool_id="discovery.second")
+    acquisition = _Acquisition(
+        {
+            "https://example.test/": b"<a href='/a'>a</a>",
+            "https://example.test/a": b"page a",
+        }
+    )
+    registry = Registry()
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool(max_candidates=2))
+    registry.register(
+        second_manifest,
+        _StaticDiscovery("https://example.test/b", second_manifest),
+    )
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "artifacts")
+
+    result = run_site_explore(
+        _request(max_requests=2, max_attempts=2),
+        registry,
+        store,
+        run_id="explore",
+        clock=lambda: NOW,
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.exploration_complete is False
+    assert result.stop_reason == "budget_exhausted"
+    assert result.site_skill_candidate is None
+    assert [evidence.tool_id for evidence in result.discovery] == [
+        HTML_LINKS_MANIFEST.tool_id
+    ]
+    assert acquisition.targets == [
+        "https://example.test/",
+        "https://example.test/a",
+    ]
+    assert result.attempts[-1].requested_url == "https://example.test/a"
+    assert result.attempts[-1].outcome == "succeeded"
+    store.close()
+
+
+def test_seed_and_discovery_attempts_do_not_reduce_new_candidate_budget(
+    tmp_path: Path,
+) -> None:
+    acquisition = _Acquisition(
+        {
+            "https://example.test/": b"<a href='/a'>a</a>",
+            "https://example.test/a": b"page a",
+        }
+    )
     discovery = _DiscoverySpy()
     registry = Registry()
     registry.register(HTML_LINKS_MANIFEST, discovery)
@@ -794,16 +872,155 @@ def test_seed_and_discovery_exhaust_attempt_budget_before_candidate(
         clock=lambda: NOW,
     )
 
-    assert result.status is ResultStatus.PARTIAL
-    assert result.exploration_complete is False
-    assert result.stop_reason == "budget_exhausted"
-    assert result.usage.tool_attempts == 2
+    assert result.status is ResultStatus.COMPLETED
+    assert result.exploration_complete is True
+    assert result.stop_reason == "source_exhausted"
+    assert result.site_skill_candidate is not None
+    assert result.usage.tool_attempts == 3
     assert [attempt.tool_id for attempt in result.attempts] == [
         ACQUISITION_MANIFEST.tool_id,
         HTML_LINKS_MANIFEST.tool_id,
+        ACQUISITION_MANIFEST.tool_id,
     ]
-    assert acquisition.targets == ["https://example.test/"]
+    assert acquisition.targets == [
+        "https://example.test/",
+        "https://example.test/a",
+    ]
+    assert [budget.max_tool_attempts_per_target for budget in acquisition.budgets] == [
+        2,
+        2,
+    ]
     assert discovery.calls == 1
+    store.close()
+
+
+def test_candidate_attempt_limit_is_independent_and_skips_do_not_consume_it(
+    tmp_path: Path,
+) -> None:
+    candidate_a = "https://example.test/a"
+    candidate_b = "https://example.test/b"
+    preferred = _ScriptedAcquisition(
+        {
+            "https://example.test/": b"<a href='/a'>a</a><a href='/b'>b</a>",
+            candidate_a: AcquisitionFailure(
+                ACQUISITION_MANIFEST.tool_id,
+                ACQUISITION_MANIFEST.version,
+                "gateway.timeout",
+                requests=1,
+            ),
+            candidate_b: b"page b",
+        }
+    )
+    alternate_manifest = replace(ACQUISITION_MANIFEST, tool_id="acquisition.alternate")
+    alternate = _ScriptedAcquisition(
+        {
+            candidate_a: AcquisitionFailure(
+                alternate_manifest.tool_id,
+                alternate_manifest.version,
+                "gateway.timeout",
+                requests=1,
+            )
+        },
+        alternate_manifest,
+    )
+    unqualified_manifest = replace(
+        ACQUISITION_MANIFEST,
+        tool_id="acquisition.unqualified",
+        qualification=QualificationStatus.UNQUALIFIED,
+    )
+    unqualified = _FailingAcquisition(unqualified_manifest)
+    registry = Registry()
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool(max_candidates=2))
+    registry.register(ACQUISITION_MANIFEST, preferred)
+    registry.register(alternate_manifest, alternate)
+    registry.register(unqualified_manifest, unqualified)
+    store = ArtifactStore(tmp_path / "artifacts")
+
+    result = run_site_explore(
+        replace(
+            _request(max_requests=4, max_attempts=2),
+            explore_all_tools=True,
+        ),
+        registry,
+        store,
+        run_id="explore",
+        clock=lambda: NOW,
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.exploration_complete is False
+    assert result.stop_reason == "budget_exhausted"
+    assert result.site_skill_candidate is None
+    assert preferred.targets == ["https://example.test/", candidate_a, candidate_b]
+    assert alternate.targets == [candidate_a]
+    assert not unqualified.targets
+    candidate_a_attempts = tuple(
+        attempt for attempt in result.attempts if attempt.requested_url == candidate_a
+    )
+    assert [attempt.outcome for attempt in candidate_a_attempts] == [
+        "failed",
+        "skipped",
+        "failed",
+    ]
+    assert sum(attempt.outcome != "skipped" for attempt in candidate_a_attempts) == 2
+    assert result.attempts[-1].requested_url == candidate_b
+    assert result.attempts[-1].outcome == "succeeded"
+    assert [page.canonical_url for page in result.site_state.pages] == [
+        "https://example.test/",
+        candidate_b,
+    ]
+    assert "eligibility.attempt_budget_exhausted" in {
+        error.code for error in result.errors
+    }
+    assert result.usage.requests == 4
+    store.close()
+
+
+def test_exhausted_canonical_candidate_does_not_stop_fresh_candidate(
+    tmp_path: Path,
+) -> None:
+    seed_target = "https://example.test/a"
+    source_url = "https://example.test/"
+    fresh_candidate = "https://example.test/b"
+    acquisition = _Acquisition(
+        {
+            seed_target: b"<a href='/a'>a</a><a href='/b'>b</a>",
+            fresh_candidate: b"page b",
+        },
+        final_urls={seed_target: source_url},
+    )
+    registry = Registry()
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool(max_candidates=2))
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "artifacts")
+    request = replace(
+        _request(max_requests=3, max_attempts=1),
+        scope=replace(_request().scope, seeds=(seed_target,)),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="explore",
+        clock=lambda: NOW,
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.exploration_complete is False
+    assert result.stop_reason == "budget_exhausted"
+    assert result.site_skill_candidate is None
+    assert acquisition.targets == [seed_target, fresh_candidate]
+    assert [attempt.requested_url for attempt in result.attempts] == [
+        seed_target,
+        source_url,
+        fresh_candidate,
+    ]
+    assert [budget.max_tool_attempts_per_target for budget in acquisition.budgets] == [
+        1,
+        1,
+    ]
+    assert result.usage.requests == 3
     store.close()
 
 
