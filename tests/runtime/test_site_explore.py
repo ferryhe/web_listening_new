@@ -372,6 +372,38 @@ def test_live_budget_shape_completes_seed_discovery_and_two_candidates(
     store.close()
 
 
+@pytest.mark.parametrize(
+    ("max_requests", "max_bytes"),
+    ((1, 4096), (3, len(b"<a href='/a'>a</a>"))),
+)
+def test_exhausted_acquisition_budget_stops_before_discovery(
+    tmp_path: Path, max_requests: int, max_bytes: int
+) -> None:
+    body = b"<a href='/a'>a</a>"
+    acquisition = _Acquisition({"https://example.test/": body})
+    discovery = _DiscoverySpy()
+    registry = Registry()
+    registry.register(HTML_LINKS_MANIFEST, discovery)
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "artifacts")
+    request = replace(
+        _request(),
+        budgets=Budgets(max_requests, max_bytes, 30, 4),
+    )
+
+    result = run_site_explore(
+        request, registry, store, run_id="explore", clock=lambda: NOW
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.stop_reason == "budget_exhausted"
+    assert not result.discovery
+    assert result.usage.tool_attempts == 1
+    assert discovery.calls == 0
+    assert acquisition.targets == ["https://example.test/"]
+    store.close()
+
+
 def test_shared_budget_stops_unprocessed_candidates_and_returns_no_candidate(
     tmp_path: Path,
 ) -> None:

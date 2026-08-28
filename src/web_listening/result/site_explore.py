@@ -96,8 +96,12 @@ class SiteSkillCandidateEvidence:
         return cls(_canonical_bytes(value), digest, discovery_key)
 
     def to_dict(self) -> dict[str, object]:
-        value = json.loads(self.canonical_bytes)
-        assert isinstance(value, dict)
+        try:
+            value = json.loads(self.canonical_bytes)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ResultValidationError("site_explore.candidate_invalid") from exc
+        if not isinstance(value, dict):
+            raise ResultValidationError("site_explore.candidate_invalid")
         return value
 
 

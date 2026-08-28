@@ -181,6 +181,19 @@ def test_site_explore_result_is_byte_stable_and_strictly_round_trips() -> None:
     assert rebuilt.canonical_json_bytes() == result.canonical_json_bytes()
 
 
+def test_candidate_evidence_rejects_malformed_bytes_with_stable_error() -> None:
+    with pytest.raises(ResultValidationError, match="site_explore.candidate_invalid"):
+        SiteSkillCandidateEvidence(
+            b"{",
+            "sha256:" + "a" * 64,
+            (
+                "discovery.html_links",
+                "1.0.0",
+                "https://example.test/",
+            ),
+        )
+
+
 def test_completed_result_requires_complete_state_and_verified_candidate() -> None:
     result = _completed()
 

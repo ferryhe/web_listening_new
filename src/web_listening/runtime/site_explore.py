@@ -656,7 +656,9 @@ def _discovery_budget_available(
 ) -> bool:
     usage = _usage_from_results(results, discovery_attempts)
     return (
-        usage.runtime_ms < limits.max_runtime_seconds * 1_000
+        usage.requests < limits.max_requests
+        and usage.bytes_received < limits.max_bytes
+        and usage.runtime_ms < limits.max_runtime_seconds * 1_000
         and usage.tool_attempts < limits.max_tool_attempts_per_target
     )
 
