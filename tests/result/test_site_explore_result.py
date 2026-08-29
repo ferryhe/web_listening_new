@@ -1,4 +1,4 @@
-"""Strict SiteExploreResult v1 contract tests."""
+"""Strict SiteExploreResult v2 contract and v1 migration tests."""
 
 # pylint: disable=duplicate-code,missing-function-docstring
 
@@ -17,6 +17,7 @@ from web_listening.result.attempts import Attempt
 from web_listening.result.errors import ResultValidationError, SafeError
 from web_listening.result.manifest import Usage
 from web_listening.result.site_explore import (
+    SITE_EXPLORE_SCHEMA_VERSION,
     DiscoveryEvidence,
     SiteExploreResult,
     SiteSkillCandidateEvidence,
@@ -107,7 +108,7 @@ def _discovery_attempt() -> Attempt:
     )
 
 
-def _completed() -> SiteExploreResult:
+def _completed(coverage: str = "complete") -> SiteExploreResult:
     candidate = _candidate()
     discovery_recipe = candidate.discovery
     assert discovery_recipe is not None
@@ -132,6 +133,7 @@ def _completed() -> SiteExploreResult:
         "succeeded",
         ("https://example.test/a",),
         ("https://example.test/",),
+        coverage,
         None,
     )
     attempt = _attempt()
@@ -157,8 +159,8 @@ def _completed() -> SiteExploreResult:
     )
 
 
-def _partial() -> SiteExploreResult:
-    result = _completed()
+def _partial(coverage: str = "complete") -> SiteExploreResult:
+    result = _completed(coverage)
     return replace(
         result,
         status="partial",
@@ -179,6 +181,33 @@ def test_site_explore_result_is_byte_stable_and_strictly_round_trips() -> None:
 
     assert rebuilt == result
     assert rebuilt.canonical_json_bytes() == result.canonical_json_bytes()
+    assert rebuilt.schema_version == "web-listening-site-explore.v2"
+    assert rebuilt.discovery[0].coverage == "complete"
+
+
+@pytest.mark.parametrize("coverage", ("complete", "truncated", "unknown"))
+def test_site_explore_v2_discovery_coverage_strictly_round_trips(
+    coverage: str,
+) -> None:
+    result = _completed(coverage)
+
+    rebuilt = site_explore_result_from_mapping(result.to_dict())
+
+    assert rebuilt.discovery[0].coverage == coverage
+
+
+@pytest.mark.parametrize("coverage", (None, "", "partial", True, 1))
+def test_site_explore_v2_rejects_missing_or_invalid_discovery_coverage(
+    coverage: object,
+) -> None:
+    payload = _completed().to_dict()
+    if coverage is None:
+        payload["discovery"][0].pop("coverage")
+    else:
+        payload["discovery"][0]["coverage"] = coverage
+
+    with pytest.raises(ResultValidationError):
+        site_explore_result_from_mapping(payload)
 
 
 def test_candidate_evidence_rejects_malformed_bytes_with_stable_error() -> None:
@@ -384,17 +413,36 @@ def test_stop_reason_conflicts_in_frozen_partial_payload_are_rejected(
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
-        ("site-explore-completed.v1.json", _completed),
-        ("site-explore-partial.v1.json", _partial),
+        ("site-explore-completed.v2.json", _completed),
+        ("site-explore-partial.v2.json", _partial),
     ],
 )
-def test_frozen_site_explore_fixtures(name: str, expected) -> None:
+def test_frozen_site_explore_v2_fixtures(name: str, expected) -> None:
     payload = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
     result = site_explore_result_from_mapping(payload)
 
     assert result == expected()
     assert result.canonical_json_bytes() == expected().canonical_json_bytes()
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("site-explore-completed.v1.json", _completed),
+        ("site-explore-partial.v1.json", _partial),
+    ],
+)
+def test_frozen_site_explore_v1_migrates_coverage_to_unknown(
+    name: str, expected
+) -> None:
+    payload = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+    result = site_explore_result_from_mapping(payload)
+
+    assert result == expected("unknown")
+    assert result.schema_version == SITE_EXPLORE_SCHEMA_VERSION
+    assert result.discovery[0].coverage == "unknown"
 
 
 def test_unknown_result_or_discovery_fields_are_rejected() -> None:

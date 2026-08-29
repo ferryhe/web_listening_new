@@ -36,6 +36,7 @@ from web_listening.tool_registry.protocols.acquisition import (
     validate_runtime,
 )
 from web_listening.tool_registry.protocols.discovery import (
+    DiscoveryCoverage,
     DiscoveryFailure,
     DiscoveryInput,
     DiscoveryOutput,
@@ -471,7 +472,11 @@ def _decode_discovery(
     candidates = _string_tuple(result["candidates"])
     discovered_from = _string_tuple(result["discovered_from"])
     output = DiscoveryOutput(
-        manifest.tool_id, manifest.version, candidates, discovered_from
+        manifest.tool_id,
+        manifest.version,
+        candidates,
+        discovered_from,
+        DiscoveryCoverage.UNKNOWN,
     )
     if type(tool_input) is not DiscoveryInput or any(
         source != tool_input.source_url for source in output.discovered_from

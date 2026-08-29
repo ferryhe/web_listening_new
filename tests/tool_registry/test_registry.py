@@ -127,6 +127,7 @@ class _DiscoveryFake:
             tool_version=self.manifest.version,
             candidates=tool_input.scope.seeds,
             discovered_from=(tool_input.source_url,) * len(tool_input.scope.seeds),
+            coverage="complete",
         )
 
 
@@ -384,6 +385,7 @@ def test_slotted_tool_manifest_registers_and_invokes() -> None:
                 self.manifest.version,
                 tool_input.scope.seeds,
                 (tool_input.source_url,) * len(tool_input.scope.seeds),
+                "complete",
             )
 
     manifest = _manifest("discovery.slotted")
@@ -398,6 +400,7 @@ def test_slotted_tool_manifest_registers_and_invokes() -> None:
         manifest.version,
         _request().scope.seeds,
         _request().scope.seeds,
+        "complete",
     )
 
 
@@ -438,6 +441,7 @@ def test_invoke_statically_retrieves_manifest_after_registration() -> None:
                 safe_manifest.version,
                 tool_input.scope.seeds,
                 (tool_input.source_url,) * len(tool_input.scope.seeds),
+                "complete",
             )
 
     tool = MutableClassManifestFake()
@@ -663,6 +667,7 @@ def test_invoke_accepts_conforming_fake_and_rejects_wrong_input() -> None:
 
     assert isinstance(result, DiscoveryOutput)
     assert result.candidates == _request().scope.seeds
+    assert result.coverage == "complete"
     assert (
         _code(
             lambda: registry.invoke(
@@ -671,6 +676,55 @@ def test_invoke_accepts_conforming_fake_and_rejects_wrong_input() -> None:
             )
         )
         == "registry.input_mismatch"
+    )
+
+
+def test_discovery_invoke_revalidates_and_preserves_coverage() -> None:
+    manifest = _manifest("discovery.coverage")
+    source_url = "https://example.test/feed.xml"
+    output = DiscoveryOutput(
+        manifest.tool_id,
+        manifest.version,
+        ("https://example.test/a",),
+        (source_url,),
+        "truncated",
+    )
+    registry = Registry()
+    registry.register(manifest, _DiscoveryFake(manifest, output))
+
+    result = registry.invoke(
+        manifest.tool_id,
+        DiscoveryInput(_request().scope, source_url, b"<feed/>", "application/xml"),
+    )
+
+    assert isinstance(result, DiscoveryOutput)
+    assert result.coverage == "truncated"
+
+
+def test_discovery_invoke_rejects_forged_output_without_coverage() -> None:
+    manifest = _manifest("discovery.missing-coverage")
+    source_url = "https://example.test/feed.xml"
+    forged = object.__new__(DiscoveryOutput)
+    for name, value in (
+        ("tool_id", manifest.tool_id),
+        ("tool_version", manifest.version),
+        ("candidates", ("https://example.test/a",)),
+        ("discovered_from", (source_url,)),
+    ):
+        object.__setattr__(forged, name, value)
+    registry = Registry()
+    registry.register(manifest, _DiscoveryFake(manifest, forged))
+
+    assert (
+        _code(
+            lambda: registry.invoke(
+                manifest.tool_id,
+                DiscoveryInput(
+                    _request().scope, source_url, b"<feed/>", "application/xml"
+                ),
+            )
+        )
+        == "protocol.output_invalid"
     )
 
 
@@ -707,6 +761,7 @@ def test_discovery_invoke_enforces_source_input_and_provenance_output_limits() -
                 too_small_output.version,
                 (candidate,),
                 (discovered_from,),
+                "complete",
             ),
         ),
     )
@@ -727,6 +782,7 @@ def test_discovery_invoke_rejects_provenance_not_bound_to_input_source() -> None
                 manifest.version,
                 ("https://example.test/a",),
                 ("https://example.test/other-feed.xml",),
+                "complete",
             ),
         ),
     )
@@ -752,6 +808,7 @@ def test_discovery_invoke_rejects_provenance_not_bound_to_input_source() -> None
                 "1.2.3",
                 ("https://example.test/",),
                 ("https://example.test/",),
+                "complete",
             ),
             "registry.output_identity_mismatch",
         ),
@@ -761,6 +818,7 @@ def test_discovery_invoke_rejects_provenance_not_bound_to_input_source() -> None
                 "2.0.0",
                 ("https://example.test/",),
                 ("https://example.test/",),
+                "complete",
             ),
             "registry.output_identity_mismatch",
         ),
@@ -820,7 +878,13 @@ def test_discovery_output_limit_accepts_exact_aggregate_utf8_bytes() -> None:
         manifest,
         _DiscoveryFake(
             manifest,
-            DiscoveryOutput(manifest.tool_id, manifest.version, candidates, sources),
+            DiscoveryOutput(
+                manifest.tool_id,
+                manifest.version,
+                candidates,
+                sources,
+                "complete",
+            ),
         ),
     )
 
@@ -852,7 +916,13 @@ def test_discovery_output_limit_rejects_aggregate_one_byte_over(
         manifest,
         _DiscoveryFake(
             manifest,
-            DiscoveryOutput(manifest.tool_id, manifest.version, candidates, sources),
+            DiscoveryOutput(
+                manifest.tool_id,
+                manifest.version,
+                candidates,
+                sources,
+                "complete",
+            ),
         ),
     )
 

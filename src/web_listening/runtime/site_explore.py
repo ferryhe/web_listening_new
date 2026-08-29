@@ -42,6 +42,7 @@ from web_listening.tool_registry.eligibility import EligibilityRequirements
 from web_listening.tool_registry.manifest import ToolCategory, ToolManifest
 from web_listening.tool_registry.protocols.acquisition import AcquisitionFailure
 from web_listening.tool_registry.protocols.discovery import (
+    DiscoveryCoverage,
     DiscoveryFailure,
     DiscoveryInput,
     DiscoveryOutput,
@@ -49,6 +50,7 @@ from web_listening.tool_registry.protocols.discovery import (
 from web_listening.tool_registry.registry import Registry
 
 _MAX_CANDIDATES = 2
+_SITE_EXPLORE_V1 = "web-listening-site-explore.v1"
 _BUDGET_TERMINAL_CODES = frozenset(
     {
         "budget.requests",
@@ -67,6 +69,7 @@ _SHARED_BUDGET_TERMINAL_CODES = _BUDGET_TERMINAL_CODES - frozenset(
 
 def site_explore_result_from_mapping(value: object) -> SiteExploreResult:
     """Parse a result while delegating candidate semantics to Site Skill authority."""
+    value = _migrate_site_explore_v1(value)
     candidate_evidence = None
     if isinstance(value, Mapping):
         candidate_mapping = value.get("site_skill_candidate")
@@ -75,6 +78,26 @@ def site_explore_result_from_mapping(value: object) -> SiteExploreResult:
                 site_skill_from_mapping(candidate_mapping)
             )
     return SiteExploreResult.from_dict(value, site_skill_candidate=candidate_evidence)
+
+
+def _migrate_site_explore_v1(value: object) -> object:
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema_version") != _SITE_EXPLORE_V1
+    ):
+        return value
+    discovery = value.get("discovery")
+    if not isinstance(discovery, list) or any(
+        not isinstance(item, Mapping) or "coverage" in item for item in discovery
+    ):
+        return value
+    migrated = dict(value)
+    migrated["schema_version"] = "web-listening-site-explore.v2"
+    migrated["discovery"] = [
+        {**dict(item), "coverage": DiscoveryCoverage.UNKNOWN.value}
+        for item in discovery
+    ]
+    return migrated
 
 
 def run_site_explore(  # pylint: disable=too-many-arguments
@@ -239,6 +262,7 @@ def run_site_explore(  # pylint: disable=too-many-arguments
                     "failed",
                     (),
                     (),
+                    DiscoveryCoverage.UNKNOWN.value,
                     error,
                 )
             )
@@ -272,6 +296,7 @@ def run_site_explore(  # pylint: disable=too-many-arguments
             continue
         assert isinstance(output, DiscoveryOutput)
         assert output.discovered_from is not None
+        assert isinstance(output.coverage, DiscoveryCoverage)
         pairs = tuple(sorted(set(zip(output.candidates, output.discovered_from))))
         representable_pairs: list[tuple[str, str]] = []
         representation_error: SafeError | None = None
@@ -284,6 +309,7 @@ def run_site_explore(  # pylint: disable=too-many-arguments
                     "succeeded",
                     (candidate_url,),
                     (discovered_from,),
+                    output.coverage.value,
                     None,
                 )
             except ResultValidationError:
@@ -304,6 +330,7 @@ def run_site_explore(  # pylint: disable=too-many-arguments
                     "failed",
                     (),
                     (),
+                    DiscoveryCoverage.UNKNOWN.value,
                     representation_error,
                 )
             )
@@ -337,6 +364,7 @@ def run_site_explore(  # pylint: disable=too-many-arguments
                 "succeeded",
                 candidates,
                 sources,
+                output.coverage.value,
                 None,
             )
         )

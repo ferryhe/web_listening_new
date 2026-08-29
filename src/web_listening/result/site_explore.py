@@ -1,4 +1,4 @@
-"""Strict deterministic SiteExploreResult v1 contract."""
+"""Strict deterministic SiteExploreResult v2 contract."""
 
 # pylint: disable=duplicate-code,missing-function-docstring
 # pylint: disable=too-many-boolean-expressions,unidiomatic-typecheck
@@ -21,8 +21,9 @@ from web_listening.result.errors import (
 from web_listening.result.manifest import Usage
 from web_listening.result.model import ResultStatus
 
-SITE_EXPLORE_SCHEMA_VERSION = "web-listening-site-explore.v1"
+SITE_EXPLORE_SCHEMA_VERSION = "web-listening-site-explore.v2"
 _DISCOVERY_OUTCOMES = frozenset({"succeeded", "failed"})
+_DISCOVERY_COVERAGES = frozenset({"complete", "truncated", "unknown"})
 _STOP_REASONS = frozenset(
     {
         "source_exhausted",
@@ -115,6 +116,7 @@ class DiscoveryEvidence:  # pylint: disable=too-many-instance-attributes
     outcome: str
     candidates: tuple[str, ...]
     discovered_from: tuple[str, ...]
+    coverage: str
     error: SafeError | None
 
     def __post_init__(self) -> None:
@@ -138,13 +140,20 @@ class DiscoveryEvidence:  # pylint: disable=too-many-instance-attributes
             or self.candidates != tuple(sorted(set(self.candidates)))
             or any(url != self.source_url for url in self.discovered_from)
             or self.outcome not in _DISCOVERY_OUTCOMES
+            or type(self.coverage) is not str
+            or self.coverage not in _DISCOVERY_COVERAGES
             or (self.error is not None and not isinstance(self.error, SafeError))
         ):
             raise ResultValidationError("site_explore.discovery_invalid")
         if self.outcome == "succeeded":
             if not self.candidates or self.error is not None:
                 raise ResultValidationError("site_explore.discovery_invalid")
-        elif self.candidates or self.discovered_from or self.error is None:
+        elif (
+            self.candidates
+            or self.discovered_from
+            or self.coverage != "unknown"
+            or self.error is None
+        ):
             raise ResultValidationError("site_explore.discovery_invalid")
 
     @classmethod
@@ -159,6 +168,7 @@ class DiscoveryEvidence:  # pylint: disable=too-many-instance-attributes
                 "outcome",
                 "candidates",
                 "discovered_from",
+                "coverage",
                 "error",
             },
         )
@@ -176,6 +186,7 @@ class DiscoveryEvidence:  # pylint: disable=too-many-instance-attributes
             outcome=payload["outcome"],
             candidates=tuple(payload["candidates"]),
             discovered_from=tuple(payload["discovered_from"]),
+            coverage=payload["coverage"],
             error=error,
         )
 
@@ -187,6 +198,7 @@ class DiscoveryEvidence:  # pylint: disable=too-many-instance-attributes
             "outcome": self.outcome,
             "candidates": list(self.candidates),
             "discovered_from": list(self.discovered_from),
+            "coverage": self.coverage,
             "error": None if self.error is None else self.error.to_dict(),
         }
 

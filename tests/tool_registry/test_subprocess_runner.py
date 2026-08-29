@@ -174,9 +174,43 @@ def test_versioned_round_trip_rebuilds_all_three_protocol_results(
     assert type(result) is output_type
     assert result.tool_id == "external.fake"
     assert result.tool_version == "1.0.0"
+    if isinstance(result, DiscoveryOutput):
+        assert result.coverage == "unknown"
     if isinstance(result, (AcquisitionOutput, TransformOutput)):
         assert result.sha256 == hashlib.sha256(result.body).hexdigest()
         assert 0 <= result.runtime_ms <= 2000
+
+
+def test_external_discovery_v1_cannot_claim_a_coverage_field(monkeypatch) -> None:
+    runner = _runner(ToolCategory.DISCOVERY, "discovery_success")
+    payload = {
+        "protocol_version": "web-listening-external-tool.v1",
+        "category": "discovery",
+        "status": "success",
+        "tool_id": "external.fake",
+        "tool_version": "1.0.0",
+        "result": {
+            "candidates": ["https://example.test/report"],
+            "discovered_from": ["https://example.test/feed.xml"],
+            "coverage": "complete",
+        },
+    }
+    monkeypatch.setattr(
+        runner,
+        "_execute",
+        lambda *_args: (None, json.dumps(payload).encode("utf-8")),
+    )
+
+    result = runner.invoke(
+        DiscoveryInput(
+            _scope(),
+            "https://example.test/feed.xml",
+            b"<feed/>",
+            "application/xml",
+        )
+    )
+
+    assert result == DiscoveryFailure("external.fake", "1.0.0", "runner.protocol_error")
 
 
 @pytest.mark.parametrize(

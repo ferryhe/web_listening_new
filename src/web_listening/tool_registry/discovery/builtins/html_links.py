@@ -17,6 +17,7 @@ from web_listening.tool_registry.manifest import (
     ToolRegistryError,
 )
 from web_listening.tool_registry.protocols.discovery import (
+    DiscoveryCoverage,
     DiscoveryFailure,
     DiscoveryInput,
     DiscoveryOutput,
@@ -93,14 +94,21 @@ class HtmlLinksDiscoveryTool:  # pylint: disable=too-few-public-methods
                 candidates.add(validate_url(joined))
             except (ToolRegistryError, ValueError):
                 continue
-        ordered = tuple(sorted(candidates)[: self._max_candidates])
+        all_candidates = tuple(sorted(candidates))
+        ordered = all_candidates[: self._max_candidates]
         if not ordered:
             return self._failure("discovery.no_candidates")
+        coverage = (
+            DiscoveryCoverage.TRUNCATED
+            if len(all_candidates) > self._max_candidates
+            else DiscoveryCoverage.COMPLETE
+        )
         return DiscoveryOutput(
             self.manifest.tool_id,
             self.manifest.version,
             ordered,
             (tool_input.source_url,) * len(ordered),
+            coverage,
         )
 
     def _failure(self, code: str) -> DiscoveryFailure:

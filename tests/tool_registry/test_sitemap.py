@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from web_listening.request.model import ContentType, Scope
 from web_listening.tool_registry.discovery.builtins.sitemap import (
     SITEMAP_MANIFEST,
@@ -54,6 +56,7 @@ def test_sitemap_returns_canonical_bounded_deduplicated_candidates() -> None:
     assert output.candidates == tuple(sorted(set(output.candidates)))
     assert output.candidates[0] == "https://example.test/a/~"
     assert output.discovered_from == (SOURCE_URL,) * len(output.candidates)
+    assert output.coverage == "truncated"
 
 
 def test_sitemap_index_emits_child_sitemaps_without_reading_them() -> None:
@@ -72,6 +75,33 @@ def test_sitemap_index_emits_child_sitemaps_without_reading_them() -> None:
         "https://outside.test/child-a.xml",
     )
     assert output.discovered_from == (SOURCE_URL, SOURCE_URL)
+    assert output.coverage == "complete"
+
+
+@pytest.mark.parametrize(
+    "root_name,row_name", (("urlset", "url"), ("sitemapindex", "sitemap"))
+)
+@pytest.mark.parametrize(
+    ("unique_count", "expected_coverage"),
+    ((100, "complete"), (101, "truncated")),
+)
+def test_sitemap_coverage_is_computed_before_the_stable_output_bound(
+    root_name: str,
+    row_name: str,
+    unique_count: int,
+    expected_coverage: str,
+) -> None:
+    rows = "".join(
+        f"<{row_name}><loc>/feed/{index:03d}</loc></{row_name}>"
+        for index in reversed(range(unique_count))
+    )
+    output = SitemapDiscoveryTool().discover(
+        _input(f"<{root_name}>{rows}</{root_name}>".encode())
+    )
+
+    assert isinstance(output, DiscoveryOutput)
+    assert len(output.candidates) == min(unique_count, 100)
+    assert output.coverage == expected_coverage
 
 
 def test_sitemap_returns_safe_failures_for_damaged_or_unsupported_sources() -> None:

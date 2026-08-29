@@ -1,0 +1,108 @@
+{
+  "attempts": [{
+    "attempt_id": "explore-discovery-1",
+    "bytes_received": 0,
+    "error": null,
+    "final_url": null,
+    "finished_at": "2026-08-28T00:00:00Z",
+    "http_status": null,
+    "order": 0,
+    "outcome": "succeeded",
+    "requested_url": "https://example.test/",
+    "requests": 0,
+    "runtime_ms": 0,
+    "schema_version": "web-listening-attempt.v1",
+    "started_at": "2026-08-28T00:00:00Z",
+    "tool_id": "discovery.html_links",
+    "tool_version": "1.0.0"
+  }, {
+    "attempt_id": "explore-candidate-1",
+    "bytes_received": 5,
+    "error": null,
+    "final_url": "https://example.test/a",
+    "finished_at": "2026-08-28T00:00:00Z",
+    "http_status": 200,
+    "order": 1,
+    "outcome": "succeeded",
+    "requested_url": "https://example.test/a",
+    "requests": 1,
+    "runtime_ms": 1,
+    "schema_version": "web-listening-attempt.v1",
+    "started_at": "2026-08-28T00:00:00Z",
+    "tool_id": "acquisition.web_http",
+    "tool_version": "1.0.0"
+  }],
+  "discovery": [{
+    "candidates": ["https://example.test/a"],
+    "coverage": "complete",
+    "discovered_from": ["https://example.test/"],
+    "error": null,
+    "outcome": "succeeded",
+    "source_url": "https://example.test/",
+    "tool_id": "discovery.html_links",
+    "tool_version": "1.0.0"
+  }],
+  "errors": [],
+  "exploration_complete": true,
+  "schema_version": "web-listening-site-explore.v2",
+  "site_skill_candidate": {
+    "budgets": {
+      "max_bytes": 4096,
+      "max_requests": 4,
+      "max_runtime_seconds": 30,
+      "max_tool_attempts_per_target": 1
+    },
+    "digest": "sha256:05f3604d4dd1713606408f786d58f6eb17e866fc6cbaee93399171037759b56b",
+    "discovery": {
+      "source_url": "https://example.test/",
+      "tool": {
+        "capabilities": ["html_links"],
+        "category": "discovery",
+        "tool_id": "discovery.html_links",
+        "version": "1.0.0"
+      }
+    },
+    "previous_digest": null,
+    "scope": {
+      "allowed_origins": ["https://example.test"],
+      "content_types": ["html"],
+      "include_paths": ["/**"],
+      "seeds": ["https://example.test/"]
+    },
+    "site_key": "example.test",
+    "success_checks": {
+      "allowed_mime_types": ["text/html"],
+      "minimum_words": 1
+    },
+    "tool": {
+      "capabilities": ["http_get"],
+      "category": "acquisition",
+      "tool_id": "acquisition.web_http",
+      "version": "1.0.0"
+    },
+    "verified_at": "2026-08-28T00:00:00Z",
+    "version": 1
+  },
+  "site_skill_used": null,
+  "site_state": {
+    "complete": true,
+    "generated_at": "2026-08-28T00:00:00Z",
+    "pages": [{
+      "artifact_id": "artifact-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "canonical_url": "https://example.test/a",
+      "content_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "observation_id": "observation-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }],
+    "schema_version": "web-listening-site-state.v1",
+    "site_key": "example.test",
+    "site_skill_digest": "sha256:05f3604d4dd1713606408f786d58f6eb17e866fc6cbaee93399171037759b56b"
+  },
+  "status": "completed",
+  "stop_reason": "source_exhausted",
+  "usage": {
+    "bytes_received": 5,
+    "requests": 1,
+    "runtime_ms": 1,
+    "tool_attempts": 2
+  }
+}

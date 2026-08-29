@@ -103,6 +103,7 @@ class _DiscoveryFake:
             tool_version="1.0.0",
             candidates=tool_input.scope.seeds,
             discovered_from=(tool_input.source_url,) * len(tool_input.scope.seeds),
+            coverage="complete",
         )
 
 
@@ -185,6 +186,7 @@ def test_discovery_contract_carries_only_governed_source_and_provenance() -> Non
         "1.0.0",
         ("https://example.test/b", "https://example.test/a"),
         (tool_input.source_url, tool_input.source_url),
+        "complete",
     )
 
     assert tool_input.source_url == "https://example.test/feed.xml"
@@ -194,6 +196,36 @@ def test_discovery_contract_carries_only_governed_source_and_provenance() -> Non
         "https://example.test/feed.xml",
         "https://example.test/feed.xml",
     )
+    assert output.coverage == "complete"
+
+
+@pytest.mark.parametrize("coverage", ("complete", "truncated", "unknown"))
+def test_discovery_coverage_strictly_round_trips(coverage: str) -> None:
+    output = DiscoveryOutput(
+        "discovery.soa",
+        "1.0.0",
+        ("https://example.test/a",),
+        ("https://example.test/feed.xml",),
+        coverage,
+    )
+
+    assert output.coverage == coverage
+
+
+@pytest.mark.parametrize("coverage", (None, "", "partial", True, 1))
+def test_discovery_contract_rejects_missing_or_invalid_coverage(
+    coverage: object,
+) -> None:
+    with pytest.raises(ToolRegistryError) as caught:
+        DiscoveryOutput(
+            "discovery.soa",
+            "1.0.0",
+            ("https://example.test/a",),
+            ("https://example.test/feed.xml",),
+            coverage,  # type: ignore[arg-type]
+        )
+
+    assert caught.value.code == "protocol.output_invalid"
 
 
 def test_discovery_contract_rejects_out_of_scope_source_or_unpaired_evidence() -> None:
@@ -238,6 +270,7 @@ def test_url_values_use_request_canonical_syntax_without_network_policy() -> Non
             "http://[2001:0db8::1]/",
         ),
         discovered_from=(source, source, source),
+        coverage="unknown",
     )
 
     assert output.candidates == (

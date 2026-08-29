@@ -18,6 +18,7 @@ from web_listening.tool_registry.manifest import (
     ToolRegistryError,
 )
 from web_listening.tool_registry.protocols.discovery import (
+    DiscoveryCoverage,
     DiscoveryFailure,
     DiscoveryInput,
     DiscoveryOutput,
@@ -64,14 +65,21 @@ class RssDiscoveryTool:  # pylint: disable=too-few-public-methods
         if root_name not in {"feed", "rss", "rdf"}:
             return self._failure("discovery.feed_malformed")
 
-        candidates = _candidate_urls(root, tool_input.source_url)
-        if not candidates:
+        all_candidates = _candidate_urls(root, tool_input.source_url)
+        if not all_candidates:
             return self._failure("discovery.no_candidates")
+        coverage = (
+            DiscoveryCoverage.TRUNCATED
+            if len(all_candidates) > _MAX_CANDIDATES
+            else DiscoveryCoverage.COMPLETE
+        )
+        candidates = all_candidates[:_MAX_CANDIDATES]
         return DiscoveryOutput(
             self.manifest.tool_id,
             self.manifest.version,
             candidates,
             (tool_input.source_url,) * len(candidates),
+            coverage,
         )
 
     def _failure(self, code: str) -> DiscoveryFailure:
@@ -114,7 +122,7 @@ def _candidate_urls(root: ElementTree.Element, source_url: str) -> tuple[str, ..
                 found.add(validate_url(urljoin(source_url, raw_url.strip())))
             except ToolRegistryError:
                 continue
-    return tuple(sorted(found)[:_MAX_CANDIDATES])
+    return tuple(sorted(found))
 
 
 def _local_name(tag: str) -> str:

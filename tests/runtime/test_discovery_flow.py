@@ -80,6 +80,7 @@ class _DiscoveryFake:
                 "https://example.test/z",
             ),
             (tool_input.source_url,) * 4,
+            "truncated",
         )
 
 
@@ -171,6 +172,7 @@ def test_discovery_is_pure_then_candidates_reauthorize_before_acquisition(
     )
 
     assert isinstance(discovery, DiscoveryOutput)
+    assert discovery.coverage == "truncated"
     assert discovery_tool.calls == 1
     assert commits == 0
 
@@ -215,6 +217,7 @@ def test_candidates_are_sorted_deduplicated_and_max_candidates_bounded(
         DISCOVERY_MANIFEST.version,
         tuple(f"https://example.test/{name}" for name in ("d", "b", "a", "b")),
         (SOURCE_URL,) * 4,
+        "complete",
     )
 
     outcomes = acquire_discovered_candidates(
@@ -274,6 +277,7 @@ def test_missing_resolved_manifest_rejects_all_candidates_without_gateway_io(
             DISCOVERY_MANIFEST.version,
             ("https://example.test/b", "https://example.test/a"),
             (SOURCE_URL, SOURCE_URL),
+            "complete",
         ),
         max_candidates=2,
         run_id="missing-manifest-run",
@@ -317,6 +321,7 @@ def test_candidate_outcomes_preserve_sorted_deduplicated_provenance_pairing(
             "https://example.test/source-a.xml",
             "https://example.test/source-z-1.xml",
         ),
+        "unknown",
     )
 
     outcomes = acquire_discovered_candidates(

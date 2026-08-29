@@ -388,6 +388,7 @@ def _revalidate_output(output: ToolResult) -> ToolResult:
             output.tool_version,
             output.candidates,
             getattr(output, "discovered_from", None),
+            getattr(output, "coverage", None),
         )
     if isinstance(output, AcquisitionOutput):
         redirects = tuple(replace(redirect) for redirect in output.redirects)
