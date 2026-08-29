@@ -1291,6 +1291,7 @@ def acquire_discovered_candidates(  # pylint: disable=too-many-arguments
         discovery.tool_version,
         discovery.candidates,
         discovery.discovered_from,
+        discovery.coverage,
     )
     assert discovery.discovered_from is not None
     candidates: list[tuple[str, str]] = []

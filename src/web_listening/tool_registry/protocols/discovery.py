@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from ipaddress import ip_address
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
@@ -41,6 +42,14 @@ def validate_url(value: str) -> str:
         if address is None or address.version != 4:
             raise ToolRegistryError("protocol.url_invalid")
     return canonical
+
+
+class DiscoveryCoverage(str, Enum):
+    """Whether one authoritative Discovery source was fully enumerated."""
+
+    COMPLETE = "complete"
+    TRUNCATED = "truncated"
+    UNKNOWN = "unknown"
 
 
 def _contained_canonical_url(value: object) -> str | None:
@@ -89,12 +98,13 @@ class DiscoveryInput:
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryOutput:
-    """Ordered candidate URLs and their one-to-one discovery provenance."""
+    """Ordered candidates, provenance, and authoritative source coverage."""
 
     tool_id: str
     tool_version: str
     candidates: tuple[str, ...]
     discovered_from: tuple[str, ...] | None = None
+    coverage: DiscoveryCoverage | str | None = None
 
     def __post_init__(self) -> None:
         validate_tool_id(self.tool_id)
@@ -116,6 +126,15 @@ class DiscoveryOutput:
             "discovered_from",
             tuple(validate_url(value) for value in discovered_from),
         )
+        coverage = self.coverage
+        if type(coverage) is str:
+            try:
+                coverage = DiscoveryCoverage(coverage)
+            except ValueError:
+                raise ToolRegistryError("protocol.output_invalid") from None
+        elif type(coverage) is not DiscoveryCoverage:
+            raise ToolRegistryError("protocol.output_invalid")
+        object.__setattr__(self, "coverage", coverage)
 
 
 @dataclass(frozen=True, slots=True)

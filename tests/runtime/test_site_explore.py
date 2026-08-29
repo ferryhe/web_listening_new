@@ -202,6 +202,7 @@ class _DiscoverySpy:
 class _StaticDiscovery:
     candidate: str
     manifest: ToolManifest
+    coverage: str = "complete"
 
     def discover(self, tool_input) -> DiscoveryOutput:
         return DiscoveryOutput(
@@ -209,6 +210,7 @@ class _StaticDiscovery:
             self.manifest.version,
             (self.candidate,),
             (tool_input.source_url,),
+            self.coverage,
         )
 
 
@@ -309,6 +311,7 @@ def test_complete_exploration_builds_state_and_inactive_reusable_candidate(
 
     assert result.status is ResultStatus.COMPLETED
     assert result.exploration_complete is True
+    assert result.discovery[0].coverage == "complete"
     assert [page.canonical_url for page in result.site_state.pages] == [
         "https://example.test/",
         "https://example.test/a",
@@ -357,6 +360,31 @@ def test_complete_exploration_builds_state_and_inactive_reusable_candidate(
     )
     assert reused.status is ResultStatus.COMPLETED
     assert acquisition.targets[-1] == "https://example.test/"
+    store.close()
+
+
+def test_site_explore_preserves_truncated_discovery_coverage(tmp_path: Path) -> None:
+    candidate_url = "https://example.test/a"
+    acquisition = _Acquisition(
+        {
+            "https://example.test/": b"source page",
+            candidate_url: b"candidate page",
+        }
+    )
+    registry = Registry()
+    registry.register(
+        HTML_LINKS_MANIFEST,
+        _StaticDiscovery(candidate_url, HTML_LINKS_MANIFEST, "truncated"),
+    )
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "artifacts")
+
+    result = run_site_explore(
+        _request(), registry, store, run_id="explore", clock=lambda: NOW
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert result.discovery[0].coverage == "truncated"
     store.close()
 
 

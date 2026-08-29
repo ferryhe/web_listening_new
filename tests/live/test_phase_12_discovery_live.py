@@ -479,6 +479,7 @@ def test_mixed_candidate_outcomes_are_not_complete(tmp_path: Path) -> None:
             "https://outside.test/out-of-scope",
         ),
         (OFFLINE_FEED_URL, OFFLINE_FEED_URL),
+        "unknown",
     )
     outcomes = acquire_discovered_candidates(
         request,

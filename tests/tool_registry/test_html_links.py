@@ -46,6 +46,29 @@ def test_html_links_are_inert_canonical_deduplicated_sorted_and_bounded() -> Non
         "https://example.test/reports/z",
     )
     assert result.discovered_from == ("https://example.test/reports/",) * 3
+    assert result.coverage == "truncated"
+
+
+def test_html_links_coverage_uses_unique_candidates_before_slicing() -> None:
+    exact = HtmlLinksDiscoveryTool(max_candidates=3).discover(
+        _input(
+            b"<a href='/a'>a</a><a href='/b'>b</a>"
+            b"<a href='/c'>c</a><a href='/c#duplicate'>duplicate</a>"
+        )
+    )
+    over = HtmlLinksDiscoveryTool(max_candidates=3).discover(
+        _input(
+            b"<a href='/a'>a</a><a href='/b'>b</a>"
+            b"<a href='/c'>c</a><a href='/d'>d</a>"
+        )
+    )
+
+    assert isinstance(exact, DiscoveryOutput)
+    assert exact.coverage == "complete"
+    assert len(exact.candidates) == 3
+    assert isinstance(over, DiscoveryOutput)
+    assert over.coverage == "truncated"
+    assert len(over.candidates) == 3
 
 
 def test_html_links_reject_non_html_without_network_or_store_surface() -> None:

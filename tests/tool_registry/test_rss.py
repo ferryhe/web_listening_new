@@ -66,19 +66,28 @@ def test_rss_and_atom_return_stable_candidates_with_provenance(
         "https://example.test/news/b",
     )
     assert output.discovered_from == (SOURCE_URL, SOURCE_URL)
+    assert output.coverage == "complete"
 
 
-def test_rss_is_bounded_and_does_not_follow_entry_links() -> None:
+@pytest.mark.parametrize(
+    ("unique_count", "expected_coverage"),
+    ((100, "complete"), (101, "truncated")),
+)
+def test_rss_coverage_is_computed_before_the_stable_output_bound(
+    unique_count: int, expected_coverage: str
+) -> None:
     entries = "".join(
-        f"<item><link>/news/{index:03d}</link></item>" for index in reversed(range(102))
+        f"<item><link>/news/{index:03d}</link></item>"
+        for index in reversed(range(unique_count))
     )
     output = RssDiscoveryTool().discover(
         _input(f"<rss><channel>{entries}</channel></rss>".encode(), "text/xml")
     )
 
     assert isinstance(output, DiscoveryOutput)
-    assert len(output.candidates) == 100
+    assert len(output.candidates) == min(unique_count, 100)
     assert output.candidates == tuple(sorted(output.candidates))
+    assert output.coverage == expected_coverage
 
 
 def test_rss_returns_safe_failures_for_damaged_or_empty_feeds() -> None:
