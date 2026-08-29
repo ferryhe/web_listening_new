@@ -711,11 +711,11 @@ def test_runtime_caps_actual_candidate_acquisitions_at_two(tmp_path: Path) -> No
 def test_unrepresentable_discovery_url_is_terminal_and_later_candidate_runs(
     tmp_path: Path,
 ) -> None:
-    unrepresentable_url = (
+    safe_url = (
         "https://www.ipcc.ch/2026/06/25/"
         "keynote-address-ipcc-chair-jim-skea-world-climate-investment-summit/"
     )
-    safe_url = "https://www.ipcc.ch/reports/overview/"
+    unrepresentable_url = "https://www.ipcc.ch/private/sk-abcdefghijklmnop"
     seed_body = (
         f"<a href='{unrepresentable_url}'>unsafe</a>" f"<a href='{safe_url}'>safe</a>"
     ).encode()
@@ -754,7 +754,9 @@ def test_unrepresentable_discovery_url_is_terminal_and_later_candidate_runs(
     assert "runtime.discovery_url_unrepresentable" in {
         error.code for error in result.errors
     }
+    assert any(attempt.requested_url == safe_url for attempt in result.attempts)
     serialized = result.canonical_json_bytes()
+    assert safe_url.encode() in serialized
     assert unrepresentable_url.encode() not in serialized
     assert seed_body not in serialized
     store.close()
@@ -763,10 +765,7 @@ def test_unrepresentable_discovery_url_is_terminal_and_later_candidate_runs(
 def test_all_unrepresentable_discovery_urls_return_partial_without_candidate(
     tmp_path: Path,
 ) -> None:
-    unrepresentable_url = (
-        "https://www.ipcc.ch/2026/06/25/"
-        "keynote-address-ipcc-chair-jim-skea-world-climate-investment-summit/"
-    )
+    unrepresentable_url = "https://www.ipcc.ch/private/github_pat_abcdefghijklmnop"
     seed_body = f"<a href='{unrepresentable_url}'>unsafe</a>".encode()
     request = Request(
         Scope(

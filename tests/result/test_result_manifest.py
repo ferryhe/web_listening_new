@@ -32,6 +32,7 @@ from web_listening.result.manifest import (
     manifest_from_observations,
 )
 from web_listening.result.model import Result, ResultStatus, Usage
+from web_listening.result.site_explore import DiscoveryEvidence
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FIXTURE_STATUS = {
@@ -47,6 +48,262 @@ MARKDOWN = b"# Offline annual report\n"
 def fixture_payload(name: str) -> dict[str, object]:
     """Load one fixed, versioned, offline Result fixture."""
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def test_public_long_slug_round_trips_across_result_url_siblings() -> None:
+    """Ordinary prose beginning with ``sk`` is not credential material."""
+    requested_url = (
+        "https://example.org/reports/"
+        "skilled-professionals-and-scientists-in-climate-assessment"
+    )
+    final_url = f"{requested_url}/"
+    payload = fixture_payload("completed.v1.json")
+    payload["attempts"][0]["requested_url"] = requested_url
+    payload["attempts"][0]["final_url"] = final_url
+    payload["artifacts"][0]["source_url"] = final_url
+    manifest = payload["manifest"]
+    manifest["requested_url"] = requested_url
+    manifest["current_url"] = final_url
+    manifest["final_url"] = final_url
+    manifest["redirects"][0]["from_url"] = requested_url
+    manifest["redirects"][0]["to_url"] = final_url
+    manifest["attempts"] = copy.deepcopy(payload["attempts"])
+    manifest["artifacts"] = copy.deepcopy(payload["artifacts"])
+
+    result = Result.from_dict(payload)
+    discovery = DiscoveryEvidence(
+        tool_id="sitemap",
+        tool_version="1.0.0",
+        source_url=requested_url,
+        outcome="succeeded",
+        candidates=(final_url,),
+        discovered_from=(requested_url,),
+        coverage="complete",
+        error=None,
+    )
+
+    assert result.to_dict() == payload
+    assert json.loads(result.canonical_json_bytes()) == payload
+    assert DiscoveryEvidence.from_dict(discovery.to_dict()) == discovery
+    assert SafeError("gateway.transport", "Safe failure", (("note", final_url),))
+    assert canonical_json_bytes({"note": final_url})
+
+
+@pytest.mark.parametrize(
+    ("safety_form", "value"),
+    [
+        ("raw-sk-dash", "https://example.org/evidence/sk-abcdefghijklmnop"),
+        ("raw-sk-underscore", "https://example.org/evidence/sk_abcdefghijklmnop"),
+        ("raw-ghp", "https://example.org/evidence/ghp_abcdefghijklmnop"),
+        (
+            "raw-github-pat",
+            "https://example.org/evidence/github_pat_abcdefghijklmnop",
+        ),
+        ("percent-sk-dash", "https://example.org/evidence/sk%2Dabcdefghijklmnop"),
+        ("percent-sk-underscore", "https://example.org/evidence/sk%5Fabcdefghijklmnop"),
+        ("percent-ghp", "https://example.org/evidence/ghp%5Fabcdefghijklmnop"),
+        (
+            "percent-github-pat",
+            "https://example.org/evidence/github%5Fpat%5Fabcdefghijklmnop",
+        ),
+        ("nfkc-sk-dash", "https://example.org/evidence/ｓｋ－abcdefghijklmnop"),
+        ("nfkc-sk-underscore", "https://example.org/evidence/ｓｋ＿abcdefghijklmnop"),
+        ("nfkc-ghp", "https://example.org/evidence/ｇｈｐ＿abcdefghijklmnop"),
+        (
+            "nfkc-github-pat",
+            "https://example.org/evidence/ｇｉｔｈｕｂ＿ｐａｔ＿abcdefghijklmnop",
+        ),
+        (
+            "multilayer-sk-dash",
+            "https://example.org/evidence/sk%252Dabcdefghijklmnop",
+        ),
+        (
+            "multilayer-sk-underscore",
+            "https://example.org/evidence/sk%255Fabcdefghijklmnop",
+        ),
+        (
+            "multilayer-ghp",
+            "https://example.org/evidence/ghp%255Fabcdefghijklmnop",
+        ),
+        (
+            "multilayer-github-pat",
+            "https://example.org/evidence/github%255Fpat%255Fabcdefghijklmnop",
+        ),
+    ],
+)
+def test_explicit_token_prefixes_reject_across_safety_forms(
+    safety_form: str, value: str
+) -> None:
+    """Explicit token prefixes remain sensitive after every safety transform."""
+    payload = fixture_payload("failed.v1.json")
+    payload["errors"][0]["details"] = {"note": value}
+
+    with pytest.raises(ResultValidationError) as parsed:
+        Result.from_dict(payload)
+    with pytest.raises(ResultValidationError) as direct:
+        SafeError("gateway.transport", "Safe failure", (("note", value),))
+    with pytest.raises(ResultValidationError) as rendered:
+        canonical_json_bytes({"note": value})
+
+    assert parsed.value.code == "result.sensitive_data", safety_form
+    assert direct.value.code == "result.sensitive_data", safety_form
+    assert rendered.value.code == "result.sensitive_data", safety_form
+
+
+@pytest.mark.parametrize(
+    ("safety_form", "value"),
+    [
+        ("raw-authorization", "Authorization: private-value"),
+        ("raw-bearer", "Bearer private-value"),
+        ("raw-basic", "Basic dXNlcjpwYXNz"),
+        ("raw-cookie", "Cookie: session=private-value"),
+        ("raw-api-key", "api_key=private-value"),
+        ("raw-access-token", "access_token=private-value"),
+        ("raw-refresh-token", "refresh_token=private-value"),
+        ("raw-password", "password=private-value"),
+        ("raw-client-secret", "client_secret=private-value"),
+        ("raw-session", "sessionid=private-value"),
+        ("raw-private-key", "-----BEGIN PRIVATE KEY-----"),
+        ("raw-aws", "AKIAABCDEFGHIJKLMNOP"),
+        ("raw-userinfo", "https://alice:private@example.org/report"),
+        (
+            "percent-authorization",
+            "Authorization%3A%20Bearer%20private-value",
+        ),
+        (
+            "nfkc-authorization",
+            "Ａｕｔｈｏｒｉｚａｔｉｏｎ： Bearer private-value",
+        ),
+        ("multilayer-api-key", "api%25255Fkey=private-value"),
+    ],
+)
+def test_existing_credential_markers_reject_across_safety_forms(
+    safety_form: str, value: str
+) -> None:
+    """Established credentials and secret labels remain fail-closed."""
+    with pytest.raises(ResultValidationError) as caught:
+        SafeError("gateway.transport", "Safe failure", (("note", value),))
+
+    assert caught.value.code == "result.sensitive_data", safety_form
+
+
+@pytest.mark.parametrize(
+    ("safety_form", "value"),
+    [
+        ("raw-windows", "C:\\Users\\alice\\private.txt"),
+        ("raw-posix", "/home/alice/private.txt"),
+        ("raw-unc", "\\\\server\\share\\private.txt"),
+        ("raw-file-uri", "file:///home/alice/private.txt"),
+        ("percent-posix", "%2Fhome%2Falice%2Fprivate.txt"),
+        (
+            "percent-file-uri",
+            "file%3A%2F%2F%2Fhome%2Falice%2Fprivate.txt",
+        ),
+        ("nfkc-windows", "Ｃ：＼Users＼alice＼private.txt"),
+        ("multilayer-posix", "%25252Fhome%25252Falice%25252Fprivate.txt"),
+    ],
+)
+def test_local_absolute_paths_reject_across_safety_forms(
+    safety_form: str, value: str
+) -> None:
+    """Local path spellings remain rejected after bounded safety decoding."""
+    with pytest.raises(ResultValidationError) as caught:
+        SafeError("gateway.transport", "Safe failure", (("note", value),))
+
+    assert caught.value.code == "result.absolute_path", safety_form
+
+
+@pytest.mark.parametrize(
+    ("sibling", "path"),
+    [
+        ("attempt.requested_url", ("attempts", 0, "requested_url")),
+        ("attempt.final_url", ("attempts", 0, "final_url")),
+        ("manifest.requested_url", ("manifest", "requested_url")),
+        ("manifest.current_url", ("manifest", "current_url")),
+        ("manifest.final_url", ("manifest", "final_url")),
+        (
+            "redirect.from_url",
+            ("manifest", "redirects", 0, "from_url"),
+        ),
+        ("redirect.to_url", ("manifest", "redirects", 0, "to_url")),
+        (
+            "artifact.source_url",
+            ("manifest", "artifacts", 0, "source_url"),
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("value", "expected_code"),
+    [
+        (
+            "https://example.org/evidence/sk-abcdefghijklmnop",
+            "result.sensitive_data",
+        ),
+        (
+            "https://example.org/evidence/ghp%255Fabcdefghijklmnop",
+            "result.sensitive_data",
+        ),
+        (
+            "https://example.org/evidence/ｇｉｔｈｕｂ＿ｐａｔ＿abcdefghijklmnop",
+            "result.sensitive_data",
+        ),
+        ("C:\\Users\\alice\\private.txt", "result.absolute_path"),
+        (
+            "file%253A%252F%252F%252Fhome%252Falice%252Fprivate.txt",
+            "result.absolute_path",
+        ),
+    ],
+)
+def test_result_url_siblings_keep_secret_and_path_rejection(
+    sibling: str,
+    path: tuple[str | int, ...],
+    value: str,
+    expected_code: str,
+) -> None:
+    """Every Result URL field uses the same strict safety boundary."""
+    payload = fixture_payload("completed.v1.json")
+    owner = payload
+    for part in path[:-1]:
+        owner = owner[part]
+    owner[path[-1]] = value
+
+    with pytest.raises(ResultValidationError) as caught:
+        Result.from_dict(payload)
+
+    assert caught.value.code == expected_code, sibling
+
+
+@pytest.mark.parametrize("sibling", ["source_url", "candidates", "discovered_from"])
+@pytest.mark.parametrize(
+    ("value", "expected_code"),
+    [
+        (
+            "https://example.org/evidence/sk%252Dabcdefghijklmnop",
+            "result.sensitive_data",
+        ),
+        ("Ｃ：＼Users＼alice＼private.txt", "result.absolute_path"),
+    ],
+)
+def test_site_explore_url_siblings_keep_secret_and_path_rejection(
+    sibling: str, value: str, expected_code: str
+) -> None:
+    """Discovery source, candidate, and provenance URLs fail closed alike."""
+    payload = {
+        "tool_id": "sitemap",
+        "tool_version": "1.0.0",
+        "source_url": "https://example.org/sitemap.xml",
+        "outcome": "succeeded",
+        "candidates": ["https://example.org/report"],
+        "discovered_from": ["https://example.org/sitemap.xml"],
+        "coverage": "complete",
+        "error": None,
+    }
+    payload[sibling] = value if sibling == "source_url" else [value]
+
+    with pytest.raises(ResultValidationError) as caught:
+        DiscoveryEvidence.from_dict(payload)
+
+    assert caught.value.code == expected_code, sibling
 
 
 @pytest.mark.parametrize(("name", "status"), FIXTURE_STATUS.items())
