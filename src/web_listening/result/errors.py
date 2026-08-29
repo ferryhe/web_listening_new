@@ -50,7 +50,7 @@ _SECRET_VALUE = re.compile(
     r"password|passwd|client[_-]?secret|sessionid)\s*[:=]|"
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
     r"\bAKIA[A-Z0-9]{16}\b|"
-    r"\b(?:sk|ghp|github_pat)-?[a-z0-9_-]{16,}\b|"
+    r"\b(?:sk[-_]|ghp_|github_pat_)[a-z0-9_-]{16,}\b|"
     r"https?://[^/?#\s]*@"
     r")"
 )
