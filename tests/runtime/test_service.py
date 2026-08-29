@@ -2,6 +2,7 @@
 
 # pylint: disable=missing-class-docstring,missing-function-docstring
 # pylint: disable=too-few-public-methods
+# pylint: disable=duplicate-code,too-many-lines
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ import hashlib
 import inspect
 from dataclasses import dataclass, replace
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -19,12 +21,24 @@ from web_listening.artifact.model import (
     Observation,
     StoredArtifact,
 )
+from web_listening.artifact.site_state import SiteState, SiteStatePage
 from web_listening.artifact.store import ArtifactStore
-from web_listening.request.model import Budgets, ContentType, Request, Scope
+from web_listening.request.model import (
+    Budgets,
+    ContentType,
+    Request,
+    RequestValidationError,
+    Scope,
+)
+from web_listening.request.site_refresh import SiteRefreshRequest
 from web_listening.result.errors import ResultValidationError
 from web_listening.runtime.jobs import JobRepository, JobStateError, JobStatus
 from web_listening.runtime.service import RuntimeService
-from web_listening.site_skill.model import SuccessChecks, ToolReference
+from web_listening.site_skill.model import (
+    DiscoveryRecipe,
+    SuccessChecks,
+    ToolReference,
+)
 from web_listening.site_skill.update import create_candidate
 from web_listening.tool_registry.acquisition.builtins.web_http import (
     WEB_HTTP_MANIFEST,
@@ -133,6 +147,56 @@ def _request(skill, *, explore_all_tools: bool = False) -> Request:
         explore_all_tools,
         Budgets(6, 2 * 1024 * 1024, 30, 1),
     )
+
+
+def _refresh_request() -> SiteRefreshRequest:
+    scope = Scope(
+        (URL,),
+        (ORIGIN,),
+        ("/**",),
+        (ContentType.HTML,),
+    )
+    budgets = Budgets(4, 2 * 1024 * 1024, 30, 4)
+    tool = ToolReference(
+        WEB_HTTP_MANIFEST.tool_id,
+        WEB_HTTP_MANIFEST.version,
+        ToolCategory.ACQUISITION,
+        frozenset({"http_get"}),
+    )
+    skill = create_candidate(
+        site_key="example.test",
+        version=1,
+        previous=None,
+        scope=scope,
+        budgets=budgets,
+        tool=tool,
+        success_checks=SuccessChecks(("text/html",), 1),
+        verified_at=NOW,
+        discovery=DiscoveryRecipe(
+            ToolReference(
+                "discovery.html_links",
+                "1.0.0",
+                ToolCategory.DISCOVERY,
+                frozenset({"html_links"}),
+            ),
+            URL,
+        ),
+    ).skill
+    previous = SiteState(
+        "example.test",
+        NOW,
+        skill.digest,
+        True,
+        (
+            SiteStatePage(
+                URL,
+                "observation-" + "a" * 32,
+                "artifact-" + "b" * 64,
+                "sha256:" + "c" * 64,
+            ),
+        ),
+    )
+    return SiteRefreshRequest(scope, skill, previous, False, budgets)
 
 
 def _service(
@@ -836,7 +900,106 @@ def test_explore_site_is_one_public_delegation_with_fresh_run_id(
     assert calls[0][4]() == NOW
 
 
-def test_open_registers_html_link_discovery_for_site_explore(tmp_path: Path) -> None:
+def test_refresh_site_is_one_public_delegation_with_fresh_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = object()
+    calls: list[tuple[object, object, object, str, object]] = []
+    registry = object()
+    store = object()
+    service = RuntimeService(
+        registry,  # type: ignore[arg-type]
+        store,  # type: ignore[arg-type]
+        JobRepository(),
+        clock=lambda: NOW,
+        job_id_factory=lambda: "job-site-refresh",
+    )
+    request = object()
+
+    def fake_run(request_arg, registry_arg, store_arg, *, run_id, clock):
+        calls.append((request_arg, registry_arg, store_arg, run_id, clock))
+        return expected
+
+    monkeypatch.setattr(service_module, "run_site_refresh", fake_run)
+
+    assert service.refresh_site(request) is expected  # type: ignore[arg-type]
+    assert len(calls) == 1
+    assert calls[0][:4] == (request, registry, store, "job-site-refresh")
+    assert calls[0][4]() == NOW
+
+
+def test_refresh_service_rejects_sensitive_previous_state_before_tool_io(
+    tmp_path: Path,
+) -> None:
+    request = _refresh_request()
+    object.__setattr__(
+        request.previous_state.pages[0],
+        "canonical_url",
+        "https://example.test/report?token=placeholder-value",
+    )
+    tool = _CountingTool(_successful_output())
+    service, store, _jobs = _service(tmp_path, tool)
+
+    with pytest.raises(
+        RequestValidationError, match="^site_state.sensitive_data$"
+    ) as caught:
+        service.refresh_site(request)
+
+    assert tool.calls == 0
+    assert "placeholder-value" not in str(caught.value)
+    service.close()
+    store.close()
+
+
+def test_refresh_service_rejects_absolute_path_previous_state_before_tool_io(
+    tmp_path: Path,
+) -> None:
+    request = _refresh_request()
+    encoded = quote("".join(chr(item) for item in (67, 58, 47, 112)), safe="")
+    object.__setattr__(
+        request.previous_state.pages[0],
+        "canonical_url",
+        f"https://example.test/report?next={encoded}",
+    )
+    tool = _CountingTool(_successful_output())
+    service, store, _jobs = _service(tmp_path, tool)
+
+    with pytest.raises(
+        RequestValidationError, match="^site_state.absolute_path$"
+    ) as caught:
+        service.refresh_site(request)
+
+    assert caught.value.args == ("site_state.absolute_path",)
+    assert tool.calls == 0
+    service.close()
+    store.close()
+
+
+def test_refresh_service_accepts_public_natural_language_slug(
+    tmp_path: Path,
+) -> None:
+    request = _refresh_request()
+    public_url = (
+        "https://example.test/"
+        "skilled-professionals-and-scientists-in-climate-assessment"
+    )
+    object.__setattr__(
+        request.previous_state.pages[0],
+        "canonical_url",
+        public_url,
+    )
+    tool = _CountingTool(_successful_output())
+    service, store, _jobs = _service(tmp_path, tool)
+
+    result = service.refresh_site(request)
+
+    assert result.previous_state.pages[0].canonical_url == public_url
+    assert tool.calls > 0
+    service.close()
+    store.close()
+
+
+def test_open_registers_builtin_discovery_for_site_workflows(tmp_path: Path) -> None:
     service = RuntimeService.open(tmp_path / "runtime-data")
 
     discovery = service._registry.query(  # pylint: disable=protected-access
@@ -844,7 +1007,9 @@ def test_open_registers_html_link_discovery_for_site_explore(tmp_path: Path) -> 
     )
 
     assert [(item.tool_id, item.version) for item in discovery] == [
-        ("discovery.html_links", "1.0.0")
+        ("discovery.html_links", "1.0.0"),
+        ("discovery.rss", "1.0.0"),
+        ("discovery.sitemap", "1.0.0"),
     ]
     service.close()
 
@@ -861,6 +1026,7 @@ def test_close_is_idempotent_guards_operations_and_does_not_close_injections(
     for operation in (
         lambda: service.run(_request(_skill())),
         lambda: service.explore_site(_request(None)),
+        lambda: service.refresh_site(object()),  # type: ignore[arg-type]
         lambda: service.get_job("job-one"),
         lambda: service.read_artifact("artifact-one"),
     ):

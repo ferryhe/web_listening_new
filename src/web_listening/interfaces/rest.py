@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse  # pylint: disable=import-error
 
 from web_listening.artifact.model import ArtifactStoreError, StoredArtifact
 from web_listening.request.model import RequestValidationError
+from web_listening.request.site_refresh import site_refresh_request_from_json
 from web_listening.request.validate import request_from_json
 from web_listening.result.errors import SafeError
 from web_listening.runtime.jobs import Job, JobStateError, JobStatus
@@ -134,6 +135,26 @@ def create_app(runtime_provider: RuntimeProvider) -> FastAPI:
         try:
             runtime = runtime_provider()
             result = await run_in_threadpool(runtime.explore_site, request)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            return _runtime_error_response(exc)
+        status_code = {
+            "rejected": 422,
+            "failed": 500,
+        }.get(result.status.value, 201)
+        return JSONResponse(status_code=status_code, content=result.to_dict())
+
+    @app.post("/v1/site-refreshes", status_code=201)
+    async def site_refresh(http_request: HttpRequest) -> JSONResponse:
+        try:
+            payload = (await http_request.body()).decode("utf-8")
+            request = site_refresh_request_from_json(payload)
+        except UnicodeDecodeError:
+            return _error_response(422, "request.invalid_json", "Request is invalid.")
+        except RequestValidationError as exc:
+            return _error_response(422, exc.code, "Request is invalid.")
+        try:
+            runtime = runtime_provider()
+            result = await run_in_threadpool(runtime.refresh_site, request)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             return _runtime_error_response(exc)
         status_code = {

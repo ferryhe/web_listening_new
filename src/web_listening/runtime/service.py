@@ -12,9 +12,12 @@ from pathlib import Path
 from web_listening.artifact.model import StoredArtifact
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import Request, RequestValidationError
+from web_listening.request.site_refresh import SiteRefreshRequest
 from web_listening.result.site_explore import SiteExploreResult
+from web_listening.result.site_refresh import SiteRefreshResult
 from web_listening.runtime.jobs import Job, JobRepository, JobStatus
 from web_listening.runtime.site_explore import run_site_explore
+from web_listening.runtime.site_refresh import run_site_refresh
 from web_listening.runtime.workflow import run_single_target
 from web_listening.tool_registry.acquisition.builtins.web_http import (
     WEB_HTTP_MANIFEST,
@@ -23,6 +26,14 @@ from web_listening.tool_registry.acquisition.builtins.web_http import (
 from web_listening.tool_registry.discovery.builtins.html_links import (
     HTML_LINKS_MANIFEST,
     HtmlLinksDiscoveryTool,
+)
+from web_listening.tool_registry.discovery.builtins.rss import (
+    RSS_MANIFEST,
+    RssDiscoveryTool,
+)
+from web_listening.tool_registry.discovery.builtins.sitemap import (
+    SITEMAP_MANIFEST,
+    SitemapDiscoveryTool,
 )
 from web_listening.tool_registry.registry import Registry
 from web_listening.tool_registry.runners.in_process import PinnedHttpTransport
@@ -67,6 +78,8 @@ class RuntimeService:
             registry.register(WEB_HTTP_MANIFEST, tool)
             discovery = HtmlLinksDiscoveryTool()
             registry.register(HTML_LINKS_MANIFEST, discovery)
+            registry.register(RSS_MANIFEST, RssDiscoveryTool())
+            registry.register(SITEMAP_MANIFEST, SitemapDiscoveryTool())
             transform = SimpleHtmlMarkdownTransform()
             registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
             artifact_store = ArtifactStore(root / "artifacts")
@@ -142,6 +155,17 @@ class RuntimeService:
         """Run deterministic exploration through the shared Runtime workflow."""
         self._ensure_open()
         return run_site_explore(
+            request,
+            self._registry,
+            self._artifact_store,
+            run_id=self._job_id_factory(),
+            clock=self._clock,
+        )
+
+    def refresh_site(self, request: SiteRefreshRequest) -> SiteRefreshResult:
+        """Replay one validated Site Skill through the shared Runtime workflow."""
+        self._ensure_open()
+        return run_site_refresh(
             request,
             self._registry,
             self._artifact_store,

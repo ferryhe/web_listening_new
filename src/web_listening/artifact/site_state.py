@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -31,11 +33,37 @@ _HTTP_URL = re.compile(
 )
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-F]{2})")
 _PERCENT_ESCAPE = re.compile(r"%([0-9A-F]{2})")
+_PERCENT_RUN = re.compile(r"(?:%[0-9A-F]{2})+")
 _UNRESERVED = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
 )
 _PATH_SAFE = _UNRESERVED | frozenset("/%:@!$&'()*+,;=")
 _QUERY_SAFE = _UNRESERVED | frozenset("%!$&'()*+,;=:@/?")
+_SECRET_QUERY = re.compile(
+    r"(?:^|[?&])(?:auth|authorization|cookie|credential|password|secret|"
+    r"token|api[_-]?key)=",
+    re.IGNORECASE,
+)
+_SECRET_VALUE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:auth|authorization|proxy-authorization)\s*[:=]|"
+    r"\b(?:bearer|basic)\s+[a-z0-9._~+/=-]{4,}|"
+    r"\b(?:cookie|set-cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|"
+    r"password|passwd|client[_-]?secret|sessionid)\s*[:=]|"
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+    r"\bAKIA[A-Z0-9]{16}\b|"
+    r"\b(?:sk[-_]|ghp_|github_pat_)[a-z0-9_-]{16,}\b|"
+    r"https?://[^/?#\s]*@"
+    r")"
+)
+_WINDOWS_PATH = re.compile(r"(?i)(?:^|[\s'\"(=:])(?:[a-z]:[\\/]|\\\\)")
+_POSIX_PATH = re.compile(
+    r"(?i)(?:^|[\s'\"(=:])/(?:home|users|tmp|var|etc|opt|root|mnt|srv|usr|"
+    r"private|workspace|project)(?:/|\b)"
+)
+_GENERIC_POSIX_PATH = re.compile(r"(?:^|[\s'\"(=:])/(?!/)[A-Za-z0-9._~-]+/")
+_UNC_PATH = re.compile(r"(?:^|[\s'\"(=])(?:/{2}|\\{2})[^/\\\s]+[/\\]")
+_FILE_PATH = re.compile(r"(?i)(?:^|[\s'\"(=:])file:/+")
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -49,6 +77,43 @@ def _exact(value: Mapping[str, object], fields: set[str]) -> None:
         raise ArtifactStoreError("schema.unknown_fields")
     if fields - set(value):
         raise ArtifactStoreError("schema.missing_fields")
+
+
+def _unsafe_path(value: str) -> bool:
+    return bool(
+        _FILE_PATH.search(value)
+        or _UNC_PATH.search(value)
+        or value.startswith("/")
+        or _WINDOWS_PATH.search(value)
+        or _POSIX_PATH.search(value)
+        or _GENERIC_POSIX_PATH.search(value)
+    )
+
+
+def _decode_percent_run(matched: re.Match[str]) -> str:
+    encoded = matched.group(0)
+    raw = bytes(
+        int(encoded[index + 1 : index + 3], 16) for index in range(0, len(encoded), 3)
+    )
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
+def _decoded_forms(value: str) -> tuple[str, ...]:
+    layers = [value]
+    for _unused in range(3):
+        decoded = _PERCENT_RUN.sub(_decode_percent_run, layers[-1])
+        if decoded == layers[-1]:
+            break
+        layers.append(decoded)
+    forms: list[str] = []
+    for current in layers:
+        for candidate in (current, unicodedata.normalize("NFKC", current)):
+            if candidate not in forms:
+                forms.append(candidate)
+    return tuple(forms)
 
 
 def _url(value: object) -> tuple[str, str]:
@@ -71,6 +136,11 @@ def _url(value: object) -> tuple[str, str]:
         raise ArtifactStoreError("site_state.page_invalid")
     if query is not None and not _canonical_component(query, _QUERY_SAFE):
         raise ArtifactStoreError("site_state.page_invalid")
+    for decoded in _decoded_forms(value):
+        if _SECRET_QUERY.search(decoded) or _SECRET_VALUE.search(decoded):
+            raise ArtifactStoreError("site_state.sensitive_data")
+        if _unsafe_path(decoded):
+            raise ArtifactStoreError("site_state.absolute_path")
     decoded_path = path
     for _unused in range(len(path) + 1):
         next_path = _PERCENT_ESCAPE.sub(
@@ -173,6 +243,9 @@ class SiteState:
             raise ArtifactStoreError("site_state.page_order_invalid")
         if len(urls) != len(set(urls)):
             raise ArtifactStoreError("site_state.page_duplicate")
+        observation_ids = tuple(page.observation_id for page in self.pages)
+        if len(observation_ids) != len(set(observation_ids)):
+            raise ArtifactStoreError("site_state.observation_duplicate")
         if any(_url(url)[1] != self.site_key for url in urls):
             raise ArtifactStoreError("site_state.site_mismatch")
 
@@ -220,10 +293,20 @@ class SiteState:
             allow_nan=False,
         ).encode("utf-8")
 
+    @property
+    def digest(self) -> str:
+        """Return the frozen identity of the canonical state payload."""
+        return f"sha256:{hashlib.sha256(self.canonical_json_bytes()).hexdigest()}"
+
 
 def site_state_from_mapping(value: object) -> SiteState:
     """Parse one strict JSON-compatible Site State."""
     return SiteState.from_dict(value)
+
+
+def validate_site_state_url(value: object) -> str:
+    """Validate and return one canonical Site State page URL."""
+    return _url(value)[0]
 
 
 __all__ = [
@@ -231,4 +314,5 @@ __all__ = [
     "SiteState",
     "SiteStatePage",
     "site_state_from_mapping",
+    "validate_site_state_url",
 ]

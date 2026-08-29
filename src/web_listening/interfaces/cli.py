@@ -12,6 +12,7 @@ from pathlib import Path
 
 from web_listening.artifact.model import StoredArtifact
 from web_listening.request.model import Request, RequestValidationError
+from web_listening.request.site_refresh import site_refresh_request_from_json
 from web_listening.request.validate import request_from_json
 from web_listening.runtime.jobs import Job
 from web_listening.runtime.service import RuntimeService
@@ -38,7 +39,7 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{acquire,site-explore,get-job,read-artifact}",
+        metavar="{acquire,site-explore,site-refresh,get-job,read-artifact}",
     )
 
     acquire = commands.add_parser("acquire", help="Submit one validated Request file.")
@@ -53,6 +54,13 @@ def _parser() -> argparse.ArgumentParser:
     site_explore.add_argument("--request", required=True, type=Path)
     site_explore.add_argument("--output", required=True, type=Path)
     site_explore.add_argument("--json", action="store_true", help="Emit JSON.")
+
+    site_refresh = commands.add_parser(
+        "site-refresh", help="Refresh one site with a validated recipe and state."
+    )
+    site_refresh.add_argument("--request", required=True, type=Path)
+    site_refresh.add_argument("--output", required=True, type=Path)
+    site_refresh.add_argument("--json", action="store_true", help="Emit JSON.")
 
     get_job = commands.add_parser("get-job", help="Read one Runtime Job by ID.")
     get_job.add_argument("job_id")
@@ -168,6 +176,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             request = _load_request(args.request, None)
             payload = _run_with_runtime(
                 args.output, lambda runtime: runtime.explore_site(request).to_dict()
+            )
+        elif args.command == "site-refresh":
+            refresh_request = site_refresh_request_from_json(_read_text(args.request))
+            payload = _run_with_runtime(
+                args.output,
+                lambda runtime: runtime.refresh_site(refresh_request).to_dict(),
             )
         elif args.command == "get-job":
             payload = _run_with_runtime(
