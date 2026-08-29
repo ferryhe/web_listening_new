@@ -13,23 +13,40 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
 import web_listening.interfaces.cli as cli
 from web_listening.artifact.model import ArtifactStoreError, StoredArtifact
 from web_listening.artifact.site_state import SiteState
-from web_listening.request.model import Request
+from web_listening.request.model import Budgets, ContentType, Request, Scope
+from web_listening.request.site_refresh import (
+    SITE_REFRESH_REQUEST_SCHEMA_VERSION,
+    SiteRefreshRequest,
+)
 from web_listening.result.errors import SafeError
 from web_listening.result.manifest import Usage
 from web_listening.result.model import Result
 from web_listening.result.site_explore import SiteExploreResult
+from web_listening.result.site_refresh import SiteRefreshResult
 from web_listening.runtime.jobs import Job, JobStateError, JobStatus
-from web_listening.site_skill.model import SiteSkill
+from web_listening.site_skill.model import (
+    DiscoveryRecipe,
+    SiteSkill,
+    SuccessChecks,
+    ToolReference,
+)
+from web_listening.site_skill.update import create_candidate
+from web_listening.site_skill.validate import site_skill_to_mapping
+from web_listening.tool_registry.manifest import ToolCategory
 
 ROOT = Path(__file__).parents[2]
 RESULT_FIXTURE = ROOT / "tests" / "result" / "fixtures" / "completed.v1.json"
 SITE_SKILL_CATALOG = ROOT / "tests" / "live" / "catalog" / "site_skill_cases.json"
+SITE_REFRESH_FIXTURE = (
+    ROOT / "tests" / "result" / "fixtures" / "site-refresh-partial.v1.json"
+)
 
 
 def _result() -> Result:
@@ -60,6 +77,69 @@ def _explore_result() -> SiteExploreResult:
         stop_reason="rejected",
         errors=(SafeError("test.rejected", "Exploration was rejected."),),
     )
+
+
+def _refresh_result() -> SiteRefreshResult:
+    return SiteRefreshResult.from_dict(
+        json.loads(SITE_REFRESH_FIXTURE.read_text(encoding="utf-8"))
+    )
+
+
+def _refresh_request_payload() -> dict[str, object]:
+    scope = Scope(
+        ("https://example.test/",),
+        ("https://example.test",),
+        ("/**",),
+        (ContentType.HTML,),
+    )
+    discovery_tool = ToolReference(
+        "discovery.html_links",
+        "1.0.0",
+        ToolCategory.DISCOVERY,
+        frozenset({"html_links"}),
+    )
+    skill = create_candidate(
+        site_key="example.test",
+        version=1,
+        previous=None,
+        scope=scope,
+        budgets=Budgets(4, 4096, 30, 4),
+        tool=ToolReference(
+            "acquisition.web_http",
+            "1.0.0",
+            ToolCategory.ACQUISITION,
+            frozenset({"http_get"}),
+        ),
+        success_checks=SuccessChecks(("text/html",), 1),
+        verified_at="2026-08-28T00:00:00Z",
+        discovery=DiscoveryRecipe(discovery_tool, "https://example.test/"),
+    ).skill
+    previous = _refresh_result().previous_state
+    previous = SiteState(
+        previous.site_key,
+        previous.generated_at,
+        skill.digest,
+        previous.complete,
+        previous.pages,
+    )
+    return {
+        "schema_version": SITE_REFRESH_REQUEST_SCHEMA_VERSION,
+        "scope": {
+            "seeds": list(scope.seeds),
+            "allowed_origins": list(scope.allowed_origins),
+            "include_paths": list(scope.include_paths),
+            "content_types": ["html"],
+        },
+        "site_skill": site_skill_to_mapping(skill),
+        "previous_state": previous.to_dict(),
+        "explore_all_tools": False,
+        "budgets": {
+            "max_requests": 4,
+            "max_bytes": 4096,
+            "max_runtime_seconds": 30,
+            "max_tool_attempts_per_target": 4,
+        },
+    }
 
 
 def _request_payload(site_skill: object = None) -> dict[str, object]:
@@ -96,12 +176,13 @@ class FakeRuntime:
     open_error: Exception | None = None
     run_error: Exception | None = None
     explore_error: Exception | None = None
+    refresh_error: Exception | None = None
     get_error: Exception | None = None
     read_error: Exception | None = None
 
     def __init__(self) -> None:
         self.closed = False
-        self.requests: list[Request] = []
+        self.requests: list[Request | SiteRefreshRequest] = []
         self.job_ids: list[str] = []
         self.artifact_ids: list[str] = []
 
@@ -112,6 +193,7 @@ class FakeRuntime:
         cls.open_error = None
         cls.run_error = None
         cls.explore_error = None
+        cls.refresh_error = None
         cls.get_error = None
         cls.read_error = None
 
@@ -142,6 +224,12 @@ class FakeRuntime:
             raise self.explore_error
         return _explore_result()
 
+    def refresh_site(self, request: SiteRefreshRequest) -> SiteRefreshResult:
+        self.requests.append(request)
+        if self.refresh_error is not None:
+            raise self.refresh_error
+        return _refresh_result()
+
     def read_artifact(self, artifact_id: str) -> StoredArtifact:
         self.artifact_ids.append(artifact_id)
         if self.read_error is not None:
@@ -170,7 +258,7 @@ def _write_json(path: Path, payload: object) -> Path:
     return path
 
 
-def test_help_lists_the_four_public_commands(
+def test_help_lists_the_five_public_commands(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as caught:
@@ -178,7 +266,7 @@ def test_help_lists_the_four_public_commands(
 
     output = capsys.readouterr()
     assert caught.value.code == 0
-    assert "{acquire,site-explore,get-job,read-artifact}" in output.out
+    assert "{acquire,site-explore,site-refresh,get-job,read-artifact}" in output.out
     assert output.err == ""
     for dropped in (
         "search",
@@ -215,6 +303,126 @@ def test_site_explore_calls_only_runtime_and_emits_the_strict_contract(
     assert FakeRuntime.instances[0].closed is True
     assert FakeRuntime.instances[0].requests[0].site_skill is None
     assert SiteExploreResult.from_dict(json.loads(output.out)) == _explore_result()
+
+
+def test_site_refresh_calls_only_runtime_and_emits_the_strict_contract(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    request_path = _write_json(tmp_path / "refresh.json", _refresh_request_payload())
+    output_dir = tmp_path / "runtime-data"
+
+    exit_code = cli.main(
+        [
+            "site-refresh",
+            "--request",
+            str(request_path),
+            "--output",
+            str(output_dir),
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == 0
+    assert output.err == ""
+    assert FakeRuntime.opened_with == [output_dir]
+    assert FakeRuntime.instances[0].closed is True
+    request = FakeRuntime.instances[0].requests[0]
+    assert isinstance(request, SiteRefreshRequest)
+    assert request.site_skill.digest == request.previous_state.site_skill_digest
+    assert SiteRefreshResult.from_dict(json.loads(output.out)) == _refresh_result()
+
+
+def test_site_refresh_rejects_sensitive_previous_state_before_opening_runtime(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = _refresh_request_payload()
+    payload["previous_state"]["pages"][0][
+        "canonical_url"
+    ] = "https://example.test/a?token=placeholder-value"
+    request_path = _write_json(tmp_path / "refresh.json", payload)
+
+    exit_code = cli.main(
+        [
+            "site-refresh",
+            "--request",
+            str(request_path),
+            "--output",
+            str(tmp_path / "runtime-data"),
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == cli.EXIT_INPUT_ERROR
+    assert output.out == ""
+    assert output.err == "site_state.sensitive_data\n"
+    assert "placeholder-value" not in output.out + output.err
+    assert FakeRuntime.opened_with == []
+    assert FakeRuntime.instances == []
+
+
+def test_site_refresh_rejects_absolute_path_before_opening_runtime(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = _refresh_request_payload()
+    encoded = quote("".join(chr(item) for item in (67, 58, 47, 112)), safe="")
+    payload["previous_state"]["pages"][0][
+        "canonical_url"
+    ] = f"https://example.test/a?next={encoded}"
+    request_path = _write_json(tmp_path / "refresh.json", payload)
+
+    exit_code = cli.main(
+        [
+            "site-refresh",
+            "--request",
+            str(request_path),
+            "--output",
+            str(tmp_path / "runtime-data"),
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == cli.EXIT_INPUT_ERROR
+    assert output.out == ""
+    assert output.err == "site_state.absolute_path\n"
+    assert FakeRuntime.opened_with == []
+    assert FakeRuntime.instances == []
+
+
+def test_site_refresh_accepts_public_natural_language_slug(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = _refresh_request_payload()
+    public_url = (
+        "https://example.test/"
+        "skilled-professionals-and-scientists-in-climate-assessment"
+    )
+    payload["previous_state"]["pages"][0]["canonical_url"] = public_url
+    payload["previous_state"]["pages"].sort(key=lambda page: page["canonical_url"])
+    request_path = _write_json(tmp_path / "refresh.json", payload)
+    output_dir = tmp_path / "runtime-data"
+
+    exit_code = cli.main(
+        [
+            "site-refresh",
+            "--request",
+            str(request_path),
+            "--output",
+            str(output_dir),
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == cli.EXIT_SUCCESS
+    assert output.err == ""
+    assert FakeRuntime.opened_with == [output_dir]
+    assert public_url in {
+        page.canonical_url
+        for page in FakeRuntime.instances[0].requests[0].previous_state.pages
+    }
 
 
 def test_acquire_parses_request_and_emits_the_unified_job_and_result_contract(

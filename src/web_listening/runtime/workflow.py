@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Protocol
 from urllib.parse import (
@@ -76,6 +78,12 @@ from web_listening.tool_registry.registry import AcquisitionOutputRejected, Regi
 
 _MAX_DISCOVERY_CANDIDATES = 100
 _DEFAULT_ACQUISITION_TOOL_ID = "acquisition.web_http"
+_INVOCATION_BUDGET_LIMITS: ContextVar[Budgets | None] = ContextVar(
+    "web_listening_invocation_budget_limits", default=None
+)
+_PRIOR_TARGET_ATTEMPTS: ContextVar[tuple[Attempt, ...]] = ContextVar(
+    "web_listening_prior_target_attempts", default=()
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +226,24 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
                 site_skill=site_skill,
             )
         effective_request = resolution.request
+    budget_limits = _INVOCATION_BUDGET_LIMITS.get()
+    if budget_limits is not None:
+        current = effective_request.budgets
+        effective_request = replace(
+            effective_request,
+            budgets=Budgets(
+                min(current.max_requests, budget_limits.max_requests),
+                min(current.max_bytes, budget_limits.max_bytes),
+                min(
+                    current.max_runtime_seconds,
+                    budget_limits.max_runtime_seconds,
+                ),
+                min(
+                    current.max_tool_attempts_per_target,
+                    budget_limits.max_tool_attempts_per_target,
+                ),
+            ),
+        )
     if target_url is None:
         requested_url = effective_request.scope.seeds[0]
     try:
@@ -244,7 +270,28 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
     remaining_requests = effective_request.budgets.max_requests
     remaining_bytes = effective_request.budgets.max_bytes
     remaining_runtime_ms = effective_request.budgets.max_runtime_seconds * 1_000
-    remaining_tool_attempts = effective_request.budgets.max_tool_attempts_per_target
+    prior_attempts_used = sum(
+        attempt.outcome != "skipped"
+        and canonicalize_url(attempt.requested_url) == requested_url
+        for attempt in _PRIOR_TARGET_ATTEMPTS.get()
+    )
+    remaining_tool_attempts = max(
+        0,
+        effective_request.budgets.max_tool_attempts_per_target - prior_attempts_used,
+    )
+    if remaining_tool_attempts == 0:
+        return _failure_result(
+            status=ResultStatus.FAILED,
+            run_id=run_id,
+            generated_at=clock(),
+            requested_url=requested_url,
+            current_url=requested_url,
+            code="eligibility.attempt_budget_exhausted",
+            message="Acquisition did not complete.",
+            tool_id=(preferred_tool_id if preferred_tool_version is not None else None),
+            tool_version=preferred_tool_version,
+            site_skill=site_skill,
+        )
     attempted_tool_ids: set[str] = set()
     recorded_skips: set[str] = set()
     acquisition_attempts: list[Attempt] = []
@@ -603,6 +650,42 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
         errors=tuple(acquisition_errors) + transformed.errors,
         usage=usage,
     )
+
+
+def run_single_target_bounded(  # pylint: disable=too-many-arguments
+    request: Request,
+    registry: Registry,
+    artifact_store: ArtifactStore,
+    *,
+    run_id: str,
+    clock: Callable[[], str],
+    target_url: str,
+    budget_limits: Budgets,
+) -> Result:
+    """Run the existing governed path under narrower invocation-local limits."""
+    limits = validate_budgets(budget_limits)
+    token = _INVOCATION_BUDGET_LIMITS.set(limits)
+    try:
+        return run_single_target(
+            request,
+            registry,
+            artifact_store,
+            run_id=run_id,
+            clock=clock,
+            target_url=target_url,
+        )
+    finally:
+        _INVOCATION_BUDGET_LIMITS.reset(token)
+
+
+@contextmanager
+def prior_target_attempts(attempts: tuple[Attempt, ...]) -> Iterator[None]:
+    """Apply already-consumed target attempts to nested governed acquisitions."""
+    token = _PRIOR_TARGET_ATTEMPTS.set(attempts)
+    try:
+        yield
+    finally:
+        _PRIOR_TARGET_ATTEMPTS.reset(token)
 
 
 def run_agent_assisted_target(  # pylint: disable=too-many-arguments
@@ -1505,6 +1588,7 @@ __all__ = [
     "ExplorerPort",
     "acquire_discovered_candidates",
     "discover_candidates",
+    "prior_target_attempts",
     "run_agent_assisted_target",
     "run_single_target",
 ]

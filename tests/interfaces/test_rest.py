@@ -13,6 +13,7 @@ import json
 import tomllib
 from pathlib import Path
 from threading import get_ident
+from urllib.parse import quote
 
 import pytest
 
@@ -24,13 +25,33 @@ import web_listening.interfaces.cli as cli
 import web_listening.interfaces.rest as rest
 from web_listening.artifact.model import ArtifactStoreError, StoredArtifact
 from web_listening.artifact.site_state import SiteState
-from web_listening.request.model import Request, RequestValidationError
+from web_listening.request.model import (
+    Budgets,
+    ContentType,
+    Request,
+    RequestValidationError,
+    Scope,
+)
+from web_listening.request.site_refresh import (
+    SITE_REFRESH_REQUEST_SCHEMA_VERSION,
+    SiteRefreshRequest,
+)
 from web_listening.result.errors import SafeError
 from web_listening.result.manifest import Usage
 from web_listening.result.model import Result
 from web_listening.result.site_explore import SiteExploreResult
+from web_listening.result.site_refresh import SiteRefreshResult
 from web_listening.runtime.jobs import Job, JobStateError, JobStatus
-from web_listening.site_skill.model import SiteSkill, SiteSkillError
+from web_listening.site_skill.model import (
+    DiscoveryRecipe,
+    SiteSkill,
+    SiteSkillError,
+    SuccessChecks,
+    ToolReference,
+)
+from web_listening.site_skill.update import create_candidate
+from web_listening.site_skill.validate import site_skill_to_mapping
+from web_listening.tool_registry.manifest import ToolCategory
 
 ROOT = Path(__file__).parents[2]
 RESULT_FIXTURES = ROOT / "tests" / "result" / "fixtures"
@@ -70,6 +91,73 @@ def _explore_result() -> SiteExploreResult:
         stop_reason="rejected",
         errors=(SafeError("test.rejected", "Exploration was rejected."),),
     )
+
+
+def _refresh_result() -> SiteRefreshResult:
+    return SiteRefreshResult.from_dict(
+        json.loads(
+            (RESULT_FIXTURES / "site-refresh-partial.v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    )
+
+
+def _refresh_request_payload() -> dict[str, object]:
+    scope = Scope(
+        ("https://example.test/",),
+        ("https://example.test",),
+        ("/**",),
+        (ContentType.HTML,),
+    )
+    discovery_tool = ToolReference(
+        "discovery.html_links",
+        "1.0.0",
+        ToolCategory.DISCOVERY,
+        frozenset({"html_links"}),
+    )
+    skill = create_candidate(
+        site_key="example.test",
+        version=1,
+        previous=None,
+        scope=scope,
+        budgets=Budgets(4, 4096, 30, 4),
+        tool=ToolReference(
+            "acquisition.web_http",
+            "1.0.0",
+            ToolCategory.ACQUISITION,
+            frozenset({"http_get"}),
+        ),
+        success_checks=SuccessChecks(("text/html",), 1),
+        verified_at="2026-08-28T00:00:00Z",
+        discovery=DiscoveryRecipe(discovery_tool, "https://example.test/"),
+    ).skill
+    previous = _refresh_result().previous_state
+    previous = SiteState(
+        previous.site_key,
+        previous.generated_at,
+        skill.digest,
+        previous.complete,
+        previous.pages,
+    )
+    return {
+        "schema_version": SITE_REFRESH_REQUEST_SCHEMA_VERSION,
+        "scope": {
+            "seeds": list(scope.seeds),
+            "allowed_origins": list(scope.allowed_origins),
+            "include_paths": list(scope.include_paths),
+            "content_types": ["html"],
+        },
+        "site_skill": site_skill_to_mapping(skill),
+        "previous_state": previous.to_dict(),
+        "explore_all_tools": False,
+        "budgets": {
+            "max_requests": 4,
+            "max_bytes": 4096,
+            "max_runtime_seconds": 30,
+            "max_tool_attempts_per_target": 4,
+        },
+    }
 
 
 def _request_payload(site_skill: object = None) -> dict[str, object]:
@@ -114,11 +202,13 @@ class FakeRuntime:
         )
         self.run_error: Exception | None = None
         self.explore_error: Exception | None = None
+        self.refresh_error: Exception | None = None
         self.get_error: Exception | None = None
         self.read_error: Exception | None = None
-        self.requests: list[Request] = []
+        self.requests: list[Request | SiteRefreshRequest] = []
         self.run_thread_ids: list[int] = []
         self.explore_thread_ids: list[int] = []
+        self.refresh_thread_ids: list[int] = []
         self.job_ids: list[str] = []
         self.artifact_ids: list[str] = []
 
@@ -142,6 +232,13 @@ class FakeRuntime:
             raise self.explore_error
         return _explore_result()
 
+    def refresh_site(self, request: SiteRefreshRequest) -> SiteRefreshResult:
+        self.refresh_thread_ids.append(get_ident())
+        self.requests.append(request)
+        if self.refresh_error is not None:
+            raise self.refresh_error
+        return _refresh_result()
+
     def read_artifact(self, artifact_id: str) -> StoredArtifact:
         self.artifact_ids.append(artifact_id)
         if self.read_error is not None:
@@ -158,7 +255,7 @@ def _client(runtime: FakeRuntime) -> TestClient:
     return TestClient(rest.create_app(lambda: runtime))
 
 
-def test_app_exposes_exactly_the_four_readme_routes_and_disables_docs(
+def test_app_exposes_exactly_the_five_readme_routes_and_disables_docs(
     runtime: FakeRuntime,
 ) -> None:
     app = rest.create_app(lambda: runtime)
@@ -169,6 +266,7 @@ def test_app_exposes_exactly_the_four_readme_routes_and_disables_docs(
         ("/v1/jobs/{run_id}", ("GET",)),
         ("/v1/artifacts/{artifact_id}", ("GET",)),
         ("/v1/site-explorations", ("POST",)),
+        ("/v1/site-refreshes", ("POST",)),
     }
     client = TestClient(app)
     assert client.get("/docs").status_code == 404
@@ -225,6 +323,121 @@ def test_site_explore_maps_request_to_one_runtime_call_with_contract_parity(
     assert response.json() == _explore_result().to_dict()
     assert len(provider_thread_ids) == len(runtime.explore_thread_ids) == 1
     assert runtime.explore_thread_ids[0] != provider_thread_ids[0]
+
+
+def test_site_refresh_maps_request_to_one_runtime_call_with_contract_parity(
+    runtime: FakeRuntime,
+) -> None:
+    provider_thread_ids: list[int] = []
+
+    def provider() -> FakeRuntime:
+        provider_thread_ids.append(get_ident())
+        return runtime
+
+    response = TestClient(rest.create_app(provider)).post(
+        "/v1/site-refreshes", json=_refresh_request_payload()
+    )
+
+    assert response.status_code == 201
+    assert len(runtime.requests) == 1
+    request = runtime.requests[0]
+    assert isinstance(request, SiteRefreshRequest)
+    assert request.site_skill.digest == request.previous_state.site_skill_digest
+    assert response.json() == _refresh_result().to_dict()
+    assert SiteRefreshResult.from_dict(response.json()) == _refresh_result()
+    assert len(provider_thread_ids) == len(runtime.refresh_thread_ids) == 1
+    assert runtime.refresh_thread_ids[0] != provider_thread_ids[0]
+
+
+def test_site_refresh_rejects_sensitive_previous_state_before_runtime_provider(
+    runtime: FakeRuntime,
+) -> None:
+    payload = _refresh_request_payload()
+    payload["previous_state"]["pages"][0][
+        "canonical_url"
+    ] = "https://example.test/a?token=placeholder-value"
+    provider_calls = 0
+
+    def provider() -> FakeRuntime:
+        nonlocal provider_calls
+        provider_calls += 1
+        return runtime
+
+    response = TestClient(rest.create_app(provider)).post(
+        "/v1/site-refreshes", json=payload
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": {
+            "code": "site_state.sensitive_data",
+            "message": "Request is invalid.",
+            "details": {},
+        }
+    }
+    assert "placeholder-value" not in response.text
+    assert provider_calls == 0
+    assert runtime.requests == []
+
+
+def test_site_refresh_rejects_absolute_path_before_runtime_provider(
+    runtime: FakeRuntime,
+) -> None:
+    payload = _refresh_request_payload()
+    encoded = quote("".join(chr(item) for item in (67, 58, 47, 112)), safe="")
+    payload["previous_state"]["pages"][0][
+        "canonical_url"
+    ] = f"https://example.test/a?next={encoded}"
+    provider_calls = 0
+
+    def provider() -> FakeRuntime:
+        nonlocal provider_calls
+        provider_calls += 1
+        return runtime
+
+    response = TestClient(rest.create_app(provider)).post(
+        "/v1/site-refreshes", json=payload
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": {
+            "code": "site_state.absolute_path",
+            "message": "Request is invalid.",
+            "details": {},
+        }
+    }
+    assert provider_calls == 0
+    assert runtime.requests == []
+
+
+def test_site_refresh_accepts_public_natural_language_slug(
+    runtime: FakeRuntime,
+) -> None:
+    payload = _refresh_request_payload()
+    public_url = (
+        "https://example.test/"
+        "skilled-professionals-and-scientists-in-climate-assessment"
+    )
+    payload["previous_state"]["pages"][0]["canonical_url"] = public_url
+    payload["previous_state"]["pages"].sort(key=lambda page: page["canonical_url"])
+    provider_calls = 0
+
+    def provider() -> FakeRuntime:
+        nonlocal provider_calls
+        provider_calls += 1
+        return runtime
+
+    response = TestClient(rest.create_app(provider)).post(
+        "/v1/site-refreshes", json=payload
+    )
+
+    assert response.status_code == 201
+    assert provider_calls == 1
+    assert len(runtime.requests) == 1
+    assert public_url in {
+        page.canonical_url for page in runtime.requests[0].previous_state.pages
+    }
 
 
 def test_acquire_validates_embedded_site_skill_before_runtime(
@@ -508,6 +721,7 @@ def test_rest_source_has_only_interface_dto_and_public_runtime_authority() -> No
     assert "runtime_provider" in source
     assert "run_in_threadpool(runtime.run, request)" in source
     assert "run_in_threadpool(runtime.explore_site, request)" in source
+    assert "run_in_threadpool(runtime.refresh_site, request)" in source
     assert "runtime.get_job(" in source
     assert "runtime.read_artifact(" in source
     assert "RuntimeService.open" not in source
