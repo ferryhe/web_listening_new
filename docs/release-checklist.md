@@ -191,7 +191,7 @@ executed a pure simulation with no deployment or network authority:
 | Production mutation | `false` |
 | Drill result | `rollback-pass` |
 
-Command: `python -m pytest -q tests/parity -m "not live"` → `211 passed`
+Command: `python -m pytest -q tests/parity -m "not live"` → `213 passed`
 (exit `0`). The scenario is frozen in
 [`phase_20_offline_corpus.json`](../tests/parity/fixtures/phase_20_offline_corpus.json);
 changing a pre-switch gate to failure prevents a switch recommendation.

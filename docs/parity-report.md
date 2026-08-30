@@ -48,9 +48,9 @@ sites and two URLs per site.
 | SOA/CAS/IAA live monitor + document | pending | pending | pending | pending | pending | pending | `blocker`: required fresh Live Test has not run |
 
 Offline evidence command: `python -m pytest -q tests/parity -m "not live"` →
-`211 passed` (exit `0`). The larger offline governance check against the Live file
+`213 passed` (exit `0`). The larger offline governance check against the Live file
 collects the additional failure, semantic-drift, and invocation-shape regressions
-→ `219 passed, 3 deselected` (exit `0`). Neither result is a Live PASS.
+→ `221 passed, 3 deselected` (exit `0`). Neither result is a Live PASS.
 
 The old projections are rebuilt during each offline run from the two snapshot
 files above. Their LF SHA-256 values are respectively

@@ -784,7 +784,17 @@ def _execute(payload: dict[str, object]) -> dict[str, object]:
             case_requests_before = budget.requests
             case_response_bytes_before = budget.response_bytes
             if budget.remaining_seconds <= 0:
-                record["error"] = [{"code": "phase20.aggregate_budget"}]
+                record["error"] = [
+                    {
+                        "code": "phase20.aggregate_budget",
+                        "message": (
+                            "Aggregate time budget was exhausted before this case."
+                        ),
+                        "retryable": False,
+                        "details": {},
+                        "error_type": "N/A",
+                    }
+                ]
                 records.append(record)
                 profile_cases.append(_profile_case_evidence(case, []))
                 continue

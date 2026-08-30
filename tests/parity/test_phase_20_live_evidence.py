@@ -1220,6 +1220,13 @@ def test_legacy_environment_drift_blocks_before_spawn_with_complete_cases(
     run_old = LIVE["_run_old"]
     monkeypatch.setitem(
         run_old.__globals__,
+        "_verify_old_http_profile_provenance",
+        lambda: asdict(
+            LIVE["HTTP_PROFILE_COMPATIBILITY"]["FROZEN_OLD_HTTP_PROFILE_PROVENANCE"]
+        ),
+    )
+    monkeypatch.setitem(
+        run_old.__globals__,
         "_extract_old_checkout",
         lambda _path: (tmp_path / "old-9fe9ea5", expected["source"]),
     )
@@ -1456,6 +1463,56 @@ def test_new_runtime_without_result_uses_complete_exception_boundary(
         )
         assert comparison["difference"]["classification"] == "blocker"
         assert f"{case['case_id']}:semantic_difference" in failures
+
+
+def test_aggregate_time_budget_emits_complete_per_case_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    helpers = LIVE["NEW_HELPERS"]
+    execute = helpers["_execute"]
+    budget = SimpleNamespace(
+        max_response_bytes=4 * 1024 * 1024,
+        response_bytes=0,
+        max_requests=8,
+        requests=0,
+        remaining_seconds=0,
+        started=helpers["time"].monotonic(),
+    )
+    replacements = {
+        "_NetworkBudget": lambda _limits, _seconds: budget,
+        "Registry": lambda: SimpleNamespace(register=lambda *_args: None),
+        "WebHttpAcquisitionTool": lambda _factory: SimpleNamespace(close=lambda: None),
+        "ArtifactStore": lambda _path: SimpleNamespace(close=lambda: None),
+        "JobRepository": object,
+        "RuntimeService": lambda *_args, **_kwargs: SimpleNamespace(),
+    }
+    for name, replacement in replacements.items():
+        monkeypatch.setitem(execute.__globals__, name, replacement)
+    payload = {
+        "environment": {"revision": "f" * 40, "verification": "matched"},
+        "governed_network_timeout_seconds": 28,
+        "limits": _LIMITS,
+        "cases": _CASES,
+        "target": {"site_key": "soa", "allowed_origins": ["https://example.test"]},
+        "artifact_root": str(tmp_path / "new-artifacts"),
+    }
+
+    evidence = execute(payload)
+
+    expected_error = [
+        {
+            "code": "phase20.aggregate_budget",
+            "message": "Aggregate time budget was exhausted before this case.",
+            "retryable": False,
+            "details": {},
+            "error_type": "N/A",
+        }
+    ]
+    assert [record["error"] for record in evidence["cases"]] == [
+        expected_error,
+        expected_error,
+    ]
+    assert helpers["_output_is_complete"](evidence, payload) is True
 
 
 @pytest.mark.parametrize("system", ["old", "new"])
@@ -2004,14 +2061,41 @@ def _profile_descriptor_dict(descriptor: object) -> dict[str, object]:
     return value
 
 
-def test_prerequisite_sync_base_and_fixed_old_profile_provenance() -> None:
+def test_prerequisite_sync_base_and_fixed_old_profile_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     compatibility = LIVE["HTTP_PROFILE_COMPATIBILITY"]
     legacy_main = inspect.getsource(LIVE["LEGACY_HELPERS"]["main"])
+    frozen = compatibility["FROZEN_OLD_HTTP_PROFILE_PROVENANCE"]
+    expected_refs = {
+        frozen.commit_sha: frozen.commit_sha,
+        **{
+            f"{frozen.commit_sha}:{getattr(frozen, path_field)}": getattr(
+                frozen, blob_field
+            )
+            for path_field, blob_field in (
+                ("identity_contract_path", "identity_contract_blob_sha"),
+                ("transport_path", "transport_blob_sha"),
+                ("gateway_path", "gateway_blob_sha"),
+                ("caller_path", "caller_blob_sha"),
+            )
+        },
+    }
+    observed_refs = []
+
+    def fixed_git_object(command, **_kwargs):
+        reference = command[-1]
+        observed_refs.append(reference)
+        return subprocess.CompletedProcess(
+            command, 0, f"{expected_refs[reference]}\n", ""
+        )
+
+    verify = LIVE["_verify_old_http_profile_provenance"]
+    monkeypatch.setattr(verify.__globals__["subprocess"], "run", fixed_git_object)
 
     assert LIVE["BASE_REVISION"] == "9450cb5968b3a24be50284a502c5adba696b20e6"
-    assert LIVE["_verify_old_http_profile_provenance"]() == asdict(
-        compatibility["FROZEN_OLD_HTTP_PROFILE_PROVENANCE"]
-    )
+    assert verify() == asdict(frozen)
+    assert observed_refs == list(expected_refs)
     assert dict(compatibility["FROZEN_OLD_GATEWAY_IDENTITY"]) == {
         "identity_id": "web-listening-runtime-v2",
         "product_token": "web-listening",
@@ -2029,6 +2113,20 @@ def test_prerequisite_sync_base_and_fixed_old_profile_provenance() -> None:
         "GovernedReadGateway",
     ):
         assert constructor in legacy_main
+
+
+def test_fixed_old_profile_provenance_fails_closed_when_git_object_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verify = LIVE["_verify_old_http_profile_provenance"]
+
+    def missing_object(command, **_kwargs):
+        raise subprocess.CalledProcessError(128, command)
+
+    monkeypatch.setattr(verify.__globals__["subprocess"], "run", missing_object)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        verify()
 
 
 def test_profile_failure_evidence_is_same_shaped_and_explicitly_unobserved() -> None:
