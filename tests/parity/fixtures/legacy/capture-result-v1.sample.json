@@ -1,0 +1,30 @@
+{
+  "site_key": "example-news",
+  "site_skill_id": "example-news-skill",
+  "site_skill_version": "1.0.0",
+  "site_skill_digest": "76bd33212578397c7b056b690ac316818ddc6294b4a14e560111e603fcc41ada",
+  "recipe_id": "news-http",
+  "run_id": "run-example-news-001",
+  "scope_id": "scope-example-news",
+  "schema_version": "capture-result.v1",
+  "request_id": "request-example-news-001",
+  "executor_id": "web_http",
+  "state": "succeeded",
+  "started_at": "2026-07-16T12:01:01Z",
+  "finished_at": "2026-07-16T12:01:02Z",
+  "final_url": "https://example.com/news",
+  "status_code": 200,
+  "content": {
+    "media_type": "text/html",
+    "text": "Example public page content.",
+    "artifact_path": "captures/example-news/page.html",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "metadata": {
+      "word_count": 4
+    }
+  },
+  "error": null,
+  "metadata": {
+    "elapsed_ms": 1000
+  }
+}
