@@ -1193,7 +1193,7 @@ def main() -> None:
             "retry": 0,
         },
     }
-    print(json.dumps(output, sort_keys=True), flush=True)
+    print(json.dumps(output), flush=True)
     if failed:
         raise SystemExit(1)
 
