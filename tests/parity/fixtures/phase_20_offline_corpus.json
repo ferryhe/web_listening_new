@@ -1,0 +1,653 @@
+{
+  "schema_version": "phase-20-offline-parity.v1",
+  "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+  "sources": [
+    {
+      "path": "docs/testing/fixtures/capture-result-v1.sample.json",
+      "snapshot_path": "legacy/capture-result-v1.sample.json",
+      "sha256_lf": "bf31d5bfb24a9f1ba27340d4331c1e52e5661585aa1f7071db74123d65d64231"
+    },
+    {
+      "path": "docs/testing/fixtures/access-rejection-error-v1.sample.json",
+      "snapshot_path": "legacy/access-rejection-error-v1.sample.json",
+      "sha256_lf": "88a077f68536241583e06d564c435cc7faf9d5c3731821e42a505b3d59e2c169"
+    }
+  ],
+  "normalization_policy": {
+    "ignored_fields": [
+      "identity.artifact_ids",
+      "identity.attempt_ids",
+      "identity.observation_ids",
+      "identity.run_id",
+      "timing.finished_at",
+      "timing.runtime_ms",
+      "timing.started_at"
+    ],
+    "normalized_fields": {
+      "tool_id": {
+        "web_http": "acquisition.web_http"
+      }
+    }
+  },
+  "cases": [
+    {
+      "case_id": "success-html",
+      "legacy_fixture": {
+        "source_path": "docs/testing/fixtures/capture-result-v1.sample.json",
+        "snapshot_path": "legacy/capture-result-v1.sample.json",
+        "sha256_lf": "bf31d5bfb24a9f1ba27340d4331c1e52e5661585aa1f7071db74123d65d64231",
+        "projection_kind": "capture-result.v1",
+        "field_sources": {
+          "artifact.availability": "N/A: capture-result.v1 has no Artifact contract",
+          "artifact.count": "N/A: capture-result.v1 has no Artifact contract",
+          "artifact.mime_types": "N/A: capture-result.v1 has no Artifact contract",
+          "artifact.sha256": "N/A: capture-result.v1 has no Artifact contract",
+          "artifact.size_bytes": "N/A: capture-result.v1 has no Artifact contract",
+          "attempt.availability": "N/A: capture-result.v1 has no Attempt contract",
+          "attempt.count": "N/A: capture-result.v1 has no Attempt contract",
+          "attempt.tool_ids": "N/A: capture-result.v1 has no Attempt contract",
+          "attempt.tool_versions": "N/A: capture-result.v1 has no Attempt contract",
+          "content.availability": "/content",
+          "content.sha256": "sha256(utf8:/content/text)",
+          "content.word_count": "/content/metadata/word_count",
+          "contract": "/schema_version",
+          "error.availability": "/error:null -> none",
+          "error.codes": "/error:null -> []",
+          "error.count": "/error:null -> 0",
+          "error.details": "/error:null -> []",
+          "error.error_types": "/error:null -> []",
+          "error.messages": "/error:null -> []",
+          "error.retryable": "/error:null -> []",
+          "http.final_url": "/final_url",
+          "http.mime_type": "/content/media_type",
+          "http.requested_url": "N/A: capture-result.v1 has no requested_url",
+          "http.status": "/status_code",
+          "manifest.artifact_count": "N/A: capture-result.v1 has no Result Manifest contract",
+          "manifest.availability": "N/A: capture-result.v1 has no Result Manifest contract",
+          "manifest.content_matches_observation": "N/A: capture-result.v1 has no Result Manifest or Observation relationship",
+          "manifest.links_match_artifact": "N/A: capture-result.v1 has no Result Manifest or Artifact relationship",
+          "manifest.mime_type": "N/A: capture-result.v1 has no Result Manifest contract",
+          "manifest.sha256": "N/A: capture-result.v1 has no Result Manifest contract",
+          "manifest.size_bytes": "N/A: capture-result.v1 has no Result Manifest contract",
+          "manifest.tool_id": "N/A: capture-result.v1 has no Result Manifest tool identity",
+          "manifest.tool_version": "N/A: capture-result.v1 has no Result Manifest tool version",
+          "observation.availability": "N/A: capture-result.v1 has no Observation contract",
+          "observation.content_matches_artifact": "N/A: capture-result.v1 has no persisted Observation content relationship",
+          "observation.count": "N/A: capture-result.v1 has no Observation contract",
+          "observation.links_match_artifact": "N/A: capture-result.v1 has no Observation or Artifact relationship",
+          "observation.stored_content_sha256": "N/A: capture-result.v1 has no persisted Observation content",
+          "observation.stored_content_size_bytes": "N/A: capture-result.v1 has no persisted Observation content",
+          "outcome": "/state:succeeded -> success",
+          "tool_id": "/executor_id -> normalization_policy.normalized_fields.tool_id exact mapping",
+          "usage.bytes_received": "N/A: capture-result.v1 has no request-byte Usage",
+          "usage.requests": "N/A: capture-result.v1 has no request-count Usage",
+          "usage.tool_attempts": "N/A: capture-result.v1 has no tool-attempt Usage"
+        },
+        "excluded_fields": {
+          "/content/sha256": "The fixture value is a declared placeholder and is not the SHA-256 of /content/text; the projection derives content.sha256 from the evidenced text bytes."
+        }
+      },
+      "input": {
+        "url": "https://example.com/news",
+        "body": "Example public page content."
+      },
+      "old_observed": {
+        "artifact": {
+          "availability": "N/A",
+          "count": "N/A",
+          "mime_types": "N/A",
+          "sha256": "N/A",
+          "size_bytes": "N/A"
+        },
+        "attempt": {
+          "availability": "N/A",
+          "count": "N/A",
+          "tool_ids": "N/A",
+          "tool_versions": "N/A"
+        },
+        "content": {
+          "availability": "present",
+          "sha256": "cd9f6b6f0e2eaed212131bc9691fcb784c14305eaac49ef5a1fc9e2c3b70417f",
+          "word_count": 4
+        },
+        "contract": "capture-result.v1",
+        "error": {
+          "availability": "none",
+          "codes": [],
+          "count": 0,
+          "details": [],
+          "error_types": [],
+          "messages": [],
+          "retryable": []
+        },
+        "http": {
+          "final_url": "https://example.com/news",
+          "mime_type": "text/html",
+          "requested_url": "N/A",
+          "status": 200
+        },
+        "manifest": {
+          "artifact_count": "N/A",
+          "availability": "N/A",
+          "content_matches_observation": "N/A",
+          "links_match_artifact": "N/A",
+          "mime_type": "N/A",
+          "sha256": "N/A",
+          "size_bytes": "N/A",
+          "tool_id": "N/A",
+          "tool_version": "N/A"
+        },
+        "observation": {
+          "availability": "N/A",
+          "content_matches_artifact": "N/A",
+          "count": "N/A",
+          "links_match_artifact": "N/A",
+          "stored_content_sha256": "N/A",
+          "stored_content_size_bytes": "N/A"
+        },
+        "outcome": "success",
+        "tool_id": "acquisition.web_http",
+        "usage": {
+          "bytes_received": "N/A",
+          "requests": "N/A",
+          "tool_attempts": "N/A"
+        }
+      },
+      "accepted_differences": {
+        "artifact.availability": {
+          "old": "N/A",
+          "new": "present",
+          "reason": "capture-result.v1 has no Artifact contract; the current Result persists one source Artifact."
+        },
+        "artifact.count": {
+          "old": "N/A",
+          "new": 1,
+          "reason": "capture-result.v1 has no Artifact count; the current Result links one persisted source Artifact."
+        },
+        "artifact.mime_types": {
+          "old": "N/A",
+          "new": [
+            "text/html"
+          ],
+          "reason": "capture-result.v1 has no Artifact MIME surface; the current Artifact MIME is read from persisted evidence."
+        },
+        "artifact.sha256": {
+          "old": "N/A",
+          "new": [
+            "cd9f6b6f0e2eaed212131bc9691fcb784c14305eaac49ef5a1fc9e2c3b70417f"
+          ],
+          "reason": "capture-result.v1 has no Artifact contract; the current Artifact digest is checked against stored content."
+        },
+        "artifact.size_bytes": {
+          "old": "N/A",
+          "new": [
+            28
+          ],
+          "reason": "capture-result.v1 has no Artifact size surface; the current Artifact size is checked against stored content."
+        },
+        "attempt.availability": {
+          "old": "N/A",
+          "new": "present",
+          "reason": "capture-result.v1 has no Attempt contract; the current Result records the acquisition Attempt."
+        },
+        "attempt.count": {
+          "old": "N/A",
+          "new": 1,
+          "reason": "capture-result.v1 has no Attempt count; the current Result records exactly one Attempt."
+        },
+        "attempt.tool_ids": {
+          "old": "N/A",
+          "new": [
+            "acquisition.web_http"
+          ],
+          "reason": "capture-result.v1 has no Attempt tool field; the current Attempt tool identity is fixed."
+        },
+        "attempt.tool_versions": {
+          "old": "N/A",
+          "new": [
+            "1.0.0"
+          ],
+          "reason": "capture-result.v1 has no Attempt version; the current Attempt version is fixed."
+        },
+        "contract": {
+          "old": "capture-result.v1",
+          "new": "web-listening-result.v1",
+          "reason": "The fixed legacy and current public contracts have different schema names."
+        },
+        "http.requested_url": {
+          "old": "N/A",
+          "new": "https://example.com/news",
+          "reason": "capture-result.v1 records only final_url; the current Manifest also records requested_url."
+        },
+        "manifest.availability": {
+          "old": "N/A",
+          "new": "present",
+          "reason": "capture-result.v1 has no Result Manifest contract."
+        },
+        "manifest.artifact_count": {
+          "old": "N/A",
+          "new": 1,
+          "reason": "capture-result.v1 has no Manifest Artifact collection; the current Manifest links one Artifact."
+        },
+        "manifest.content_matches_observation": {
+          "old": "N/A",
+          "new": true,
+          "reason": "Legacy has no persisted Observation relationship; current Manifest content must match the store readback."
+        },
+        "manifest.links_match_artifact": {
+          "old": "N/A",
+          "new": true,
+          "reason": "Legacy has no Manifest relationship; current Manifest Artifact identities must match Result evidence."
+        },
+        "manifest.mime_type": {
+          "old": "N/A",
+          "new": "text/html",
+          "reason": "capture-result.v1 has no Manifest MIME field; current Manifest MIME is fixed to persisted content evidence."
+        },
+        "manifest.sha256": {
+          "old": "N/A",
+          "new": "cd9f6b6f0e2eaed212131bc9691fcb784c14305eaac49ef5a1fc9e2c3b70417f",
+          "reason": "capture-result.v1 has no Manifest digest; current Manifest digest is checked against store readback."
+        },
+        "manifest.size_bytes": {
+          "old": "N/A",
+          "new": 28,
+          "reason": "capture-result.v1 has no Manifest size; current Manifest size is checked against store readback."
+        },
+        "manifest.tool_id": {
+          "old": "N/A",
+          "new": "acquisition.web_http",
+          "reason": "capture-result.v1 has no Manifest tool field; the current Manifest tool identity is fixed."
+        },
+        "manifest.tool_version": {
+          "old": "N/A",
+          "new": "1.0.0",
+          "reason": "capture-result.v1 has no Manifest version; the current Manifest tool version is fixed."
+        },
+        "observation.availability": {
+          "old": "N/A",
+          "new": "present",
+          "reason": "capture-result.v1 has no Observation contract."
+        },
+        "observation.content_matches_artifact": {
+          "old": "N/A",
+          "new": true,
+          "reason": "Legacy has no persisted Observation; current stored content digest, size, and MIME must match its Artifact."
+        },
+        "observation.count": {
+          "old": "N/A",
+          "new": 1,
+          "reason": "capture-result.v1 has no Observation count; the current ArtifactStore readback contains one Observation."
+        },
+        "observation.links_match_artifact": {
+          "old": "N/A",
+          "new": true,
+          "reason": "Legacy has no Observation relationship; current stored Observation identity must match Result Artifact evidence."
+        },
+        "observation.stored_content_sha256": {
+          "old": "N/A",
+          "new": [
+            "cd9f6b6f0e2eaed212131bc9691fcb784c14305eaac49ef5a1fc9e2c3b70417f"
+          ],
+          "reason": "Legacy has no persisted Observation bytes; the current digest is derived from ArtifactStore content readback."
+        },
+        "observation.stored_content_size_bytes": {
+          "old": "N/A",
+          "new": [
+            28
+          ],
+          "reason": "Legacy has no persisted Observation bytes; the current size is derived from ArtifactStore content readback."
+        },
+        "usage.bytes_received": {
+          "old": "N/A",
+          "new": 28,
+          "reason": "capture-result.v1 has no request-byte Usage; the current Result reports the evidenced 28-byte text body."
+        },
+        "usage.requests": {
+          "old": "N/A",
+          "new": 1,
+          "reason": "capture-result.v1 has no request-count Usage."
+        },
+        "usage.tool_attempts": {
+          "old": "N/A",
+          "new": 1,
+          "reason": "capture-result.v1 has no tool-attempt Usage."
+        }
+      }
+    },
+    {
+      "case_id": "robots-timeout",
+      "legacy_fixture": {
+        "source_path": "docs/testing/fixtures/access-rejection-error-v1.sample.json",
+        "snapshot_path": "legacy/access-rejection-error-v1.sample.json",
+        "sha256_lf": "88a077f68536241583e06d564c435cc7faf9d5c3731821e42a505b3d59e2c169",
+        "projection_kind": "access-rejection-error.v1",
+        "field_sources": {
+          "artifact.availability": "N/A: access-rejection-error.v1 has no Artifact contract",
+          "artifact.count": "N/A: access-rejection-error.v1 has no Artifact contract",
+          "artifact.mime_types": "N/A: access-rejection-error.v1 has no Artifact contract",
+          "artifact.sha256": "N/A: access-rejection-error.v1 has no Artifact contract",
+          "artifact.size_bytes": "N/A: access-rejection-error.v1 has no Artifact contract",
+          "attempt.availability": "N/A: access-rejection-error.v1 has no Attempt contract",
+          "attempt.count": "N/A: access-rejection-error.v1 has no Attempt contract",
+          "attempt.tool_ids": "N/A: access-rejection-error.v1 has no Attempt contract",
+          "attempt.tool_versions": "N/A: access-rejection-error.v1 has no Attempt contract",
+          "content.availability": "N/A: rejection fixture has no target content",
+          "content.sha256": "N/A: rejection fixture has no target content",
+          "content.word_count": "N/A: rejection fixture has no target content",
+          "contract": "/schema_version",
+          "error.availability": "/outcome:error -> present",
+          "error.codes": "/reason_code -> singleton list",
+          "error.count": "/reason_code -> 1",
+          "error.details": "N/A: access-rejection-error.v1 has no SafeError details surface",
+          "error.error_types": "N/A: access-rejection-error.v1 has no error_type surface",
+          "error.messages": "/message -> singleton list",
+          "error.retryable": "/retryable -> singleton list",
+          "http.final_url": "N/A: rejection fixture has no final target response",
+          "http.mime_type": "N/A: rejection fixture has no target MIME",
+          "http.requested_url": "/evidence/canonical_origin -> canonical origin URL",
+          "http.status": "N/A: rejection fixture has no target status",
+          "manifest.artifact_count": "N/A: access-rejection-error.v1 has no Result Manifest contract",
+          "manifest.availability": "N/A: access-rejection-error.v1 has no Result Manifest contract",
+          "manifest.content_matches_observation": "N/A: access-rejection-error.v1 has no Result Manifest or Observation relationship",
+          "manifest.links_match_artifact": "N/A: access-rejection-error.v1 has no Result Manifest or Artifact relationship",
+          "manifest.mime_type": "N/A: access-rejection-error.v1 has no Result Manifest MIME surface",
+          "manifest.sha256": "N/A: access-rejection-error.v1 has no Result Manifest digest surface",
+          "manifest.size_bytes": "N/A: access-rejection-error.v1 has no Result Manifest size surface",
+          "manifest.tool_id": "N/A: access-rejection-error.v1 has no Result Manifest tool identity",
+          "manifest.tool_version": "N/A: access-rejection-error.v1 has no Result Manifest tool version",
+          "observation.availability": "N/A: access-rejection-error.v1 has no Observation contract",
+          "observation.content_matches_artifact": "N/A: access-rejection-error.v1 has no persisted Observation content relationship",
+          "observation.count": "N/A: access-rejection-error.v1 has no Observation contract",
+          "observation.links_match_artifact": "N/A: access-rejection-error.v1 has no Observation or Artifact relationship",
+          "observation.stored_content_sha256": "N/A: access-rejection-error.v1 has no persisted Observation content",
+          "observation.stored_content_size_bytes": "N/A: access-rejection-error.v1 has no persisted Observation content",
+          "outcome": "/outcome:error -> failure",
+          "tool_id": "N/A: access-rejection-error.v1 has no executor or tool identity",
+          "usage.bytes_received": "N/A: access-rejection-error.v1 has no byte Usage",
+          "usage.requests": "N/A: access-rejection-error.v1 has no request Usage",
+          "usage.tool_attempts": "N/A: access-rejection-error.v1 has no tool-attempt Usage"
+        }
+      },
+      "input": {
+        "url": "https://example.com/"
+      },
+      "old_observed": {
+        "artifact": {
+          "availability": "N/A",
+          "count": "N/A",
+          "mime_types": "N/A",
+          "sha256": "N/A",
+          "size_bytes": "N/A"
+        },
+        "attempt": {
+          "availability": "N/A",
+          "count": "N/A",
+          "tool_ids": "N/A",
+          "tool_versions": "N/A"
+        },
+        "content": {
+          "availability": "N/A",
+          "sha256": "N/A",
+          "word_count": "N/A"
+        },
+        "contract": "access-rejection-error.v1",
+        "error": {
+          "availability": "present",
+          "codes": [
+            "robots.timeout"
+          ],
+          "count": 1,
+          "details": [
+            "N/A"
+          ],
+          "error_types": [
+            "N/A"
+          ],
+          "messages": [
+            "access failed closed while resolving robots policy"
+          ],
+          "retryable": [
+            true
+          ]
+        },
+        "http": {
+          "final_url": "N/A",
+          "mime_type": "N/A",
+          "requested_url": "https://example.com/",
+          "status": "N/A"
+        },
+        "manifest": {
+          "artifact_count": "N/A",
+          "availability": "N/A",
+          "content_matches_observation": "N/A",
+          "links_match_artifact": "N/A",
+          "mime_type": "N/A",
+          "sha256": "N/A",
+          "size_bytes": "N/A",
+          "tool_id": "N/A",
+          "tool_version": "N/A"
+        },
+        "observation": {
+          "availability": "N/A",
+          "content_matches_artifact": "N/A",
+          "count": "N/A",
+          "links_match_artifact": "N/A",
+          "stored_content_sha256": "N/A",
+          "stored_content_size_bytes": "N/A"
+        },
+        "outcome": "failure",
+        "tool_id": "N/A",
+        "usage": {
+          "bytes_received": "N/A",
+          "requests": "N/A",
+          "tool_attempts": "N/A"
+        }
+      },
+      "accepted_differences": {
+        "artifact.availability": {
+          "old": "N/A",
+          "new": "none",
+          "reason": "access-rejection-error.v1 has no Artifact contract; current failure evidence correctly persists no success Artifact."
+        },
+        "artifact.count": {
+          "old": "N/A",
+          "new": 0,
+          "reason": "The legacy rejection has no Artifact count; the current failed Result persists zero Artifacts."
+        },
+        "artifact.mime_types": {
+          "old": "N/A",
+          "new": [],
+          "reason": "The legacy rejection has no Artifact MIME surface; the current failed Result has no Artifact MIME values."
+        },
+        "artifact.sha256": {
+          "old": "N/A",
+          "new": [],
+          "reason": "The legacy rejection has no Artifact digest surface; the current failed Result has no Artifact digests."
+        },
+        "artifact.size_bytes": {
+          "old": "N/A",
+          "new": [],
+          "reason": "The legacy rejection has no Artifact size surface; the current failed Result has no Artifact sizes."
+        },
+        "attempt.availability": {
+          "old": "N/A",
+          "new": "present",
+          "reason": "The legacy rejection has no Attempt contract; the current Result records the failed acquisition Attempt."
+        },
+        "attempt.count": {
+          "old": "N/A",
+          "new": 1,
+          "reason": "The legacy rejection has no Attempt count; the current Result records exactly one failed Attempt."
+        },
+        "attempt.tool_ids": {
+          "old": "N/A",
+          "new": [
+            "acquisition.web_http"
+          ],
+          "reason": "The legacy rejection has no Attempt tool identity; the current failed Attempt tool is fixed."
+        },
+        "attempt.tool_versions": {
+          "old": "N/A",
+          "new": [
+            "1.0.0"
+          ],
+          "reason": "The legacy rejection has no Attempt tool version; the current failed Attempt version is fixed."
+        },
+        "contract": {
+          "old": "access-rejection-error.v1",
+          "new": "web-listening-result.v1",
+          "reason": "The fixed legacy rejection and current Result have different schema names."
+        },
+        "http.final_url": {
+          "old": "N/A",
+          "new": null,
+          "reason": "The legacy rejection fixture has no final target response; current failure Manifest records null."
+        },
+        "http.mime_type": {
+          "old": "N/A",
+          "new": null,
+          "reason": "The legacy rejection fixture has no target MIME; current failure Manifest records null."
+        },
+        "http.status": {
+          "old": "N/A",
+          "new": null,
+          "reason": "The legacy rejection fixture has no target status; current failure Manifest records null."
+        },
+        "error.messages": {
+          "old": [
+            "access failed closed while resolving robots policy"
+          ],
+          "new": [
+            "Acquisition did not complete."
+          ],
+          "reason": "The fixed legacy rejection and current SafeError expose different exact public messages for the same robots.timeout code."
+        },
+        "error.details": {
+          "old": [
+            "N/A"
+          ],
+          "new": [
+            {}
+          ],
+          "reason": "The legacy rejection contract has no SafeError details surface; the current SafeError exposes an exact empty details object."
+        },
+        "error.retryable": {
+          "old": [
+            true
+          ],
+          "new": [
+            "N/A"
+          ],
+          "reason": "The fixed legacy rejection declares retryable=true; the current SafeError contract has no retryable field."
+        },
+        "manifest.availability": {
+          "old": "N/A",
+          "new": "present",
+          "reason": "access-rejection-error.v1 has no Result Manifest contract."
+        },
+        "manifest.artifact_count": {
+          "old": "N/A",
+          "new": 0,
+          "reason": "The legacy rejection has no Manifest Artifact collection; the current failed Manifest links zero Artifacts."
+        },
+        "manifest.links_match_artifact": {
+          "old": "N/A",
+          "new": true,
+          "reason": "The legacy rejection has no Manifest relationship; the current empty Manifest and Result Artifact collections agree."
+        },
+        "manifest.mime_type": {
+          "old": "N/A",
+          "new": null,
+          "reason": "The legacy rejection has no Manifest MIME; the current failure Manifest records null."
+        },
+        "manifest.sha256": {
+          "old": "N/A",
+          "new": null,
+          "reason": "The legacy rejection has no Manifest digest; the current failure Manifest records null."
+        },
+        "manifest.size_bytes": {
+          "old": "N/A",
+          "new": null,
+          "reason": "The legacy rejection has no Manifest size; the current failure Manifest records null."
+        },
+        "manifest.tool_id": {
+          "old": "N/A",
+          "new": "acquisition.web_http",
+          "reason": "The legacy rejection has no Manifest tool identity; the current failure Manifest records the governed tool."
+        },
+        "manifest.tool_version": {
+          "old": "N/A",
+          "new": "1.0.0",
+          "reason": "The legacy rejection has no Manifest tool version; the current failure Manifest records the governed tool version."
+        },
+        "observation.availability": {
+          "old": "N/A",
+          "new": "none",
+          "reason": "access-rejection-error.v1 has no Observation contract; current rejection creates none."
+        },
+        "observation.content_matches_artifact": {
+          "old": "N/A",
+          "new": true,
+          "reason": "The legacy rejection has no persisted relationship; current empty Observation and Artifact collections are internally consistent."
+        },
+        "observation.count": {
+          "old": "N/A",
+          "new": 0,
+          "reason": "The legacy rejection has no Observation count; the current failed run persists zero Observations."
+        },
+        "observation.links_match_artifact": {
+          "old": "N/A",
+          "new": true,
+          "reason": "The legacy rejection has no identity relationship; current empty Observation and Artifact collections agree."
+        },
+        "observation.stored_content_sha256": {
+          "old": "N/A",
+          "new": [],
+          "reason": "The legacy rejection has no persisted content digest; the current failed run has no stored content."
+        },
+        "observation.stored_content_size_bytes": {
+          "old": "N/A",
+          "new": [],
+          "reason": "The legacy rejection has no persisted content size; the current failed run has no stored content."
+        },
+        "tool_id": {
+          "old": "N/A",
+          "new": "acquisition.web_http",
+          "reason": "access-rejection-error.v1 has no executor identity; the current failed Attempt records the governed acquisition tool."
+        },
+        "usage.bytes_received": {
+          "old": "N/A",
+          "new": 0,
+          "reason": "access-rejection-error.v1 has no byte Usage; current rejection reports zero target bytes."
+        },
+        "usage.requests": {
+          "old": "N/A",
+          "new": 1,
+          "reason": "access-rejection-error.v1 has no request-count Usage."
+        },
+        "usage.tool_attempts": {
+          "old": "N/A",
+          "new": 1,
+          "reason": "access-rejection-error.v1 has no tool-attempt Usage."
+        }
+      }
+    }
+  ],
+  "rollback_drill": {
+    "releases": {
+      "old": {
+        "revision": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "contract": "pass",
+        "health": "pass"
+      },
+      "new": {
+        "revision": "4c3f1bef48452b4e258718e0f7588f264d597474+phase20",
+        "contract": "pass",
+        "health": "pass"
+      }
+    },
+    "new_post_switch_health": "fail",
+    "retain_evidence": true
+  }
+}

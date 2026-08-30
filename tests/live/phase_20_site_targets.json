@@ -1,0 +1,80 @@
+{
+  "schema_version": "phase-20-site-targets.v1",
+  "source_catalog_path": "tests/live/catalog/dev_test_sites.json",
+  "source_catalog_sha256": "B13747A4516810BED5AB5FF164EFC3FD9F5F1C91B51FF3DCE5708A23724A0E6E",
+  "source_catalog_sha256_basis": "base Git blob raw bytes (LF); checkout CRLF is canonicalized to LF before verification",
+  "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+  "network_limits_per_system_per_site": {
+    "max_targets": 2,
+    "max_total_requests": 8,
+    "max_total_response_bytes": 4194304,
+    "timeout_seconds": 30,
+    "concurrency": 1,
+    "retry": 0
+  },
+  "targets": [
+    {
+      "site_key": "soa",
+      "monitor_url": "https://www.soa.org/",
+      "document_url": "https://www.soa.org/publications/publications-landing/",
+      "allowed_origins": [
+        "https://www.soa.org"
+      ],
+      "historical_expectation": "dev_fixture",
+      "thresholds": {
+        "monitor_min_words": 150,
+        "document_min_words": 150,
+        "document_min_links": 1
+      },
+      "site_skill_digest": "sha256:889175f428f227000aeacfae1ebfda14704a9d469088c02b4a8745bfb732caf2",
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/dev_test_sites.json",
+        "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+        "old_site_key": "soa"
+      }
+    },
+    {
+      "site_key": "cas",
+      "monitor_url": "https://www.casact.org/",
+      "document_url": "https://www.casact.org/about/governance/annual-reports",
+      "allowed_origins": [
+        "https://www.casact.org"
+      ],
+      "historical_expectation": "dev_fixture",
+      "thresholds": {
+        "monitor_min_words": 150,
+        "document_min_words": 50,
+        "document_min_links": 5
+      },
+      "site_skill_digest": "sha256:95cd0d9bd086990398e5caba2a0c76010cea2618b91d1568e7852451980a10ee",
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/dev_test_sites.json",
+        "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+        "old_site_key": "cas"
+      }
+    },
+    {
+      "site_key": "iaa",
+      "monitor_url": "https://actuaries.org/",
+      "document_url": "https://actuaries.org/annual-reports/",
+      "allowed_origins": [
+        "https://actuaries.org"
+      ],
+      "historical_expectation": "dev_fixture",
+      "thresholds": {
+        "monitor_min_words": 150,
+        "document_min_words": 80,
+        "document_min_links": 5
+      },
+      "site_skill_digest": "sha256:bae6b907301530149a7392e1a3ed4b59a472dbf776bb740cb67ea549769023fe",
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/dev_test_sites.json",
+        "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+        "old_site_key": "iaa"
+      }
+    }
+  ]
+}
