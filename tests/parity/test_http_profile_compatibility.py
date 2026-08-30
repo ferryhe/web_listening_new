@@ -278,6 +278,23 @@ def test_new_authority_mapping_drift_is_a_blocker(
     assert result.code == "profile.new_authority_mapping_drift"
 
 
+def test_old_authority_mapping_order_drift_is_a_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    items = tuple(FROZEN_OLD_HTTP_REQUEST_PROFILE.items())
+    changed_authority = _mapping((items[1], items[0], *items[2:]))
+    monkeypatch.setattr(
+        compatibility,
+        "FROZEN_OLD_HTTP_REQUEST_PROFILE",
+        changed_authority,
+    )
+
+    result = _classify(old=describe_http_profile(changed_authority))
+
+    assert result.kind is HttpProfileCompatibilityKind.BLOCKER
+    assert result.code == "profile.old_authority_mapping_drift"
+
+
 def test_equal_profile_input_cannot_bypass_fixed_old_facts() -> None:
     new_descriptor = describe_http_profile(WEB_HTTP_REQUEST_PROFILE)
 

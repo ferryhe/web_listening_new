@@ -249,6 +249,12 @@ def classify_http_profile_compatibility(
         return _blocker(
             "profile.old_identity_recipe_mismatch", old_profile, new_profile
         )
+    if tuple(FROZEN_OLD_HTTP_REQUEST_PROFILE) != _PROFILE_FIELD_ORDER:
+        return _blocker(
+            "profile.old_authority_mapping_drift",
+            old_profile,
+            new_profile,
+        )
     authoritative_old = describe_http_profile(FROZEN_OLD_HTTP_REQUEST_PROFILE)
     if (
         FROZEN_OLD_HTTP_REQUEST_PROFILE_SHA256
