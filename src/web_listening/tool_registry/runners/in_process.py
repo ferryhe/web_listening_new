@@ -8,12 +8,14 @@ import hashlib
 import http.client
 import io
 import ipaddress
+import json
 import re
 import socket
 import ssl
 import threading
 import time
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Callable, Mapping, NoReturn, Protocol
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
@@ -23,7 +25,23 @@ from web_listening.request.scope import canonicalize_url
 from web_listening.request.validate import CompiledAccessPolicy, compile_access_policy
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
-_USER_AGENT = "web-listening/0.1"
+WEB_HTTP_REQUEST_PROFILE: Mapping[str, str] = MappingProxyType(
+    {
+        "accept_encoding": "identity",
+        "connection": "close",
+        "method": "GET",
+        "user_agent": "web-listening/0.1",
+    }
+)
+_WEB_HTTP_REQUEST_PROFILE_CANONICAL = json.dumps(
+    dict(WEB_HTTP_REQUEST_PROFILE),
+    ensure_ascii=True,
+    separators=(",", ":"),
+    sort_keys=True,
+).encode("utf-8")
+WEB_HTTP_REQUEST_PROFILE_SHA256 = hashlib.sha256(
+    _WEB_HTTP_REQUEST_PROFILE_CANONICAL
+).hexdigest()
 _MEDIA_TYPE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
 _MAX_CONTENT_LENGTH = (1 << 63) - 1
 _ROBOTS_NETWORK_FAILURE_CODES = {
@@ -517,12 +535,17 @@ class PinnedHttpTransport:
             if parsed.query:
                 target += f"?{parsed.query}"
             connection.putrequest(
-                "GET", target, skip_host=True, skip_accept_encoding=True
+                WEB_HTTP_REQUEST_PROFILE["method"],
+                target,
+                skip_host=True,
+                skip_accept_encoding=True,
             )
             connection.putheader("Host", _host_header(host, port, parsed.scheme))
-            connection.putheader("User-Agent", _USER_AGENT)
-            connection.putheader("Accept-Encoding", "identity")
-            connection.putheader("Connection", "close")
+            connection.putheader("User-Agent", WEB_HTTP_REQUEST_PROFILE["user_agent"])
+            connection.putheader(
+                "Accept-Encoding", WEB_HTTP_REQUEST_PROFILE["accept_encoding"]
+            )
+            connection.putheader("Connection", WEB_HTTP_REQUEST_PROFILE["connection"])
             deadline.apply(raw)
             connection.endheaders()
             deadline.remaining()
@@ -654,7 +677,9 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
             self._robots[origin] = policy
         allowed = policy.code == "robots.absent" or (
             policy.parser is not None
-            and policy.parser.can_fetch(_USER_AGENT, target_url)
+            and policy.parser.can_fetch(
+                WEB_HTTP_REQUEST_PROFILE["user_agent"], target_url
+            )
         )
         code = "robots.allowed" if allowed else policy.code
         if policy.parser is not None and not allowed:

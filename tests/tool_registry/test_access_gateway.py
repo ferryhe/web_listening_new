@@ -22,6 +22,8 @@ import pytest
 from web_listening.request.model import Budgets, ContentType, Request, Scope
 from web_listening.tool_registry.runners import in_process as in_process_runner
 from web_listening.tool_registry.runners.in_process import (
+    WEB_HTTP_REQUEST_PROFILE,
+    WEB_HTTP_REQUEST_PROFILE_SHA256,
     GatewayFailure,
     GovernedAccessGateway,
     PinnedHttpTransport,
@@ -206,10 +208,24 @@ class RecordingConnection:
         self.closed = 0
         self.timeouts: list[float] = []
         self.sock = self
+        self.request: tuple[tuple[object, ...], dict[str, object]] | None = None
+        self.request_headers: list[tuple[object, ...]] = []
 
     def settimeout(self, timeout: float) -> None:
         """Record the response-body socket timeout."""
         self.timeouts.append(timeout)
+
+    def putrequest(self, *args: object, **kwargs: object) -> None:
+        self.request = (args, kwargs)
+
+    def putheader(self, *args: object) -> None:
+        self.request_headers.append(args)
+
+    def endheaders(self) -> None:
+        return None
+
+    def getresponse(self) -> RecordingHttpResponse:
+        return RecordingHttpResponse(b"")
 
     def close(self) -> None:
         """Record wrapper-owned connection cleanup."""
@@ -737,6 +753,115 @@ def test_resolver_is_bounded_by_the_remaining_runtime() -> None:
         and not item.allowed
         for item in failure.evidence.decisions
     )
+
+
+def test_web_http_request_profile_is_read_only_canonical_and_secret_free() -> None:
+    """The built-in wire identity is stable data without target-specific fields."""
+    expected = {
+        "accept_encoding": "identity",
+        "connection": "close",
+        "method": "GET",
+        "user_agent": "web-listening/0.1",
+    }
+    expected_canonical = (
+        b'{"accept_encoding":"identity","connection":"close","method":"GET",'
+        b'"user_agent":"web-listening/0.1"}'
+    )
+
+    assert tuple(WEB_HTTP_REQUEST_PROFILE.items()) == tuple(expected.items())
+    canonical = json.dumps(
+        expected, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    assert canonical == expected_canonical
+    assert WEB_HTTP_REQUEST_PROFILE_SHA256 == hashlib.sha256(canonical).hexdigest()
+    assert WEB_HTTP_REQUEST_PROFILE_SHA256 == (
+        "14450398cbe8c3226505fad035a421c1c3b8a50e820c78b02d22a39888855377"
+    )
+    assert not {
+        "url",
+        "host",
+        "ip",
+        "response_headers",
+        "authorization",
+        "cookie",
+    }.intersection(WEB_HTTP_REQUEST_PROFILE)
+    with pytest.raises(TypeError):
+        WEB_HTTP_REQUEST_PROFILE["method"] = "POST"  # type: ignore[index]
+
+
+def test_pinned_transport_writes_every_profile_field_and_computes_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The actual request line and fixed headers come from the public profile."""
+    raw = PrivatePeerSocket()
+    monkeypatch.setattr(raw, "getpeername", lambda: (PUBLIC_IP, 8080))
+    monkeypatch.setattr(
+        in_process_runner.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: raw,
+    )
+    connections: list[RecordingConnection] = []
+
+    def connection_factory(
+        _host: str, _port: int, *, timeout: float
+    ) -> RecordingConnection:
+        connection = RecordingConnection()
+        connection.timeouts.append(timeout)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(
+        in_process_runner.http.client,
+        "HTTPConnection",
+        connection_factory,
+    )
+
+    response = PinnedHttpTransport().send(
+        "http://example.com:8080/report?view=full",
+        timeout=30,
+        addresses=(PUBLIC_IP,),
+    )
+    response.close()
+
+    connection = connections[0]
+    assert connection.request == (
+        (WEB_HTTP_REQUEST_PROFILE["method"], "/report?view=full"),
+        {"skip_host": True, "skip_accept_encoding": True},
+    )
+    assert connection.request_headers == [
+        ("Host", "example.com:8080"),
+        ("User-Agent", WEB_HTTP_REQUEST_PROFILE["user_agent"]),
+        ("Accept-Encoding", WEB_HTTP_REQUEST_PROFILE["accept_encoding"]),
+        ("Connection", WEB_HTTP_REQUEST_PROFILE["connection"]),
+    ]
+    assert "host" not in WEB_HTTP_REQUEST_PROFILE
+    assert "headers" not in inspect.signature(PinnedHttpTransport.send).parameters
+    assert "request_profile" not in inspect.signature(PinnedHttpTransport).parameters
+
+
+def test_robots_evaluation_uses_the_authoritative_user_agent() -> None:
+    """Robots and the outbound User-Agent cannot drift independently."""
+    robots_product_token = WEB_HTTP_REQUEST_PROFILE["user_agent"].split("/", 1)[0]
+    robots_body = (
+        f"User-agent: {robots_product_token}\n"
+        "Disallow: /private\n"
+        "User-agent: *\n"
+        "Allow: /\n"
+    ).encode("ascii")
+    robots = FakeResponse(200, robots_body, Content_Type="text/plain")
+    transport = FakeTransport({"https://example.com/robots.txt": [robots]})
+
+    failure = failure_code(
+        lambda: gateway(
+            transport,
+            request_for("https://example.com/private", paths=("/private",)),
+        ).read("https://example.com/private")
+    )
+
+    assert failure.code == "robots.disallowed"
+    assert [item[0] for item in transport.requests] == [
+        "https://example.com/robots.txt"
+    ]
 
 
 def test_pinned_transport_checks_peer_before_http_application_bytes(
