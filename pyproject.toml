@@ -23,7 +23,7 @@ mcp = [
 ]
 dev = [
     "black>=24.0",
-    "isort>=5.13",
+    "isort>=5.13,<9",
     "pylint>=3.0",
     "pytest>=8.0",
 ]
