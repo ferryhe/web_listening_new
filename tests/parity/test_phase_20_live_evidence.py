@@ -10,8 +10,10 @@ import inspect
 import json
 import runpy
 import subprocess
+import sys
 from copy import deepcopy
 from dataclasses import asdict
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2059,6 +2061,371 @@ def _profile_descriptor_dict(descriptor: object) -> dict[str, object]:
     value = asdict(descriptor)
     value["fields"] = [list(item) for item in value["fields"]]
     return value
+
+
+def _legacy_child_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    child_failure: bool,
+) -> dict[str, object]:
+    legacy = LIVE["LEGACY_HELPERS"]
+    compatibility = LIVE["HTTP_PROFILE_COMPATIBILITY"]
+    fingerprint = {
+        "python": {"implementation": "cpython", "major": 3, "minor": 12},
+        "imports": {},
+    }
+    payload = {
+        "old_commit": LIVE["OLD_COMMIT"],
+        "environment": {"fingerprint": fingerprint, "verification": "matched"},
+        "governed_network_timeout_seconds": LIVE["_LEGACY_NETWORK_TIMEOUT_SECONDS"],
+        "limits": _LIMITS,
+        "cases": _CASES,
+        "allowed_origins": ["https://example.test"],
+        "authority_sha256": "a" * 64,
+        "http_profile": {
+            "provenance": asdict(compatibility["FROZEN_OLD_HTTP_PROFILE_PROVENANCE"]),
+            "identity": dict(compatibility["FROZEN_OLD_GATEWAY_IDENTITY"]),
+        },
+    }
+
+    class AccessRejectedError(Exception):
+        """Offline child access failure."""
+
+    class GovernedReadGateway:
+        """Minimal governed-read seam that exercises the real probe main."""
+
+        def __init__(self, gateway: object, *, max_body_bytes: int) -> None:
+            self.gateway = gateway
+            self.max_body_bytes = max_body_bytes
+
+        def read(self, url: str, *, max_body_bytes: int) -> object:
+            del max_body_bytes
+            identity = self.gateway.config.identity
+            self.gateway.transport.request(
+                url,
+                user_agent=identity.user_agent,
+                identity_sha256=identity.identity_sha256,
+            )
+            if child_failure:
+                raise AccessRejectedError("offline child failure")
+            body = b"<html><body>offline profile evidence</body></html>"
+            return SimpleNamespace(
+                access_decision=SimpleNamespace(redirect_hops=[]),
+                wire_bytes=len(body),
+                body=body,
+                final_url=url,
+                status_code=200,
+                content_type="text/html",
+                sha256="b" * 64,
+            )
+
+        def close(self) -> None:
+            return None
+
+    fake_modules = {
+        "web_listening.blocks.access_gateway": SimpleNamespace(
+            AccessGateway=lambda config, *, transport: SimpleNamespace(
+                config=config, transport=transport
+            ),
+            AccessGatewayConfig=SimpleNamespace,
+        ),
+        "web_listening.blocks.governed_read": SimpleNamespace(
+            ROLLBACK_REQUIRED_READ_ERRORS=(RuntimeError,),
+            AccessRejectedError=AccessRejectedError,
+            GovernedReadGateway=GovernedReadGateway,
+            access_rejection_payload=lambda _exc: {
+                "error_code": "offline.denied",
+                "error_type": "AccessRejectedError",
+            },
+            governed_read_failure_payload=lambda _exc: {
+                "error_code": "offline.failure",
+                "error_type": "RuntimeError",
+            },
+        ),
+        "web_listening.blocks.site_diagnostic": SimpleNamespace(
+            SafePinnedTransport=lambda **_kwargs: SimpleNamespace(
+                request=lambda url, **_request_kwargs: {"url": url}
+            ),
+            normalize_http_url=lambda url: (url, "https://example.test"),
+        ),
+        "web_listening.contracts.site_diagnostic": SimpleNamespace(
+            DiagnosticIdentity=SimpleNamespace,
+        ),
+    }
+    for name, value in fake_modules.items():
+        monkeypatch.setitem(sys.modules, name, value)
+    monkeypatch.setitem(
+        legacy["main"].__globals__, "_environment_fingerprint", lambda: fingerprint
+    )
+    monkeypatch.setattr(legacy["sys"], "stdin", StringIO(json.dumps(payload)))
+
+    if child_failure:
+        with pytest.raises(SystemExit, match="1"):
+            legacy["main"]()
+    else:
+        legacy["main"]()
+    child_stdout = capsys.readouterr().out
+    child_return_code = 1 if child_failure else 0
+    monkeypatch.setattr(
+        legacy["subprocess"],
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["python", "legacy_live_probe.py"],
+            child_return_code,
+            child_stdout,
+            "",
+        ),
+    )
+    return legacy["_run_process"](
+        ["python", "legacy_live_probe.py"],
+        ROOT,
+        {},
+        payload,
+        OLD_INVOCATION("<pytest-temp>/old-9fe9ea5"),
+    )
+
+
+def _fixed_new_profile_result() -> dict[str, object]:
+    compatibility = LIVE["HTTP_PROFILE_COMPATIBILITY"]
+    descriptor = _profile_descriptor_dict(
+        compatibility["describe_http_profile"](
+            LIVE["NEW_HELPERS"]["WEB_HTTP_REQUEST_PROFILE"]
+        )
+    )
+    profile = LIVE["_http_profile_system_evidence"](
+        _CASES,
+        provenance="N/A",
+        identity="N/A",
+        authority=deepcopy(descriptor),
+        observations=[[deepcopy(descriptor)], [deepcopy(descriptor)]],
+    )
+    return {
+        "http_profile": profile,
+        "cases": [{"usage": {"transport_requests": 1}} for _case in _CASES],
+    }
+
+
+@pytest.mark.parametrize("child_failure", [False, True], ids=["success", "failure"])
+def test_legacy_child_json_round_trip_preserves_strict_profile_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    child_failure: bool,
+) -> None:
+    compatibility = LIVE["HTTP_PROFILE_COMPATIBILITY"]
+    old = _legacy_child_round_trip(monkeypatch, capsys, child_failure=child_failure)
+
+    rows, blockers = LIVE["_http_profile_compatibility_gate"](
+        old, _fixed_new_profile_result(), _CASES
+    )
+
+    assert tuple(old["http_profile"]["provenance"]) == tuple(
+        compatibility["OldHttpProfileProvenance"].__dataclass_fields__
+    )
+    assert tuple(old["http_profile"]["identity"]) == tuple(
+        compatibility["FROZEN_OLD_GATEWAY_IDENTITY"]
+    )
+    assert blockers == []
+    assert {row["kind"] for row in rows} == {"explained_fixed_difference"}
+    assert {row["code"] for row in rows} == {"profile.fixed_old_accept_encoding"}
+
+
+def test_legacy_child_identity_order_survives_after_provenance_is_restored(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    compatibility = LIVE["HTTP_PROFILE_COMPATIBILITY"]
+    old = _legacy_child_round_trip(monkeypatch, capsys, child_failure=False)
+    old["http_profile"]["provenance"] = asdict(
+        compatibility["FROZEN_OLD_HTTP_PROFILE_PROVENANCE"]
+    )
+
+    rows, blockers = LIVE["_http_profile_compatibility_gate"](
+        old, _fixed_new_profile_result(), _CASES
+    )
+
+    assert {row["code"] for row in rows} == {"profile.fixed_old_accept_encoding"}
+    assert blockers == []
+
+
+@pytest.mark.parametrize(
+    ("mapping_name", "expected_code"),
+    [
+        ("provenance", "profile.old_provenance_mismatch"),
+        ("identity", "profile.old_identity_recipe_mismatch"),
+    ],
+)
+@pytest.mark.parametrize("drift", ["missing", "extra", "order", "value", "digest"])
+def test_legacy_child_profile_mapping_drift_remains_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mapping_name: str,
+    expected_code: str,
+    drift: str,
+) -> None:
+    old = _legacy_child_round_trip(monkeypatch, capsys, child_failure=False)
+    mapping = old["http_profile"][mapping_name]
+    if drift == "missing":
+        mapping.pop(next(iter(mapping)))
+    elif drift == "extra":
+        mapping["unexpected"] = "drift"
+    elif drift == "order":
+        old["http_profile"][mapping_name] = dict(reversed(tuple(mapping.items())))
+    elif drift == "value":
+        mapping["repository" if mapping_name == "provenance" else "user_agent"] = (
+            "drift"
+        )
+    else:
+        mapping[
+            "transport_blob_sha" if mapping_name == "provenance" else "identity_sha256"
+        ] = "0" * (40 if mapping_name == "provenance" else 64)
+
+    rows, blockers = LIVE["_http_profile_compatibility_gate"](
+        old, _fixed_new_profile_result(), _CASES
+    )
+
+    assert blockers == ["monitor:http_profile", "document:http_profile"]
+    assert {row["kind"] for row in rows} == {"blocker"}
+    assert {row["code"] for row in rows} == {expected_code}
+
+
+def _drift_profile_descriptor(descriptor: dict[str, object], drift: str) -> None:
+    if drift == "missing":
+        descriptor.pop("fields")
+    elif drift == "extra":
+        descriptor["unexpected"] = "drift"
+    elif drift == "order":
+        descriptor["fields"] = list(reversed(descriptor["fields"]))
+    elif drift == "value":
+        descriptor["fields"][0][1] = "drift"
+    else:
+        descriptor["sha256"] = "0" * 64
+
+
+@pytest.mark.parametrize("system", ["old", "new"])
+@pytest.mark.parametrize("target", ["authority", "profile"])
+@pytest.mark.parametrize("drift", ["missing", "extra", "order", "value", "digest"])
+def test_profile_authority_and_descriptor_drift_remain_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    system: str,
+    target: str,
+    drift: str,
+) -> None:
+    old = _legacy_child_round_trip(monkeypatch, capsys, child_failure=False)
+    new = _fixed_new_profile_result()
+    profile = (old if system == "old" else new)["http_profile"]
+    descriptors = [profile["authority"]]
+    if target == "profile":
+        for row in profile["cases"]:
+            descriptors.extend(row["observations"])
+            descriptors.append(row["collapsed"])
+    seen: set[int] = set()
+    for descriptor in descriptors:
+        if id(descriptor) not in seen:
+            seen.add(id(descriptor))
+            _drift_profile_descriptor(descriptor, drift)
+
+    rows, blockers = LIVE["_http_profile_compatibility_gate"](old, new, _CASES)
+
+    assert blockers == ["monitor:http_profile", "document:http_profile"]
+    assert {row["kind"] for row in rows} == {"blocker"}
+    if target == "profile":
+        suffix = "sha256_drift" if drift == "digest" else "fields_drift"
+        assert {row["code"] for row in rows} == {f"profile.{system}_{suffix}"}
+
+
+def test_legacy_setup_failure_keeps_strict_profile_shape_before_child_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_old = LIVE["_run_old"]
+    monkeypatch.setitem(
+        run_old.__globals__,
+        "_verify_old_http_profile_provenance",
+        lambda: (_ for _ in ()).throw(OSError("offline provenance setup")),
+    )
+    monkeypatch.setitem(
+        run_old.__globals__,
+        "_run_legacy_process",
+        lambda *_args, **_kwargs: pytest.fail("legacy child must not start"),
+    )
+
+    evidence = run_old(
+        tmp_path,
+        {"allowed_origins": ["https://example.test"]},
+        _CASES,
+        _LIMITS,
+        {
+            "window_digest": "window-digest",
+            "candidate_identity": _fixture_candidate_identity(tmp_path),
+        },
+    )
+
+    assert evidence["environment"]["verification"] == "setup-failure"
+    assert evidence["process_outcome"] == "not-started"
+    assert evidence["process_return_code"] == "N/A"
+    assert evidence["http_profile"] == LIVE["LEGACY_HELPERS"][
+        "_empty_http_profile_evidence"
+    ](_CASES)
+    assert [record["error"]["error_code"] for record in evidence["cases"]] == [
+        "legacy.setup_failure",
+        "legacy.setup_failure",
+    ]
+    rows, blockers = LIVE["_http_profile_compatibility_gate"](
+        evidence, _fixed_new_profile_result(), _CASES
+    )
+    assert blockers == ["monitor:http_profile", "document:http_profile"]
+    assert {row["kind"] for row in rows} == {"blocker"}
+    assert {row["code"] for row in rows} == {"profile.old_provenance_mismatch"}
+
+
+def test_legacy_spawn_and_boundary_failures_keep_strict_profile_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = LIVE["LEGACY_HELPERS"]
+    invocation = OLD_INVOCATION("<pytest-temp>/old-9fe9ea5")
+    payload = {
+        "old_commit": LIVE["OLD_COMMIT"],
+        "environment": {"verification": "matched"},
+        "governed_network_timeout_seconds": LIVE["_LEGACY_NETWORK_TIMEOUT_SECONDS"],
+        "limits": _LIMITS,
+        "cases": _CASES,
+    }
+    monkeypatch.setattr(
+        legacy["subprocess"],
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline spawn")),
+    )
+    spawn = legacy["_run_process"](
+        ["python", "legacy_live_probe.py"], ROOT, {}, payload, invocation
+    )
+    context = {
+        "system": "old",
+        "old_commit": payload["old_commit"],
+        "environment": payload["environment"],
+        "governed_network_timeout_seconds": payload["governed_network_timeout_seconds"],
+        "limits": payload["limits"],
+        "cases": payload["cases"],
+        "invocation": invocation,
+    }
+    boundary = legacy["_call_boundary"](
+        lambda: (_ for _ in ()).throw(RuntimeError("offline boundary")), context
+    )
+
+    assert set(spawn) == set(boundary)
+    assert (
+        spawn["http_profile"]
+        == boundary["http_profile"]
+        == legacy["_empty_http_profile_evidence"](_CASES)
+    )
+    for failure in (spawn, boundary):
+        rows, blockers = LIVE["_http_profile_compatibility_gate"](
+            failure, _fixed_new_profile_result(), _CASES
+        )
+        assert blockers == ["monitor:http_profile", "document:http_profile"]
+        assert {row["kind"] for row in rows} == {"blocker"}
+        assert {row["code"] for row in rows} == {"profile.old_provenance_mismatch"}
 
 
 def test_prerequisite_sync_base_and_fixed_old_profile_provenance(
