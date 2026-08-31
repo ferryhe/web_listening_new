@@ -128,6 +128,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
         target_url=discovery_source_url,
         budget_limits=remaining,
     )
+    target_results: list[Result] = [source_result]
     attempts = _merge_attempts(attempts, source_result.attempts)
     errors += source_result.errors
     source = _source_artifact(source_result)
@@ -141,6 +142,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             request,
             generated_at=generated_at,
             active_evidence=active_evidence,
+            target_results=tuple(target_results),
             attempts=attempts,
             errors=errors,
             sources=(),
@@ -157,6 +159,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             request,
             generated_at=generated_at,
             active_evidence=active_evidence,
+            target_results=tuple(target_results),
             attempts=attempts,
             errors=errors,
             sources=(),
@@ -181,6 +184,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             request,
             generated_at=generated_at,
             active_evidence=active_evidence,
+            target_results=tuple(target_results),
             attempts=attempts,
             errors=errors,
             sources=tuple(successful_sources),
@@ -224,6 +228,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             run_id=run_id,
             clock=clock,
             active_evidence=active_evidence,
+            target_results=tuple(target_results),
             attempts=attempts,
             errors=errors,
             sources=tuple(successful_sources),
@@ -279,6 +284,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
                 request,
                 generated_at=generated_at,
                 active_evidence=active_evidence,
+                target_results=tuple(target_results),
                 attempts=attempts,
                 errors=errors,
                 sources=tuple(successful_sources),
@@ -293,6 +299,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
                 request,
                 generated_at=generated_at,
                 active_evidence=active_evidence,
+                target_results=tuple(target_results),
                 attempts=attempts,
                 errors=errors,
                 sources=tuple(successful_sources),
@@ -310,6 +317,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             run_id=run_id,
             clock=clock,
             active_evidence=active_evidence,
+            target_results=tuple(target_results),
             attempts=attempts,
             errors=errors,
             sources=tuple(successful_sources),
@@ -345,6 +353,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             run_id=run_id,
             clock=clock,
             active_evidence=active_evidence,
+            target_results=tuple(target_results),
             attempts=attempts,
             errors=errors,
             sources=tuple(successful_sources),
@@ -398,6 +407,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             target_url=candidate_url,
             budget_limits=remaining,
         )
+        target_results.append(target_result)
         attempts = _merge_attempts(attempts, target_result.attempts)
         errors += target_result.errors
         target_source = _source_artifact(target_result)
@@ -440,6 +450,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
         request,
         generated_at=generated_at,
         active_evidence=active_evidence,
+        target_results=tuple(target_results),
         attempts=attempts,
         errors=errors,
         sources=tuple(successful_sources),
@@ -476,6 +487,7 @@ def _recover(  # pylint: disable=too-many-arguments
     run_id: str,
     clock: Callable[[], str],
     active_evidence: SiteSkillEvidence,
+    target_results: tuple[Result, ...],
     attempts: tuple[Attempt, ...],
     errors: tuple[SafeError, ...],
     sources: tuple[ArtifactEvidence, ...],
@@ -496,6 +508,7 @@ def _recover(  # pylint: disable=too-many-arguments
             request,
             generated_at=generated_at,
             active_evidence=active_evidence,
+            target_results=target_results,
             attempts=attempts,
             errors=errors,
             sources=sources,
@@ -531,6 +544,7 @@ def _recover(  # pylint: disable=too-many-arguments
             clock=clock,
         )
     recovery_attempts = recovery_registry.audited_attempts(recovery.attempts)
+    target_results += recovery.target_results
     failed_by_url = _recovery_failed_by_url(recovery_attempts, registry)
     attempts = _merge_attempts(attempts, recovery_attempts)
     if any(
@@ -607,6 +621,7 @@ def _recover(  # pylint: disable=too-many-arguments
             request,
             current_state=current_state,
             active_evidence=active_evidence,
+            target_results=target_results,
             attempts=attempts,
             errors=errors,
             failed_by_url=failed_by_url,
@@ -633,6 +648,7 @@ def _recover(  # pylint: disable=too-many-arguments
             request,
             current_state=current_state,
             active_evidence=active_evidence,
+            target_results=target_results,
             attempts=attempts,
             errors=errors,
             failed_by_url=failed_by_url,
@@ -680,6 +696,7 @@ def _recover(  # pylint: disable=too-many-arguments
                 request,
                 current_state=current_state,
                 active_evidence=active_evidence,
+                target_results=target_results,
                 attempts=attempts,
                 errors=errors,
                 failed_by_url=failed_by_url,
@@ -698,6 +715,7 @@ def _recover(  # pylint: disable=too-many-arguments
             request,
             current_state=current_state,
             active_evidence=active_evidence,
+            target_results=target_results,
             attempts=attempts,
             errors=errors,
             failed_by_url=failed_by_url,
@@ -724,6 +742,7 @@ def _recover(  # pylint: disable=too-many-arguments
         request,
         current_state=current_state,
         active_evidence=active_evidence,
+        target_results=target_results,
         attempts=attempts,
         errors=errors,
         failed_by_url=failed_by_url,
@@ -738,6 +757,7 @@ def _result(  # pylint: disable=too-many-arguments
     *,
     generated_at: str,
     active_evidence: SiteSkillEvidence,
+    target_results: tuple[Result, ...],
     attempts: tuple[Attempt, ...],
     errors: tuple[SafeError, ...],
     sources: tuple[ArtifactEvidence, ...],
@@ -758,6 +778,7 @@ def _result(  # pylint: disable=too-many-arguments
         request,
         current_state=current_state,
         active_evidence=active_evidence,
+        target_results=target_results,
         attempts=attempts,
         errors=errors,
         failed_by_url=failed_by_url,
@@ -772,6 +793,7 @@ def _result_from_state(  # pylint: disable=too-many-arguments
     *,
     current_state: SiteState,
     active_evidence: SiteSkillEvidence,
+    target_results: tuple[Result, ...],
     attempts: tuple[Attempt, ...],
     errors: tuple[SafeError, ...],
     failed_by_url: dict[str, tuple[Attempt, ...]],
@@ -807,6 +829,7 @@ def _result_from_state(  # pylint: disable=too-many-arguments
         current_state=current_state,
         site_skill_used=active_evidence,
         site_skill_update=site_skill_update,
+        target_results=target_results,
         attempts=attempts,
         usage=usage,
         stop_reason=stop_reason,

@@ -14,9 +14,11 @@ import pytest
 import web_listening.runtime.site_explore as site_explore_runtime
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import Budgets, ContentType, Request, Scope
+from web_listening.result.attempts import Attempt
+from web_listening.result.errors import SafeError
 from web_listening.result.model import ResultStatus
 from web_listening.runtime.site_explore import run_site_explore
-from web_listening.runtime.workflow import run_single_target
+from web_listening.runtime.workflow import prior_target_attempts, run_single_target
 from web_listening.site_skill.repository import SiteSkillRepository
 from web_listening.site_skill.update import SiteSkillCandidate
 from web_listening.site_skill.validate import site_skill_from_mapping
@@ -345,6 +347,16 @@ def test_complete_exploration_builds_state_and_inactive_reusable_candidate(
     assert candidate_skill.discovery.source_url == "https://example.test/"
     assert result.site_state.site_skill_digest == candidate.digest
     assert result.usage.requests == 3
+    assert [item.manifest.run_id for item in result.target_results] == [
+        "explore-seed",
+        "explore-candidate-1",
+        "explore-candidate-2",
+    ]
+    assert [item.manifest.requested_url for item in result.target_results] == [
+        "https://example.test/",
+        "https://example.test/a",
+        "https://example.test/b",
+    ]
 
     reused = run_single_target(
         Request(
@@ -560,6 +572,12 @@ def test_seed_budget_failure_returns_incomplete_budget_result(tmp_path: Path) ->
         "budget.runtime",
         "budget.exhausted",
     }
+    assert len(result.target_results) == 1
+    failed = result.target_results[0]
+    assert failed.manifest.run_id == "explore-seed"
+    assert failed.status is ResultStatus.FAILED
+    assert failed.artifacts == failed.manifest.artifacts == ()
+    assert failed.errors[0].code == "budget.runtime"
     store.close()
 
 
@@ -638,6 +656,21 @@ def test_out_of_scope_candidate_is_rejected_before_target_read_or_observation(
         "https://example.test/",
         "https://example.test/a",
     ]
+    rejected = next(
+        item
+        for item in result.target_results
+        if item.manifest.requested_url == "https://outside.test/x"
+    )
+    assert rejected.status is ResultStatus.REJECTED
+    assert rejected.artifacts == rejected.manifest.artifacts == ()
+    payload = result.to_dict()
+    payload["target_results"] = [
+        item
+        for item in payload["target_results"]
+        if item["manifest"]["requested_url"] != "https://outside.test/x"
+    ]
+    with pytest.raises(ValueError, match="site_explore.target_results_mismatch"):
+        site_explore_runtime.site_explore_result_from_mapping(payload)
     store.close()
 
 
@@ -1051,6 +1084,55 @@ def test_exhausted_canonical_candidate_does_not_stop_fresh_candidate(
     store.close()
 
 
+def test_zero_attempt_budget_candidate_cannot_be_omitted(tmp_path: Path) -> None:
+    candidate = "https://example.test/a"
+    acquisition, registry, store = _runtime(
+        tmp_path,
+        {"https://example.test/": b"<a href='/a'>a</a>"},
+    )
+    prior = tuple(
+        Attempt(
+            index,
+            f"prior-candidate-attempt-{index + 1}",
+            "failed",
+            ACQUISITION_MANIFEST.tool_id,
+            ACQUISITION_MANIFEST.version,
+            NOW,
+            NOW,
+            candidate,
+            None,
+            None,
+            SafeError("gateway.timeout", "Acquisition did not complete."),
+            1,
+            0,
+            0,
+        )
+        for index in range(2)
+    )
+
+    with prior_target_attempts(prior):
+        result = run_site_explore(
+            _request(max_requests=3, max_attempts=2),
+            registry,
+            store,
+            run_id="explore",
+            clock=lambda: NOW,
+        )
+
+    blocked = result.target_results[-1]
+    assert acquisition.targets == ["https://example.test/"]
+    assert blocked.manifest.requested_url == candidate
+    assert blocked.attempts == ()
+    assert [error.code for error in blocked.errors] == [
+        "eligibility.attempt_budget_exhausted"
+    ]
+    payload = result.to_dict()
+    payload["target_results"].pop()
+    with pytest.raises(ValueError, match="site_explore.target_results_mismatch"):
+        site_explore_runtime.site_explore_result_from_mapping(payload)
+    store.close()
+
+
 def test_slow_discovery_consumes_runtime_and_stops_candidates(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1348,6 +1430,61 @@ def test_candidate_redirect_uses_requested_url_as_discovery_proof(
         "https://example.test/",
         "https://example.test/report/",
     ]
+    candidate = result.target_results[-1]
+    assert candidate.manifest.requested_url == "https://example.test/report"
+    assert candidate.manifest.final_url == "https://example.test/report/"
+    assert candidate.manifest.mime_type == "text/html"
+    assert [item.to_url for item in candidate.manifest.redirects] == [
+        "https://example.test/report/"
+    ]
+    store.close()
+
+
+def test_redirected_pdf_manifest_is_public_without_parsing_body(
+    tmp_path: Path,
+) -> None:
+    requested = "https://example.test/report.pdf"
+    redirected = "https://example.test/download/report.pdf"
+    acquisition = _Acquisition(
+        {
+            "https://example.test/": b"source page",
+            requested: b"%PDF-offline",
+        },
+        final_urls={requested: redirected},
+        mime_types={
+            "https://example.test/": "text/html",
+            requested: "application/pdf",
+        },
+    )
+    registry = Registry()
+    registry.register(
+        HTML_LINKS_MANIFEST,
+        _StaticDiscovery(requested, HTML_LINKS_MANIFEST),
+    )
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "artifacts")
+
+    request = _request()
+    request = replace(
+        request,
+        scope=replace(
+            request.scope,
+            content_types=(ContentType.HTML, ContentType.FILE),
+        ),
+    )
+    result = run_site_explore(
+        request, registry, store, run_id="explore", clock=lambda: NOW
+    )
+
+    pdf = result.target_results[-1]
+    assert pdf.status is ResultStatus.COMPLETED
+    assert pdf.manifest.requested_url == requested
+    assert pdf.manifest.final_url == redirected
+    assert pdf.manifest.http_status == 200
+    assert pdf.manifest.mime_type == "application/pdf"
+    assert [item.to_url for item in pdf.manifest.redirects] == [redirected]
+    assert [item.mime_type for item in pdf.artifacts] == ["application/pdf"]
+    assert b"%PDF-offline" not in result.canonical_json_bytes()
     store.close()
 
 
@@ -1426,6 +1563,66 @@ def test_different_allowed_site_candidate_is_safe_terminal_rejection(
     assert result.site_skill_candidate is not None
     assert "https://other.test/b" not in acquisition.targets
     assert "runtime.site_identity_mismatch" in {error.code for error in result.errors}
+    store.close()
+
+
+def test_identity_gap_rejects_forged_zero_attempt_candidate(tmp_path: Path) -> None:
+    foreign_candidate = "https://aaa.test/b"
+    local_candidate = "https://example.test/a"
+    request = Request(
+        Scope(
+            ("https://example.test/",),
+            ("https://aaa.test", "https://example.test"),
+            ("/**",),
+            (ContentType.HTML,),
+        ),
+        None,
+        False,
+        Budgets(3, 4096, 30, 3),
+    )
+    acquisition = _Acquisition(
+        {
+            "https://example.test/": (
+                b"<a href='https://aaa.test/b'>b</a><a href='/a'>a</a>"
+            ),
+            local_candidate: b"page a",
+        }
+    )
+    registry = Registry()
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool(max_candidates=2))
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "artifacts")
+
+    result = run_site_explore(request, registry, store, run_id="gap", clock=lambda: NOW)
+
+    assert [item.manifest.run_id for item in result.target_results] == [
+        "gap-seed",
+        "gap-candidate-2",
+    ]
+    assert (
+        site_explore_runtime.site_explore_result_from_mapping(result.to_dict())
+        == result
+    )
+    identity_error = next(
+        error
+        for error in result.errors
+        if error.code == "runtime.site_identity_mismatch"
+    )
+    forged = run_single_target(
+        request,
+        Registry(),
+        store,
+        run_id="gap-candidate-1",
+        clock=lambda: NOW,
+        target_url=foreign_candidate,
+    )
+    assert not forged.attempts
+    forged = replace(forged, errors=(identity_error,))
+    payload = result.to_dict()
+    payload["target_results"].insert(1, forged.to_dict())
+
+    with pytest.raises(ValueError, match="site_explore.target_results_mismatch"):
+        site_explore_runtime.site_explore_result_from_mapping(payload)
     store.close()
 
 

@@ -1,4 +1,4 @@
-"""Strict deterministic SiteRefreshResult v1 and mutually exclusive changes."""
+"""Strict deterministic SiteRefreshResult v2 and mutually exclusive changes."""
 
 # pylint: disable=duplicate-code,missing-function-docstring
 # pylint: disable=too-many-boolean-expressions,unidiomatic-typecheck
@@ -27,10 +27,10 @@ from web_listening.result.errors import (
     validate_url,
 )
 from web_listening.result.manifest import SiteSkillEvidence, Usage
-from web_listening.result.model import ResultStatus
+from web_listening.result.model import Result, ResultStatus
 from web_listening.result.site_explore import SiteSkillCandidateEvidence
 
-SITE_REFRESH_SCHEMA_VERSION = "web-listening-site-refresh.v1"
+SITE_REFRESH_SCHEMA_VERSION = "web-listening-site-refresh.v2"
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CHANGE_TYPES = frozenset(
     {"added", "changed", "unchanged", "missing", "failed", "unresolved"}
@@ -45,6 +45,20 @@ _STOP_REASONS = frozenset(
         "rejected",
         "cancelled",
         "recovery_incomplete",
+    }
+)
+_PARENT_ONLY_ERROR_CODES = frozenset(
+    {
+        "budget.exhausted",
+        "discovery.no_candidates",
+        "runtime.discovery_coverage_incomplete",
+        "runtime.discovery_unavailable",
+        "runtime.discovery_url_unrepresentable",
+        "runtime.quality_minimum_words",
+        "runtime.recovery_coverage_incomplete",
+        "runtime.site_identity_mismatch",
+        "runtime.site_skill_discovery_unverified",
+        "runtime.site_skill_tool_unverified",
     }
 )
 
@@ -246,6 +260,7 @@ class SiteRefreshResult:  # pylint: disable=too-many-instance-attributes
     current_state: SiteState
     site_skill_used: SiteSkillEvidence
     site_skill_update: SiteSkillUpdate | None
+    target_results: tuple[Result, ...]
     attempts: tuple[Attempt, ...]
     usage: Usage
     stop_reason: str
@@ -284,10 +299,55 @@ class SiteRefreshResult:  # pylint: disable=too-many-instance-attributes
             type(error) is SafeError for error in self.errors
         ):
             raise ResultValidationError("site_refresh.errors_invalid")
+        self._validate_target_results()
         self._validate_collections()
         self._validate_state_and_skill()
         self._validate_evidence()
         self._validate_completion()
+
+    def _validate_target_results(self) -> None:
+        if type(self.target_results) is not tuple or not all(
+            type(item) is Result for item in self.target_results
+        ):
+            raise ResultValidationError("site_refresh.target_results_invalid")
+        if not self.target_results:
+            raise ResultValidationError("site_refresh.target_results_mismatch")
+        run_ids = tuple(item.manifest.run_id for item in self.target_results)
+        if len(run_ids) != len(set(run_ids)) or not run_ids[0].endswith("-source"):
+            raise ResultValidationError("site_refresh.target_results_duplicate")
+        if any(
+            result.attempts and result.attempts[0].attempt_id != result.manifest.run_id
+            for result in self.target_results
+        ):
+            raise ResultValidationError("site_refresh.target_results_mismatch")
+        prefix = run_ids[0][:-7]
+        remaining = self.target_results[1:]
+        if remaining and remaining[0].manifest.run_id == f"{prefix}-recovery-seed":
+            recovery = remaining[1:]
+            self._validate_candidate_order(recovery, f"{prefix}-recovery")
+            if any(item.site_skill_used is not None for item in remaining):
+                raise ResultValidationError("site_refresh.target_results_mismatch")
+        else:
+            self._validate_candidate_order(remaining, prefix)
+            if any(item.site_skill_used != self.site_skill_used for item in remaining):
+                raise ResultValidationError("site_refresh.target_results_mismatch")
+        if self.target_results[0].site_skill_used != self.site_skill_used:
+            raise ResultValidationError("site_refresh.target_results_mismatch")
+
+    @staticmethod
+    def _validate_candidate_order(results: tuple[Result, ...], prefix: str) -> None:
+        numbers: list[int] = []
+        for result in results:
+            match = re.fullmatch(
+                rf"{re.escape(prefix)}-candidate-([1-9]\d*)",
+                result.manifest.run_id,
+            )
+            if match is None:
+                raise ResultValidationError("site_refresh.target_results_mismatch")
+            numbers.append(int(match.group(1)))
+        urls = tuple(item.manifest.requested_url for item in results)
+        if numbers != sorted(set(numbers)) or urls != tuple(sorted(set(urls))):
+            raise ResultValidationError("site_refresh.target_results_order_invalid")
 
     def _collections(self) -> tuple[tuple[str, tuple[SiteChange, ...]], ...]:
         return (
@@ -335,7 +395,9 @@ class SiteRefreshResult:  # pylint: disable=too-many-instance-attributes
         if self.current_state.site_skill_digest not in allowed_current_digests:
             raise ResultValidationError("site_refresh.state_mismatch")
 
-    def _validate_evidence(self) -> None:
+    def _validate_evidence(  # pylint: disable=too-many-locals,too-many-branches
+        self,
+    ) -> None:
         previous = {page.canonical_url: page for page in self.previous_state.pages}
         current = {page.canonical_url: page for page in self.current_state.pages}
         if {page.observation_id for page in self.previous_state.pages}.intersection(
@@ -389,6 +451,45 @@ class SiteRefreshResult:  # pylint: disable=too-many-instance-attributes
                 change.error_codes
             ).issubset(result_error_codes):
                 raise ResultValidationError("site_refresh.failed_evidence")
+        audited_count, discovery_attempts = _validate_target_attempts(
+            self.target_results, self.attempts
+        )
+        _validate_target_errors(self.target_results, discovery_attempts, self.errors)
+        expected_usage = Usage(
+            sum(result.usage.requests for result in self.target_results)
+            + sum(attempt.requests for attempt in discovery_attempts),
+            sum(result.usage.bytes_received for result in self.target_results)
+            + sum(attempt.bytes_received for attempt in discovery_attempts),
+            sum(result.usage.runtime_ms for result in self.target_results)
+            + sum(attempt.runtime_ms for attempt in discovery_attempts),
+            sum(result.usage.tool_attempts for result in self.target_results)
+            - audited_count
+            + sum(attempt.outcome != "skipped" for attempt in discovery_attempts),
+        )
+        if self.usage != expected_usage:
+            raise ResultValidationError("site_refresh.target_results_mismatch")
+        source_evidence = {
+            (
+                artifact.source_url,
+                artifact.observation_id,
+                artifact.artifact_id,
+                f"sha256:{artifact.sha256}",
+            )
+            for result in self.target_results
+            for artifact in result.artifacts
+            if artifact.role == "source"
+        }
+        if any(
+            (
+                page.canonical_url,
+                page.observation_id,
+                page.artifact_id,
+                page.content_digest,
+            )
+            not in source_evidence
+            for page in self.current_state.pages
+        ):
+            raise ResultValidationError("site_refresh.target_results_mismatch")
 
     def _validate_completion(self) -> None:
         if self.current_state.complete != self.refresh_complete:
@@ -432,6 +533,7 @@ class SiteRefreshResult:  # pylint: disable=too-many-instance-attributes
                 "current_state",
                 "site_skill_used",
                 "site_skill_update",
+                "target_results",
                 "attempts",
                 "usage",
                 "stop_reason",
@@ -445,6 +547,7 @@ class SiteRefreshResult:  # pylint: disable=too-many-instance-attributes
             "missing",
             "failed",
             "unresolved",
+            "target_results",
             "attempts",
             "errors",
         )
@@ -485,6 +588,9 @@ class SiteRefreshResult:  # pylint: disable=too-many-instance-attributes
             current_state=current_state,
             site_skill_used=SiteSkillEvidence.from_dict(payload["site_skill_used"]),
             site_skill_update=update,
+            target_results=tuple(
+                Result.from_dict(item) for item in payload["target_results"]
+            ),
             attempts=tuple(Attempt.from_dict(item) for item in payload["attempts"]),
             usage=Usage.from_dict(payload["usage"]),
             stop_reason=payload["stop_reason"],
@@ -510,6 +616,7 @@ class SiteRefreshResult:  # pylint: disable=too-many-instance-attributes
                 if self.site_skill_update is None
                 else self.site_skill_update.to_dict()
             ),
+            "target_results": [item.to_dict() for item in self.target_results],
             "attempts": [attempt.to_dict() for attempt in self.attempts],
             "usage": self.usage.to_dict(),
             "stop_reason": self.stop_reason,
@@ -535,6 +642,103 @@ class SiteRefreshResult:  # pylint: disable=too-many-instance-attributes
 
 def _page_evidence(page: SiteStatePage) -> ChangeEvidence:
     return ChangeEvidence(page.artifact_id, page.content_digest)
+
+
+def _validate_target_attempts(
+    target_results: tuple[Result, ...], attempts: tuple[Attempt, ...]
+) -> tuple[int, tuple[Attempt, ...]]:
+    child_attempts = tuple(
+        attempt for result in target_results for attempt in result.attempts
+    )
+    child_ids = tuple(attempt.attempt_id for attempt in child_attempts)
+    if len(child_ids) != len(set(child_ids)):
+        raise ResultValidationError("site_refresh.target_results_mismatch")
+    child_by_id = {attempt.attempt_id: attempt for attempt in child_attempts}
+    aggregate_acquisition = tuple(
+        attempt for attempt in attempts if attempt.attempt_id in child_by_id
+    )
+    discovery_attempts = tuple(
+        attempt for attempt in attempts if attempt.attempt_id not in child_by_id
+    )
+    if tuple(item.attempt_id for item in aggregate_acquisition) != child_ids or any(
+        "-discovery" not in attempt.attempt_id
+        or attempt.final_url is not None
+        or attempt.http_status is not None
+        or attempt.requests != 0
+        or attempt.bytes_received != 0
+        for attempt in discovery_attempts
+    ):
+        raise ResultValidationError("site_refresh.target_results_mismatch")
+    audited_count = 0
+    for child, aggregate in zip(child_attempts, aggregate_acquisition):
+        child_payload = child.to_dict()
+        aggregate_payload = aggregate.to_dict()
+        child_payload.pop("order")
+        aggregate_payload.pop("order")
+        if child_payload == aggregate_payload:
+            continue
+        child_error = child.error
+        audited = dict(child_payload)
+        if (
+            child_error is not None
+            and child_error.code == "eligibility.attempt_budget_exhausted"
+        ):
+            audited_count += 1
+            audited.update(
+                {
+                    "outcome": "skipped",
+                    "final_url": None,
+                    "http_status": None,
+                    "requests": 0,
+                    "bytes_received": 0,
+                    "runtime_ms": 0,
+                }
+            )
+        if audited != aggregate_payload:
+            raise ResultValidationError("site_refresh.target_results_mismatch")
+    return audited_count, discovery_attempts
+
+
+def _validate_target_errors(
+    target_results: tuple[Result, ...],
+    discovery_attempts: tuple[Attempt, ...],
+    errors: tuple[SafeError, ...],
+) -> None:
+    candidate_results = target_results[1:]
+    if candidate_results and candidate_results[0].manifest.run_id.endswith(
+        "-recovery-seed"
+    ):
+        candidate_results = candidate_results[1:]
+    if any(
+        not result.attempts
+        and any(error.code in _PARENT_ONLY_ERROR_CODES for error in result.errors)
+        for result in candidate_results
+    ):
+        raise ResultValidationError("site_refresh.target_results_mismatch")
+    remaining = list(errors)
+    attributed = tuple(
+        error for result in target_results for error in result.errors
+    ) + tuple(
+        attempt.error for attempt in discovery_attempts if attempt.error is not None
+    )
+    for error in attributed:
+        try:
+            remaining.remove(error)
+        except ValueError as exc:
+            raise ResultValidationError("site_refresh.target_results_mismatch") from exc
+
+    attributed_codes = {error.code for error in attributed}
+    failed_attempt_errors: dict[str, SafeError] = {}
+    for result in target_results:
+        for attempt in result.attempts:
+            if attempt.error is not None and attempt.error.code not in attributed_codes:
+                failed_attempt_errors.setdefault(attempt.error.code, attempt.error)
+    for error in remaining:
+        if error.code in _PARENT_ONLY_ERROR_CODES:
+            continue
+        if failed_attempt_errors.pop(error.code, None) == error:
+            continue
+        raise ResultValidationError("site_refresh.target_results_mismatch")
 
 
 __all__ = [
