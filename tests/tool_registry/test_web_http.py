@@ -119,6 +119,7 @@ def _request(
     *,
     allowed_origins: tuple[str, ...] | None = None,
     content_types: tuple[ContentType, ...] = (ContentType.HTML, ContentType.FILE),
+    max_bytes: int = 2 * 1024 * 1024,
 ) -> Request:
     parsed = urlsplit(url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
@@ -131,7 +132,7 @@ def _request(
         ),
         None,
         False,
-        Budgets(6, 2 * 1024 * 1024, 30, 1),
+        Budgets(6, max_bytes, 30, 1),
     )
 
 
@@ -194,6 +195,8 @@ def test_manifest_is_the_stable_minimal_builtin_acquisition_identity() -> None:
     assert WEB_HTTP_MANIFEST.category is ToolCategory.ACQUISITION
     assert WEB_HTTP_MANIFEST.distribution is ToolDistribution.BUILTIN
     assert WEB_HTTP_MANIFEST.capabilities == frozenset({"http_get"})
+    assert WEB_HTTP_MANIFEST.limits.max_input_bytes == 2 * 1024 * 1024
+    assert WEB_HTTP_MANIFEST.limits.max_output_bytes == 1 << 30
     assert WEB_HTTP_MANIFEST.health is HealthStatus.HEALTHY
     assert WEB_HTTP_MANIFEST.qualification is QualificationStatus.QUALIFIED
 
@@ -519,6 +522,28 @@ def test_registry_requires_explicit_registration_and_invokes_the_adapter() -> No
     assert output.body == b"registry"
     assert registry.query(category=ToolCategory.ACQUISITION) == (WEB_HTTP_MANIFEST,)
     assert transport.closed == 1
+
+
+def test_registry_accepts_large_pdf_within_request_byte_budget() -> None:
+    """A caller-approved PDF has no separate two-megabyte tool ceiling."""
+    url = "https://example.test/report.pdf"
+    body = b"%PDF-1.7\n" + b"x" * (3 * 1024 * 1024)
+    transport, robots, target = _direct_transport(body, "application/pdf", url)
+    registry = Registry()
+    registry.register(WEB_HTTP_MANIFEST, _tool(transport))
+
+    output = registry.invoke(
+        WEB_HTTP_MANIFEST.tool_id,
+        AcquisitionInput(_request(url, max_bytes=8 * 1024 * 1024), url),
+    )
+
+    assert isinstance(output, AcquisitionOutput)
+    assert output.body == body
+    assert output.mime_type == "application/pdf"
+    assert output.sha256 == hashlib.sha256(body).hexdigest()
+    assert (output.requests, output.bytes_received) == (2, len(body))
+    assert output.requested_url == output.final_url == url
+    assert robots.closed == target.closed == transport.closed == 1
 
 
 def test_registry_query_url_returns_safe_failure_instead_of_invalid_output() -> None:

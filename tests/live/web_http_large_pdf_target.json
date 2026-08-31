@@ -1,0 +1,42 @@
+{
+  "schema_version": "web-http-large-pdf-target.v1",
+  "source_catalog": {
+    "path": "tests/live/catalog/dev_test_sites.json",
+    "sha256": "3074C31AC5370D0D6E1C1025D28E08CCCAAD042F976547540F420FAEF81CAED3",
+    "sha256_basis": "catalog bytes canonicalized to CRLF"
+  },
+  "target": {
+    "site_key": "iaa",
+    "source_url": "https://actuaries.org/annual-reports/",
+    "target_url": "https://actuaries.org/app/uploads/2026/01/2016AnnualReportEN.pdf",
+    "allowed_origins": [
+      "https://actuaries.org"
+    ],
+    "expected_mime_type": "application/pdf",
+    "minimum_size_bytes": 2097153,
+    "historical_expectation": "dev_fixture",
+    "provenance": {
+      "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+      "old_path": "config/dev_test_sites.json",
+      "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+      "old_site_key": "iaa",
+      "issue_69_bundle_manifest_sha256": "08f086a9da987bbea161808db22aeed7bf204e72498c4a4fe32e5ff8d0d827f0",
+      "issue_69_source_artifact_sha256": "181a7852c90043001e92f35f85a13cd7db2402a88b11f47f487655b31c4bf26d",
+      "issue_69_source_url_sha256": "56541440d6db9f597bce52b11f5cb8a84ad0e3520905a5dc60d685de44fa45c5",
+      "issue_69_target_url_sha256": "68563f20ccd222a8df82c02d594677b412b4585c38ceed72d8d12bbcb4b38a45",
+      "discovery_tool_id": "discovery.html_links",
+      "discovery_tool_version": "1.0.0",
+      "discovery_coverage": "truncated",
+      "observed_bytes_received": 7661063,
+      "observed_error_code": "registry.output_limit"
+    }
+  },
+  "network_limits": {
+    "max_sites": 1,
+    "max_total_requests": 12,
+    "max_total_response_bytes": 8388608,
+    "timeout_seconds": 60,
+    "concurrency": 1,
+    "retry": 0
+  }
+}

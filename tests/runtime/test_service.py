@@ -218,6 +218,143 @@ def _service(
     return service, store, jobs
 
 
+def _file_request(url: str, max_bytes: int) -> Request:
+    return Request(
+        Scope(
+            seeds=(url,),
+            allowed_origins=(ORIGIN,),
+            include_paths=("/**",),
+            content_types=(ContentType.FILE,),
+        ),
+        None,
+        False,
+        Budgets(6, max_bytes, 30, 1),
+    )
+
+
+def test_large_pdf_within_request_budget_is_persisted_with_complete_evidence(
+    tmp_path: Path,
+) -> None:
+    url = f"{ORIGIN}/report.pdf"
+    body = b"%PDF-1.7\n" + b"x" * (3 * 1024 * 1024)
+    transport = _Transport(
+        _Response(
+            200,
+            body,
+            Content_Type="application/pdf",
+            Content_Length=str(len(body)),
+        )
+    )
+    service, store, jobs = _service(
+        tmp_path,
+        WebHttpAcquisitionTool(lambda: transport, resolver=_resolver),
+    )
+
+    job = service.run(_file_request(url, 8 * 1024 * 1024))
+
+    assert job.status is JobStatus.COMPLETED
+    assert job.result is not None
+    assert job.result.status.value == "completed"
+    assert not job.result.errors
+    assert len(job.result.artifacts) == 1
+    evidence = job.result.artifacts[0]
+    digest = hashlib.sha256(body).hexdigest()
+    assert (
+        evidence.mime_type,
+        evidence.size_bytes,
+        evidence.sha256,
+        evidence.source_url,
+    ) == ("application/pdf", len(body), digest, url)
+    stored = store.get_observation(evidence.observation_id)
+    assert stored.content == body
+    assert stored.blob.sha256 == digest
+    assert stored.blob.size_bytes == len(body)
+    attempt = job.result.attempts[0]
+    assert (
+        attempt.outcome,
+        attempt.tool_id,
+        attempt.tool_version,
+        attempt.requested_url,
+        attempt.final_url,
+        attempt.http_status,
+        attempt.requests,
+        attempt.bytes_received,
+    ) == (
+        "succeeded",
+        WEB_HTTP_MANIFEST.tool_id,
+        WEB_HTTP_MANIFEST.version,
+        url,
+        url,
+        200,
+        2,
+        len(body),
+    )
+    assert job.result.usage.to_dict() == {
+        "requests": 2,
+        "bytes_received": len(body),
+        "runtime_ms": attempt.runtime_ms,
+        "tool_attempts": 1,
+    }
+    assert job.result.manifest.artifacts == job.result.artifacts
+    assert (
+        job.result.manifest.mime_type,
+        job.result.manifest.size_bytes,
+        job.result.manifest.sha256,
+    ) == ("application/pdf", len(body), digest)
+    assert transport.requests == [f"{ORIGIN}/robots.txt", url]
+    assert transport.closed == 1
+    assert [event.status for event in jobs.events(job.job_id)] == [
+        JobStatus.SUBMITTED,
+        JobStatus.RUNNING,
+        JobStatus.COMPLETED,
+    ]
+    store.close()
+
+
+def test_pdf_over_request_byte_budget_creates_no_artifact_or_observation(
+    tmp_path: Path,
+) -> None:
+    url = f"{ORIGIN}/report.pdf"
+    body = b"%PDF-1.7\n" + b"x" * (3 * 1024 * 1024)
+    transport = _Transport(
+        _Response(
+            200,
+            body,
+            Content_Type="application/pdf",
+            Content_Length=str(len(body)),
+        )
+    )
+    service, store, _jobs = _service(
+        tmp_path,
+        WebHttpAcquisitionTool(lambda: transport, resolver=_resolver),
+    )
+
+    job = service.run(_file_request(url, 2 * 1024 * 1024))
+
+    assert job.status is JobStatus.FAILED
+    assert job.result is not None
+    assert [error.code for error in job.result.errors] == ["budget.bytes"]
+    assert not job.result.artifacts
+    assert len(job.result.attempts) == 1
+    attempt = job.result.attempts[0]
+    assert attempt.outcome == "failed"
+    assert attempt.error == job.result.errors[0]
+    assert (attempt.requests, attempt.bytes_received) == (2, 0)
+    assert job.result.usage.to_dict() == {
+        "requests": 2,
+        "bytes_received": 0,
+        "runtime_ms": attempt.runtime_ms,
+        "tool_attempts": 1,
+    }
+    with pytest.raises(ArtifactStoreError) as missing:
+        store.read_blob(hashlib.sha256(body).hexdigest())
+    assert missing.value.code == "blob.not_found"
+    assert not tuple((store.root / "blobs").rglob("*.blob"))
+    assert transport.requests == [f"{ORIGIN}/robots.txt", url]
+    assert transport.closed == 1
+    store.close()
+
+
 @pytest.mark.parametrize("explore_all_tools", [False, True])
 def test_no_ai_fake_transport_completes_one_exact_acquisition(
     tmp_path: Path, explore_all_tools: bool
