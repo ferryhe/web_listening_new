@@ -47,6 +47,10 @@ from web_listening.tool_registry.protocols.discovery import (
     DiscoveryInput,
     DiscoveryOutput,
 )
+from web_listening.tool_registry.protocols.transform import (
+    TransformFailure,
+    TransformInput,
+)
 from web_listening.tool_registry.registry import Registry
 
 _MAX_CANDIDATES = 2
@@ -987,7 +991,7 @@ def _discovery_capabilities(mime_type: str) -> tuple[str, ...]:
 
 
 class _AcquisitionOnlyRegistry:
-    """Delegate Registry authority while excluding out-of-scope Transform work."""
+    """Delegate target work while normalizing Acquisition/Transform cancellation."""
 
     def __init__(self, registry: Registry) -> None:
         self._registry = registry
@@ -999,24 +1003,33 @@ class _AcquisitionOnlyRegistry:
         return self._registry.eligibility(requirements)
 
     def eligible(self, requirements):
-        if requirements.category is ToolCategory.TRANSFORM:
-            return ()
         return self._registry.eligible(requirements)
 
     def invoke(self, tool_id, tool_input):
         try:
             return self._registry.invoke(tool_id, tool_input)
         except CancelledError:
+            category = (
+                ToolCategory.TRANSFORM
+                if isinstance(tool_input, TransformInput)
+                else ToolCategory.ACQUISITION
+            )
             manifest = next(
                 (
                     item
-                    for item in self._registry.query(category=ToolCategory.ACQUISITION)
+                    for item in self._registry.query(category=category)
                     if item.tool_id == tool_id
                 ),
                 None,
             )
             if manifest is None:
                 raise
+            if category is ToolCategory.TRANSFORM:
+                return TransformFailure(
+                    manifest.tool_id,
+                    manifest.version,
+                    "runtime.cancelled",
+                )
             return AcquisitionFailure(
                 manifest.tool_id,
                 manifest.version,

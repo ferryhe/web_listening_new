@@ -63,6 +63,10 @@ from web_listening.tool_registry.protocols.discovery import (
     DiscoveryInput,
     DiscoveryOutput,
 )
+from web_listening.tool_registry.protocols.transform import (
+    TransformFailure,
+    TransformInput,
+)
 from web_listening.tool_registry.registry import AcquisitionOutputRejected, Registry
 
 _BUDGET_CODES = frozenset(
@@ -1287,7 +1291,7 @@ def _preferred_tool_update(
 
 
 class _AcquisitionOnlyRegistry:
-    """Delegate Registry authority while excluding out-of-scope Transform work."""
+    """Delegate target work while normalizing Acquisition/Transform cancellation."""
 
     def __init__(self, registry: Registry) -> None:
         self._registry = registry
@@ -1299,24 +1303,33 @@ class _AcquisitionOnlyRegistry:
         return self._registry.eligibility(requirements)
 
     def eligible(self, requirements):
-        if requirements.category is ToolCategory.TRANSFORM:
-            return ()
         return self._registry.eligible(requirements)
 
     def invoke(self, tool_id, tool_input):
         try:
             return self._registry.invoke(tool_id, tool_input)
         except CancelledError:
+            category = (
+                ToolCategory.TRANSFORM
+                if isinstance(tool_input, TransformInput)
+                else ToolCategory.ACQUISITION
+            )
             manifest = next(
                 (
                     item
-                    for item in self._registry.query(category=ToolCategory.ACQUISITION)
+                    for item in self._registry.query(category=category)
                     if item.tool_id == tool_id
                 ),
                 None,
             )
             if manifest is None:
                 raise
+            if category is ToolCategory.TRANSFORM:
+                return TransformFailure(
+                    manifest.tool_id,
+                    manifest.version,
+                    "runtime.cancelled",
+                )
             return AcquisitionFailure(
                 manifest.tool_id,
                 manifest.version,
@@ -1324,7 +1337,7 @@ class _AcquisitionOnlyRegistry:
             )
 
 
-class _RecoveryRegistry:
+class _RecoveryRegistry:  # pylint: disable=too-many-instance-attributes
     """Carry pre-recovery source attempts into deterministic Phase 18B recovery."""
 
     def __init__(
@@ -1343,6 +1356,7 @@ class _RecoveryRegistry:
         )
         self._remaining_source_attempts = max(0, max_attempts - used)
         self._source_attempts = 0
+        self._active_target_is_source = False
         self._blocked_invocations: list[tuple[str, str]] = []
         self.attempt_budget_exhausted = False
         self.rejection_code: str | None = None
@@ -1360,6 +1374,13 @@ class _RecoveryRegistry:
 
     def eligible(self, requirements):
         manifests = self._registry.eligible(requirements)
+        if (
+            requirements.category is ToolCategory.TRANSFORM
+            and self._active_target_is_source
+            and self._source_attempts >= self._remaining_source_attempts
+        ):
+            self.attempt_budget_exhausted = True
+            return ()
         if requirements.category is not ToolCategory.DISCOVERY:
             return manifests
         remaining = max(0, self._remaining_source_attempts - self._source_attempts)
@@ -1370,15 +1391,15 @@ class _RecoveryRegistry:
     def invoke(self, tool_id, tool_input):
         if self.rejection_code is not None and isinstance(tool_input, AcquisitionInput):
             raise ToolRegistryError(self.rejection_code)
-        target_url = (
-            canonicalize_url(
-                tool_input.target_url
-                if isinstance(tool_input, AcquisitionInput)
-                else tool_input.source_url
-            )
-            if isinstance(tool_input, (AcquisitionInput, DiscoveryInput))
-            else None
-        )
+        if isinstance(tool_input, AcquisitionInput):
+            target_url = canonicalize_url(tool_input.target_url)
+            self._active_target_is_source = target_url == self._source_url
+        elif isinstance(tool_input, DiscoveryInput):
+            target_url = canonicalize_url(tool_input.source_url)
+        elif isinstance(tool_input, TransformInput) and self._active_target_is_source:
+            target_url = self._source_url
+        else:
+            target_url = None
         if target_url == self._source_url:
             if self._source_attempts >= self._remaining_source_attempts:
                 self.attempt_budget_exhausted = True

@@ -1,0 +1,54 @@
+{
+  "schema_version": "phase-18d-site-transform-live-targets.v1",
+  "phase": "18d",
+  "source_catalog": "tests/live/catalog/smoke_site_catalog.json",
+  "source_catalog_sha256": "CE378F743C6363F1DC22A25758B958E3ADA695F8996B3F619AFA4CF0CD5D5322",
+  "targets": [
+    {
+      "site_key": "ipcc",
+      "display_name": "Intergovernmental Panel on Climate Change",
+      "url": "https://www.ipcc.ch/",
+      "allowed_origins": [
+        "https://www.ipcc.ch"
+      ],
+      "historical_expectation": "pass_http",
+      "minimum_words": 300,
+      "site_skill_digest": "sha256:65886846062d93ebe8e4d9edef63c1c65fc37774749d731db086ed3a408b97be",
+      "recipe_id": "catalog-http",
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "ipcc"
+      }
+    },
+    {
+      "site_key": "wri",
+      "display_name": "World Resources Institute",
+      "url": "https://www.wri.org/",
+      "allowed_origins": [
+        "https://www.wri.org"
+      ],
+      "historical_expectation": "pass_http",
+      "minimum_words": 250,
+      "site_skill_digest": "sha256:20e88cbe540f6651e88e179eb06f02ee45300a1ea21ac23e1525eb7f80feede2",
+      "recipe_id": null,
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/smoke_site_catalog.json",
+        "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+        "old_site_key": "wri"
+      }
+    }
+  ],
+  "network_limits": {
+    "max_targets": 2,
+    "max_total_requests": 12,
+    "max_total_bytes": 4194304,
+    "timeout_seconds": 30,
+    "concurrency": 1,
+    "retry": 0,
+    "acquisition_fallback": 0,
+    "transform_network_calls": 0
+  }
+}

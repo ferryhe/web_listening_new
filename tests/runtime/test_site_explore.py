@@ -1,6 +1,7 @@
 """Deterministic governed site-explore orchestration tests."""
 
 # pylint: disable=duplicate-code,missing-function-docstring,too-many-lines
+# pylint: disable=too-few-public-methods
 
 from __future__ import annotations
 
@@ -44,7 +45,15 @@ from web_listening.tool_registry.protocols.discovery import (
     DiscoveryFailure,
     DiscoveryOutput,
 )
+from web_listening.tool_registry.protocols.transform import (
+    TransformFailure,
+    TransformInput,
+)
 from web_listening.tool_registry.registry import Registry
+from web_listening.tool_registry.transform.builtins.simple_html_markdown import (
+    SIMPLE_HTML_MARKDOWN_MANIFEST,
+    SimpleHtmlMarkdownTransform,
+)
 
 NOW = "2026-08-28T00:00:00Z"
 ACQUISITION_MANIFEST = ToolManifest(
@@ -267,6 +276,44 @@ class _CancellingAcquisition:
         )
 
 
+class _FailingTransform:
+    manifest = SIMPLE_HTML_MARKDOWN_MANIFEST
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def transform(self, _tool_input: TransformInput) -> TransformFailure:
+        self.calls += 1
+        return TransformFailure(
+            self.manifest.tool_id,
+            self.manifest.version,
+            "transform.fixture_failed",
+        )
+
+
+class _CancellingTransform:
+    manifest = SIMPLE_HTML_MARKDOWN_MANIFEST
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def transform(self, _tool_input: TransformInput):
+        self.calls += 1
+        raise CancelledError
+
+
+class _TransformSpy:
+    manifest = SIMPLE_HTML_MARKDOWN_MANIFEST
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self._tool = SimpleHtmlMarkdownTransform()
+
+    def transform(self, tool_input: TransformInput):
+        self.calls += 1
+        return self._tool.transform(tool_input)
+
+
 def _request(max_requests: int = 3, max_attempts: int = 4) -> Request:
     return Request(
         Scope(
@@ -372,6 +419,262 @@ def test_complete_exploration_builds_state_and_inactive_reusable_candidate(
     )
     assert reused.status is ResultStatus.COMPLETED
     assert acquisition.targets[-1] == "https://example.test/"
+    store.close()
+
+
+def test_site_explore_target_results_run_existing_transform_for_seed_and_candidate(
+    tmp_path: Path,
+) -> None:
+    seed_body = (
+        b"<main><p>Seed page has enough visible words for markdown.</p>"
+        b"<a href='/a'>Candidate page</a></main>"
+    )
+    candidate_body = (
+        b"<main><p>Candidate page also has enough visible words.</p></main>"
+    )
+    acquisition, registry, store = _runtime(
+        tmp_path,
+        {
+            "https://example.test/": seed_body,
+            "https://example.test/a": candidate_body,
+        },
+    )
+    registry.register(
+        SIMPLE_HTML_MARKDOWN_MANIFEST,
+        SimpleHtmlMarkdownTransform(),
+    )
+
+    result = run_site_explore(
+        _request(max_requests=2, max_attempts=3),
+        registry,
+        store,
+        run_id="explore-transform",
+        clock=lambda: NOW,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert [item.manifest.run_id for item in result.target_results] == [
+        "explore-transform-seed",
+        "explore-transform-candidate-1",
+    ]
+    for target_result in result.target_results:
+        source, derived = target_result.artifacts
+        assert source.role == "source"
+        assert source.mime_type == "text/html"
+        assert source.lineage == ()
+        assert derived.role == "derived"
+        assert derived.mime_type == "text/markdown"
+        assert len(derived.lineage) == 1
+        assert derived.lineage[0].relation == "derived_from"
+        assert derived.lineage[0].source_artifact_id == source.artifact_id
+        assert derived.lineage[0].source_observation_id == source.observation_id
+        assert target_result.manifest.artifacts == target_result.artifacts
+        assert target_result.manifest.attempts == target_result.attempts
+        assert target_result.manifest.usage == target_result.usage
+        transform_attempt = target_result.attempts[-1]
+        assert transform_attempt.tool_id == SIMPLE_HTML_MARKDOWN_MANIFEST.tool_id
+        assert transform_attempt.outcome == "succeeded"
+        assert transform_attempt.requests == transform_attempt.bytes_received == 0
+        assert transform_attempt.attempt_id.startswith(target_result.manifest.run_id)
+        stored_derived = store.get_observation(derived.observation_id)
+        assert stored_derived.lineage == derived.lineage
+        assert stored_derived.content
+    assert result.usage.requests == len(result.target_results)
+    assert result.usage.tool_attempts == sum(
+        attempt.outcome != "skipped" for attempt in result.attempts
+    )
+    assert [page.canonical_url for page in result.site_state.pages] == [
+        "https://example.test/",
+        "https://example.test/a",
+    ]
+    assert {
+        (page.observation_id, page.artifact_id) for page in result.site_state.pages
+    } == {
+        (item.artifacts[0].observation_id, item.artifacts[0].artifact_id)
+        for item in result.target_results
+    }
+    assert (
+        site_explore_runtime.site_explore_result_from_mapping(result.to_dict())
+        == result
+    )
+    assert acquisition.targets == [
+        "https://example.test/",
+        "https://example.test/a",
+    ]
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("transform", "error_code", "stop_reason"),
+    (
+        (_FailingTransform(), "transform.fixture_failed", "discovery_failed"),
+        (_CancellingTransform(), "runtime.cancelled", "cancelled"),
+    ),
+    ids=("failure", "cancellation"),
+)
+def test_site_explore_transform_failure_or_cancellation_preserves_source(
+    tmp_path: Path,
+    transform,
+    error_code: str,
+    stop_reason: str,
+) -> None:
+    body = b"<main><p>Source has enough visible words for transform.</p></main>"
+    acquisition = _Acquisition({"https://example.test/": body})
+    registry = Registry()
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
+    store = ArtifactStore(tmp_path / "artifacts")
+
+    result = run_site_explore(
+        _request(max_attempts=2),
+        registry,
+        store,
+        run_id="explore-transform-terminal",
+        clock=lambda: NOW,
+    )
+
+    target_result = result.target_results[0]
+    assert [artifact.role for artifact in target_result.artifacts] == ["source"]
+    assert [attempt.tool_id for attempt in target_result.attempts] == [
+        ACQUISITION_MANIFEST.tool_id,
+        SIMPLE_HTML_MARKDOWN_MANIFEST.tool_id,
+    ]
+    assert target_result.attempts[-1].outcome == "failed"
+    assert target_result.attempts[-1].error is not None
+    assert target_result.attempts[-1].error.code == error_code
+    assert target_result.attempts[-1].requests == 0
+    assert target_result.attempts[-1].bytes_received == 0
+    assert error_code in {error.code for error in target_result.errors}
+    assert result.stop_reason == stop_reason
+    assert acquisition.targets == ["https://example.test/"]
+    assert transform.calls == 1
+    assert (
+        site_explore_runtime.site_explore_result_from_mapping(result.to_dict())
+        == result
+    )
+    store.close()
+
+
+def test_site_explore_without_eligible_transform_keeps_source_only(
+    tmp_path: Path,
+) -> None:
+    acquisition = _Acquisition(
+        {
+            "https://example.test/": (
+                b"<main><p>Source has enough visible words for transform.</p></main>"
+            )
+        }
+    )
+    registry = Registry()
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "artifacts")
+
+    result = run_site_explore(
+        _request(max_attempts=2),
+        registry,
+        store,
+        run_id="explore-no-transform",
+        clock=lambda: NOW,
+    )
+
+    target_result = result.target_results[0]
+    assert [artifact.role for artifact in target_result.artifacts] == ["source"]
+    assert [attempt.tool_id for attempt in target_result.attempts] == [
+        ACQUISITION_MANIFEST.tool_id
+    ]
+    assert target_result.status is ResultStatus.COMPLETED
+    store.close()
+
+
+def test_site_explore_skips_transform_for_non_html_source(tmp_path: Path) -> None:
+    body = b"%PDF-offline"
+    acquisition = _Acquisition(
+        {"https://example.test/": body},
+        mime_types={"https://example.test/": "application/pdf"},
+    )
+    transform = _TransformSpy()
+    registry = Registry()
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
+    store = ArtifactStore(tmp_path / "artifacts")
+    request = _request(max_attempts=2)
+    request = replace(
+        request,
+        scope=replace(request.scope, content_types=(ContentType.FILE,)),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="explore-file",
+        clock=lambda: NOW,
+    )
+
+    target_result = result.target_results[0]
+    assert [artifact.mime_type for artifact in target_result.artifacts] == [
+        "application/pdf"
+    ]
+    assert [attempt.tool_id for attempt in target_result.attempts] == [
+        ACQUISITION_MANIFEST.tool_id
+    ]
+    assert transform.calls == 0
+    store.close()
+
+
+def test_site_explore_attempt_limit_skips_transform_after_acquisition(
+    tmp_path: Path,
+) -> None:
+    body = b"<main><p>Source has enough visible words for transform.</p></main>"
+    acquisition = _Acquisition({"https://example.test/": body})
+    transform = _TransformSpy()
+    registry = Registry()
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
+    store = ArtifactStore(tmp_path / "artifacts")
+
+    result = run_site_explore(
+        _request(max_attempts=1),
+        registry,
+        store,
+        run_id="explore-attempt-limit",
+        clock=lambda: NOW,
+    )
+
+    target_result = result.target_results[0]
+    assert [artifact.role for artifact in target_result.artifacts] == ["source"]
+    assert len(target_result.attempts) == 1
+    assert target_result.usage.tool_attempts == 1
+    assert transform.calls == 0
+    assert result.stop_reason == "discovery_failed"
+    store.close()
+
+
+def test_site_explore_transform_quality_ineligible_keeps_source(
+    tmp_path: Path,
+) -> None:
+    acquisition = _Acquisition({"https://example.test/": b"<p>too short</p>"})
+    registry = Registry()
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    registry.register(
+        SIMPLE_HTML_MARKDOWN_MANIFEST,
+        SimpleHtmlMarkdownTransform(),
+    )
+    store = ArtifactStore(tmp_path / "artifacts")
+
+    result = run_site_explore(
+        _request(max_attempts=2),
+        registry,
+        store,
+        run_id="explore-ineligible-quality",
+        clock=lambda: NOW,
+    )
+
+    target_result = result.target_results[0]
+    assert [artifact.role for artifact in target_result.artifacts] == ["source"]
+    assert target_result.attempts[-1].error is not None
+    assert target_result.attempts[-1].error.code == "transform.ineligible_quality"
+    assert acquisition.targets == ["https://example.test/"]
     store.close()
 
 
