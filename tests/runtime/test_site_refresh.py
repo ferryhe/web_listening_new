@@ -1,6 +1,7 @@
 """Deterministic governed incremental site-refresh orchestration tests."""
 
 # pylint: disable=duplicate-code,missing-function-docstring,too-many-lines
+# pylint: disable=too-few-public-methods
 
 from __future__ import annotations
 
@@ -62,7 +63,12 @@ from web_listening.tool_registry.protocols.discovery import (
     DiscoveryCoverage,
     DiscoveryOutput,
 )
+from web_listening.tool_registry.protocols.transform import TransformInput
 from web_listening.tool_registry.registry import Registry
+from web_listening.tool_registry.transform.builtins.simple_html_markdown import (
+    SIMPLE_HTML_MARKDOWN_MANIFEST,
+    SimpleHtmlMarkdownTransform,
+)
 
 NOW = "2026-08-28T00:00:00Z"
 ROOT = "https://example.test/"
@@ -171,6 +177,29 @@ class _CancellingDiscovery:
     def discover(self, _tool_input):
         self.calls += 1
         raise CancelledError
+
+
+class _CancellingTransform:
+    manifest = SIMPLE_HTML_MARKDOWN_MANIFEST
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def transform(self, _tool_input: TransformInput):
+        self.calls += 1
+        raise CancelledError
+
+
+class _TransformSpy:
+    manifest = SIMPLE_HTML_MARKDOWN_MANIFEST
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self._tool = SimpleHtmlMarkdownTransform()
+
+    def transform(self, tool_input: TransformInput):
+        self.calls += 1
+        return self._tool.transform(tool_input)
 
 
 def _scope(seed: str = ROOT) -> Scope:
@@ -476,6 +505,346 @@ def test_normal_refresh_uses_stored_recipe_and_builds_six_exclusive_sets(
     store.close()
 
 
+def test_site_refresh_target_results_run_existing_transform_for_source_and_candidate(
+    tmp_path: Path,
+) -> None:
+    candidate = "https://example.test/a"
+    root = (
+        b"<main><p>Refresh source has enough visible words for markdown.</p>"
+        b"<a href='/a'>Candidate page</a></main>"
+    )
+    current = {
+        ROOT: root,
+        candidate: b"<main><p>Refresh candidate has enough visible words now.</p></main>",
+    }
+    limits = Budgets(2, 16384, 30, 3)
+    skill = _skill(limits)
+    acquisition = _Acquisition(current)
+    registry, store = _runtime(tmp_path, acquisition, _DiscoverySpy())
+    registry.register(
+        SIMPLE_HTML_MARKDOWN_MANIFEST,
+        SimpleHtmlMarkdownTransform(),
+    )
+
+    result = run_site_refresh(
+        _request(
+            skill,
+            _previous(skill, {ROOT: root, candidate: b"old candidate page"}),
+        ),
+        registry,
+        store,
+        run_id="refresh-transform",
+        clock=lambda: NOW,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert [item.manifest.run_id for item in result.target_results] == [
+        "refresh-transform-source",
+        "refresh-transform-candidate-1",
+    ]
+    for target_result in result.target_results:
+        source, derived = target_result.artifacts
+        assert source.role == "source"
+        assert source.mime_type == "text/html"
+        assert source.lineage == ()
+        assert derived.role == "derived"
+        assert derived.mime_type == "text/markdown"
+        assert len(derived.lineage) == 1
+        assert derived.lineage[0].relation == "derived_from"
+        assert derived.lineage[0].source_artifact_id == source.artifact_id
+        assert derived.lineage[0].source_observation_id == source.observation_id
+        assert target_result.manifest.artifacts == target_result.artifacts
+        assert target_result.manifest.attempts == target_result.attempts
+        assert target_result.manifest.usage == target_result.usage
+        transform_attempt = target_result.attempts[-1]
+        assert transform_attempt.tool_id == SIMPLE_HTML_MARKDOWN_MANIFEST.tool_id
+        assert transform_attempt.outcome == "succeeded"
+        assert transform_attempt.requests == transform_attempt.bytes_received == 0
+        assert transform_attempt.attempt_id.startswith(target_result.manifest.run_id)
+        stored_derived = store.get_observation(derived.observation_id)
+        assert stored_derived.lineage == derived.lineage
+        assert stored_derived.content
+    assert [item.url for item in result.changed] == [candidate]
+    assert [item.url for item in result.unchanged] == [ROOT]
+    assert result.added == result.missing == result.failed == result.unresolved == ()
+    assert result.usage.requests == len(result.target_results)
+    assert result.usage.tool_attempts == sum(
+        attempt.outcome != "skipped" for attempt in result.attempts
+    )
+    assert {
+        (page.observation_id, page.artifact_id) for page in result.current_state.pages
+    } == {
+        (item.artifacts[0].observation_id, item.artifacts[0].artifact_id)
+        for item in result.target_results
+    }
+    assert site_refresh_result_from_mapping(result.to_dict()) == result
+    assert acquisition.targets == [ROOT, candidate]
+    store.close()
+
+
+def test_site_refresh_transform_cancellation_is_audited_without_extra_acquisition(
+    tmp_path: Path,
+) -> None:
+    candidate = "https://example.test/a"
+    root = (
+        b"<main><p>Refresh source has enough visible words for markdown.</p>"
+        b"<a href='/a'>Candidate page</a></main>"
+    )
+    current = {
+        ROOT: root,
+        candidate: b"<main><p>Refresh candidate has enough visible words now.</p></main>",
+    }
+    limits = Budgets(2, 16384, 30, 3)
+    skill = _skill(limits)
+    acquisition = _Acquisition(current)
+    transform = _CancellingTransform()
+    registry, store = _runtime(tmp_path, acquisition, _DiscoverySpy())
+    registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, current)),
+        registry,
+        store,
+        run_id="refresh-transform-cancelled",
+        clock=lambda: NOW,
+    )
+
+    assert acquisition.targets == [ROOT, candidate]
+    assert transform.calls == 2
+    assert all(
+        [artifact.role for artifact in target.artifacts] == ["source"]
+        for target in result.target_results
+    )
+    transform_attempts = tuple(
+        attempt
+        for attempt in result.attempts
+        if attempt.tool_id == SIMPLE_HTML_MARKDOWN_MANIFEST.tool_id
+    )
+    assert len(transform_attempts) == 2
+    assert all(attempt.outcome == "failed" for attempt in transform_attempts)
+    assert all(
+        attempt.error is not None and attempt.error.code == "runtime.cancelled"
+        for attempt in transform_attempts
+    )
+    assert all(
+        attempt.requests == attempt.bytes_received == 0
+        for attempt in transform_attempts
+    )
+    assert [item.url for item in result.unchanged] == [ROOT, candidate]
+    assert site_refresh_result_from_mapping(result.to_dict()) == result
+    store.close()
+
+
+# pylint: disable-next=too-many-locals
+def test_site_refresh_recovery_target_results_run_existing_transform(
+    tmp_path: Path,
+) -> None:
+    candidate = "https://example.test/a"
+    root = (
+        b"<main><p>Recovery source has enough visible words for markdown.</p>"
+        b"<a href='/a'>Candidate page</a></main>"
+    )
+    current = {
+        ROOT: root,
+        candidate: b"<main><p>Recovery candidate has enough visible words now.</p></main>",
+    }
+    old_manifest = replace(HTML_LINKS_MANIFEST, tool_id="discovery.old")
+    limits = Budgets(5, 65536, 30, 8)
+    skill = _skill(limits, discovery_manifest=old_manifest)
+    acquisition = _Acquisition(current)
+    transform = _TransformSpy()
+    registry, store = _runtime(tmp_path, acquisition, _DiscoverySpy())
+    registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
+
+    result = run_site_refresh(
+        _request(
+            skill,
+            _previous(skill, {ROOT: root, candidate: b"old candidate page"}),
+        ),
+        registry,
+        store,
+        run_id="refresh-transform-recovery",
+        clock=lambda: NOW,
+    )
+
+    assert [item.manifest.run_id for item in result.target_results] == [
+        "refresh-transform-recovery-source",
+        "refresh-transform-recovery-recovery-seed",
+        "refresh-transform-recovery-recovery-candidate-1",
+    ]
+    assert transform.calls == 3
+    assert acquisition.targets == [ROOT, ROOT, candidate]
+    assert {
+        url: sum(
+            attempt.outcome != "skipped" and attempt.requested_url == url
+            for attempt in result.attempts
+        )
+        for url in (ROOT, candidate)
+    } == {ROOT: 6, candidate: 2}
+    assert result.target_results[-1].usage.tool_attempts == 2
+    for target_result in result.target_results:
+        source, derived = target_result.artifacts
+        assert source.role == "source"
+        assert derived.role == "derived"
+        assert derived.lineage[0].source_artifact_id == source.artifact_id
+        assert derived.lineage[0].source_observation_id == source.observation_id
+        assert target_result.attempts[-1].tool_id == (
+            SIMPLE_HTML_MARKDOWN_MANIFEST.tool_id
+        )
+        assert target_result.attempts[-1].attempt_id.startswith(
+            target_result.manifest.run_id
+        )
+    current_pairs = {
+        (page.observation_id, page.artifact_id) for page in result.current_state.pages
+    }
+    source_pairs = {
+        (target.artifacts[0].observation_id, target.artifacts[0].artifact_id)
+        for target in result.target_results
+    }
+    derived_pairs = {
+        (target.artifacts[1].observation_id, target.artifacts[1].artifact_id)
+        for target in result.target_results
+    }
+    assert len(current_pairs) == 2
+    assert current_pairs.issubset(source_pairs)
+    assert current_pairs.isdisjoint(derived_pairs)
+    assert site_refresh_result_from_mapping(result.to_dict()) == result
+    store.close()
+
+
+def test_recovery_source_prior_attempts_prevent_over_budget_transform(
+    tmp_path: Path,
+) -> None:
+    candidate = "https://example.test/a"
+    root = (
+        b"<main><p>Recovery source has enough visible words for markdown.</p>"
+        b"<a href='/a'>Candidate page</a></main>"
+    )
+    old_manifest = replace(HTML_LINKS_MANIFEST, tool_id="discovery.old")
+    limits = Budgets(8, 65536, 30, 4)
+    skill = _skill(limits, discovery_manifest=old_manifest)
+    acquisition = _Acquisition({ROOT: root, candidate: b"candidate page"})
+    transform = _TransformSpy()
+    registry, store = _runtime(tmp_path, acquisition, _DiscoverySpy())
+    registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="refresh-transform-recovery-budget",
+        clock=lambda: NOW,
+    )
+
+    source_attempts = tuple(
+        attempt for attempt in result.attempts if attempt.requested_url == ROOT
+    )
+    assert transform.calls == 1
+    assert acquisition.targets == [ROOT, ROOT]
+    assert len(source_attempts) == 4
+    assert sum(attempt.outcome != "skipped" for attempt in source_attempts) == 4
+    assert result.usage.tool_attempts == 4
+    assert result.usage.tool_attempts == sum(
+        attempt.outcome != "skipped" for attempt in result.attempts
+    )
+    assert result.stop_reason == "budget_exhausted"
+    assert [item.manifest.run_id for item in result.target_results] == [
+        "refresh-transform-recovery-budget-source",
+        "refresh-transform-recovery-budget-recovery-seed",
+    ]
+    assert [artifact.role for artifact in result.target_results[-1].artifacts] == [
+        "source"
+    ]
+    assert all(
+        attempt.tool_id != SIMPLE_HTML_MARKDOWN_MANIFEST.tool_id
+        for attempt in result.target_results[-1].attempts
+    )
+    assert result.target_results[-1].usage.tool_attempts == 1
+    assert site_refresh_result_from_mapping(result.to_dict()) == result
+    store.close()
+
+
+def test_site_refresh_skips_transform_for_non_html_source_and_candidate(
+    tmp_path: Path,
+) -> None:
+    candidate = "https://example.test/a.xml"
+    limits = Budgets(2, 16384, 30, 3)
+    scope = replace(_scope(), content_types=(ContentType.FILE,))
+    skill = _skill(
+        limits,
+        discovery_manifest=RSS_MANIFEST,
+        scope=scope,
+        success_mime_types=("application/xml",),
+    )
+    acquisition = _Acquisition(
+        {ROOT: b"<root/>", candidate: b"<candidate/>"},
+        mime_types_by_url={
+            ROOT: "application/xml",
+            candidate: "application/xml",
+        },
+    )
+    discovery = _StaticDiscoverySpy((candidate,), RSS_MANIFEST)
+    transform = _TransformSpy()
+    registry, store = _runtime(tmp_path, acquisition, discovery)
+    registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
+
+    result = run_site_refresh(
+        _request(
+            skill,
+            _previous(skill, {ROOT: b"<old/>", candidate: b"<old-candidate/>"}),
+        ),
+        registry,
+        store,
+        run_id="refresh-xml",
+        clock=lambda: NOW,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert transform.calls == 0
+    assert acquisition.targets == [ROOT, candidate]
+    assert all(
+        [artifact.mime_type for artifact in target.artifacts] == ["application/xml"]
+        for target in result.target_results
+    )
+    assert all(
+        attempt.tool_id != SIMPLE_HTML_MARKDOWN_MANIFEST.tool_id
+        for attempt in result.attempts
+    )
+    store.close()
+
+
+def test_site_refresh_attempt_limit_skips_transform_after_source_acquisition(
+    tmp_path: Path,
+) -> None:
+    root = b"<main><p>Refresh source has enough visible words for markdown.</p></main>"
+    limits = Budgets(2, 16384, 30, 1)
+    skill = _skill(limits)
+    acquisition = _Acquisition({ROOT: root})
+    transform = _TransformSpy()
+    registry, store = _runtime(tmp_path, acquisition, _DiscoverySpy())
+    registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="refresh-attempt-limit",
+        clock=lambda: NOW,
+    )
+
+    assert result.stop_reason == "budget_exhausted"
+    assert transform.calls == 0
+    assert acquisition.targets == [ROOT]
+    assert len(result.target_results) == 1
+    assert [artifact.role for artifact in result.target_results[0].artifacts] == [
+        "source"
+    ]
+    assert [attempt.tool_id for attempt in result.attempts] == [
+        ACQUISITION_MANIFEST.tool_id
+    ]
+    store.close()
+
+
 def test_per_target_attempt_limit_does_not_block_a_new_canonical_page(
     tmp_path: Path,
 ) -> None:
@@ -503,6 +872,14 @@ def test_per_target_attempt_limit_does_not_block_a_new_canonical_page(
         2,
     ]
     assert result.usage.tool_attempts == 3
+    assert all(
+        [artifact.role for artifact in target.artifacts] == ["source"]
+        for target in result.target_results
+    )
+    assert all(
+        attempt.tool_id != SIMPLE_HTML_MARKDOWN_MANIFEST.tool_id
+        for attempt in result.attempts
+    )
     store.close()
 
 
