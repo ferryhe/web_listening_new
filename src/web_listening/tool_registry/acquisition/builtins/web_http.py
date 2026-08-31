@@ -34,7 +34,7 @@ WEB_HTTP_MANIFEST = ToolManifest(
     limits=ToolLimits(
         max_runtime_seconds=30,
         max_input_bytes=2 * 1024 * 1024,
-        max_output_bytes=2 * 1024 * 1024,
+        max_output_bytes=1 << 30,
     ),
     health=HealthStatus.HEALTHY,
     qualification=QualificationStatus.QUALIFIED,
