@@ -11,12 +11,14 @@ from urllib.parse import quote
 
 import pytest
 
+from web_listening.artifact.identity import artifact_id
+from web_listening.artifact.model import ArtifactRole
 from web_listening.artifact.site_state import SiteState, SiteStatePage
 from web_listening.request.model import Budgets, ContentType, Scope
 from web_listening.result.attempts import Attempt
 from web_listening.result.errors import ResultValidationError, SafeError
 from web_listening.result.manifest import SiteSkillEvidence, Usage
-from web_listening.result.model import ResultStatus
+from web_listening.result.model import Result, ResultStatus
 from web_listening.result.site_explore import SiteSkillCandidateEvidence
 from web_listening.result.site_refresh import (
     ChangeEvidence,
@@ -39,11 +41,12 @@ SKILL_SHA = "e" * 64
 
 
 def _page(url: str, marker: str, digest: str | None = None) -> SiteStatePage:
+    content_sha = marker * 64 if digest is None else digest * 64
     return SiteStatePage(
         url,
         "observation-" + marker * 32,
-        "artifact-" + marker * 64,
-        "sha256:" + (marker * 64 if digest is None else digest * 64),
+        artifact_id(content_sha, "text/html", ArtifactRole.SOURCE),
+        "sha256:" + content_sha,
     )
 
 
@@ -61,28 +64,65 @@ def _evidence(page: SiteStatePage) -> ChangeEvidence:
     return ChangeEvidence(page.artifact_id, page.content_digest)
 
 
-def _attempt(
-    order: int,
-    url: str,
-    *,
-    outcome: str = "succeeded",
-    code: str = "gateway.timeout",
-) -> Attempt:
+def _success_target(
+    run_id: str, page: SiteStatePage, skill: SiteSkillEvidence
+) -> Result:
+    payload = json.loads((FIXTURES / "completed.v1.json").read_text(encoding="utf-8"))
+    payload["site_skill_used"] = skill.to_dict()
+    manifest = payload["manifest"]
+    manifest["run_id"] = run_id
+    manifest["requested_url"] = page.canonical_url
+    manifest["current_url"] = page.canonical_url
+    manifest["final_url"] = page.canonical_url
+    manifest["redirects"] = []
+    manifest["site_skill"] = skill.to_dict()
+    attempt = payload["attempts"][0]
+    attempt["attempt_id"] = run_id
+    attempt["requested_url"] = page.canonical_url
+    attempt["final_url"] = page.canonical_url
+    manifest["attempts"] = [dict(attempt)]
+    for artifact in payload["artifacts"]:
+        artifact["artifact_id"] = page.artifact_id
+        artifact["observation_id"] = page.observation_id
+        artifact["source_url"] = page.canonical_url
+        artifact["sha256"] = page.content_digest.removeprefix("sha256:")
+    manifest["mime_type"] = "text/html"
+    manifest["sha256"] = page.content_digest.removeprefix("sha256:")
+    manifest["artifacts"] = [dict(item) for item in payload["artifacts"]]
+    return Result.from_dict(payload)
+
+
+def _failed_target(run_id: str, url: str, skill: SiteSkillEvidence) -> Result:
+    payload = json.loads((FIXTURES / "failed.v1.json").read_text(encoding="utf-8"))
+    payload["site_skill_used"] = skill.to_dict()
+    manifest = payload["manifest"]
+    manifest["run_id"] = run_id
+    manifest["requested_url"] = url
+    manifest["current_url"] = url
+    manifest["site_skill"] = skill.to_dict()
+    attempt = payload["attempts"][0]
+    attempt["attempt_id"] = run_id
+    attempt["requested_url"] = url
+    manifest["attempts"] = [dict(attempt)]
+    return Result.from_dict(payload)
+
+
+def _discovery_attempt() -> Attempt:
     return Attempt(
-        order,
-        f"refresh-{order}",
-        outcome,
-        "acquisition.web_http",
+        1,
+        "refresh-discovery",
+        "succeeded",
+        "discovery.html_links",
         "1.0.0",
         NOW,
         NOW,
-        url,
-        url if outcome == "succeeded" else None,
-        200 if outcome == "succeeded" else None,
-        None if outcome == "succeeded" else SafeError(code, "Acquisition failed."),
-        1,
-        10,
-        1,
+        "https://example.test/a",
+        None,
+        None,
+        None,
+        0,
+        0,
+        0,
     )
 
 
@@ -101,8 +141,22 @@ def _completed() -> SiteRefreshResult:
     )
     previous_by_url = {page.canonical_url: page for page in previous.pages}
     current_by_url = {page.canonical_url: page for page in current.pages}
-    attempts = tuple(
-        _attempt(index, page.canonical_url) for index, page in enumerate(current.pages)
+    skill_evidence = SiteSkillEvidence("1", SKILL_SHA)
+    target_results = tuple(
+        _success_target(
+            "refresh-source" if index == 0 else f"refresh-candidate-{index}",
+            page,
+            skill_evidence,
+        )
+        for index, page in enumerate(current.pages)
+    )
+    attempts = (
+        replace(target_results[0].attempts[0], order=0),
+        _discovery_attempt(),
+        *(
+            replace(target.attempts[0], order=index + 1)
+            for index, target in enumerate(target_results[1:], start=1)
+        ),
     )
     return SiteRefreshResult(
         status=ResultStatus.COMPLETED,
@@ -144,10 +198,11 @@ def _completed() -> SiteRefreshResult:
         unresolved=(),
         previous_state=previous,
         current_state=current,
-        site_skill_used=SiteSkillEvidence("1", SKILL_SHA),
+        site_skill_used=skill_evidence,
         site_skill_update=None,
+        target_results=target_results,
         attempts=attempts,
-        usage=Usage(4, 40, 4, 4),
+        usage=Usage(8, 248, 520, 5),
         stop_reason="source_exhausted",
         errors=(),
     )
@@ -161,9 +216,15 @@ def _partial() -> SiteRefreshResult:
     current_page = _page("https://example.test/a", "1", "a")
     current = _state(current_page, complete=False)
     failed_page = previous.pages[1]
+    skill_evidence = SiteSkillEvidence("1", SKILL_SHA)
+    succeeded = _success_target("refresh-source", current_page, skill_evidence)
+    failed_target = _failed_target(
+        "refresh-candidate-1", failed_page.canonical_url, skill_evidence
+    )
     attempts = (
-        _attempt(0, current_page.canonical_url),
-        _attempt(1, failed_page.canonical_url, outcome="failed"),
+        replace(succeeded.attempts[0], order=0),
+        _discovery_attempt(),
+        replace(failed_target.attempts[0], order=2),
     )
     return SiteRefreshResult(
         status=ResultStatus.PARTIAL,
@@ -185,24 +246,27 @@ def _partial() -> SiteRefreshResult:
                 "failed",
                 _evidence(failed_page),
                 None,
-                (attempts[1].attempt_id,),
+                (attempts[2].attempt_id,),
                 ("gateway.timeout",),
             ),
         ),
         unresolved=(),
         previous_state=previous,
         current_state=current,
-        site_skill_used=SiteSkillEvidence("1", SKILL_SHA),
+        site_skill_used=skill_evidence,
         site_skill_update=None,
+        target_results=(succeeded, failed_target),
         attempts=attempts,
-        usage=Usage(2, 20, 2, 2),
+        usage=Usage(3, 62, 1080, 3),
         stop_reason="acquisition_failed",
-        errors=(SafeError("gateway.timeout", "Acquisition failed."),),
+        errors=failed_target.errors,
     )
 
 
 def test_site_refresh_result_is_byte_stable_and_strictly_round_trips() -> None:
     result = _completed()
+
+    assert "target_results" in result.to_dict()
 
     rebuilt = SiteRefreshResult.from_dict(json.loads(result.canonical_json_bytes()))
 
@@ -214,6 +278,89 @@ def test_site_refresh_result_is_byte_stable_and_strictly_round_trips() -> None:
         "https://example.test/a",
         "https://example.test/c",
     ]
+    assert rebuilt.schema_version == "web-listening-site-refresh.v2"
+
+
+@pytest.mark.parametrize("case", ("omitted", "duplicate", "reordered", "forged"))
+def test_target_results_reject_omission_duplicate_reordering_and_forgery(
+    case: str,
+) -> None:
+    result = _completed()
+    source, *candidates = result.target_results
+    if case == "omitted":
+        targets = (source, *candidates[:-1])
+    elif case == "duplicate":
+        targets = (*result.target_results, candidates[-1])
+    elif case == "reordered":
+        targets = (source, candidates[1], candidates[0], *candidates[2:])
+    else:
+        first = candidates[0]
+        targets = (
+            source,
+            replace(
+                first,
+                manifest=replace(first.manifest, run_id="refresh-candidate-9"),
+            ),
+            *candidates[1:],
+        )
+
+    with pytest.raises(ResultValidationError, match="site_refresh.target_results"):
+        replace(result, target_results=targets)
+
+
+def test_target_results_are_required_by_the_strict_payload() -> None:
+    payload = _completed().to_dict()
+    payload.pop("target_results")
+
+    with pytest.raises(ResultValidationError, match="schema.missing_fields"):
+        SiteRefreshResult.from_dict(payload)
+
+
+def test_failed_target_result_keeps_manifest_error_without_artifact() -> None:
+    result = _partial()
+    failed = result.target_results[-1]
+
+    assert failed.status is ResultStatus.FAILED
+    assert failed.manifest.run_id == "refresh-candidate-1"
+    assert failed.manifest.requested_url == result.failed[0].url
+    assert failed.artifacts == failed.manifest.artifacts == ()
+    assert failed.errors[0].code == "gateway.timeout"
+    assert SiteRefreshResult.from_dict(result.to_dict()) == result
+
+
+def test_target_result_errors_are_reconciled_as_a_multiset() -> None:
+    result = _partial()
+    failed = result.target_results[-1]
+    error = failed.errors[0]
+    duplicated_error_result = replace(failed, errors=(error, error))
+    with_duplicate_errors = replace(
+        result,
+        target_results=(result.target_results[0], duplicated_error_result),
+        errors=(error, error),
+    )
+
+    with pytest.raises(
+        ResultValidationError, match="site_refresh.target_results_mismatch"
+    ):
+        replace(with_duplicate_errors, errors=(error,))
+
+
+def test_discovery_attempt_error_must_be_preserved_in_aggregate() -> None:
+    result = _partial()
+    discovery_error = SafeError(
+        "runtime.discovery_recipe_unavailable", "Discovery recipe unavailable."
+    )
+    discovery = replace(result.attempts[1], outcome="failed", error=discovery_error)
+    with_discovery_error = replace(
+        result,
+        attempts=(result.attempts[0], discovery, result.attempts[2]),
+        errors=(*result.errors, discovery_error),
+    )
+
+    with pytest.raises(
+        ResultValidationError, match="site_refresh.target_results_mismatch"
+    ):
+        replace(with_discovery_error, errors=result.errors)
 
 
 def test_result_rejects_overlapping_or_duplicate_urls() -> None:
@@ -254,9 +401,7 @@ def test_incomplete_refresh_forbids_authoritative_missing() -> None:
 
 
 def test_completed_fixture_forbids_unresolved_history() -> None:
-    payload = json.loads(
-        (FIXTURES / "site-refresh-completed.v1.json").read_text(encoding="utf-8")
-    )
+    payload = _completed().to_dict()
     unresolved = payload["missing"].pop()
     unresolved["change_type"] = "unresolved"
     payload["unresolved"] = [unresolved]
@@ -285,14 +430,12 @@ def test_current_state_pages_require_this_refresh_success_attempt() -> None:
         replace(
             result,
             attempts=attempts,
-            usage=Usage(3, 30, 3, 3),
+            usage=Usage(6, 186, 390, 4),
         )
 
 
 def test_current_state_rejects_reused_previous_observation() -> None:
-    payload = json.loads(
-        (FIXTURES / "site-refresh-completed.v1.json").read_text(encoding="utf-8")
-    )
+    payload = _completed().to_dict()
     payload["current_state"]["pages"][0]["observation_id"] = payload["previous_state"][
         "pages"
     ][0]["observation_id"]
@@ -375,17 +518,16 @@ def test_site_skill_update_is_an_inactive_validated_candidate() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "factory"),
-    [
-        ("site-refresh-completed.v1.json", _completed),
-        ("site-refresh-partial.v1.json", _partial),
-    ],
+    "name",
+    ("site-refresh-completed.v1.json", "site-refresh-partial.v1.json"),
 )
-def test_frozen_site_refresh_fixtures(name: str, factory) -> None:
-    expected = factory()
+def test_legacy_site_refresh_payload_without_target_results_is_rejected(
+    name: str,
+) -> None:
     payload = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
-    assert SiteRefreshResult.from_dict(payload) == expected
+    with pytest.raises(ResultValidationError):
+        SiteRefreshResult.from_dict(payload)
 
 
 def test_unknown_result_or_change_fields_are_rejected() -> None:

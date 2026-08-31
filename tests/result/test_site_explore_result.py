@@ -16,8 +16,8 @@ from web_listening.request.model import Budgets, ContentType, Scope
 from web_listening.result.attempts import Attempt
 from web_listening.result.errors import ResultValidationError, SafeError
 from web_listening.result.manifest import Usage
+from web_listening.result.model import Result
 from web_listening.result.site_explore import (
-    SITE_EXPLORE_SCHEMA_VERSION,
     DiscoveryEvidence,
     SiteExploreResult,
     SiteSkillCandidateEvidence,
@@ -70,28 +70,31 @@ def _candidate():
     ).skill
 
 
-def _attempt(order: int = 1) -> Attempt:
-    return Attempt(
-        order=order,
-        attempt_id="explore-candidate-1",
-        outcome="succeeded",
-        tool_id="acquisition.web_http",
-        tool_version="1.0.0",
-        started_at=NOW,
-        finished_at=NOW,
-        requested_url="https://example.test/a",
-        final_url="https://example.test/a",
-        http_status=200,
-        error=None,
-        requests=1,
-        bytes_received=5,
-        runtime_ms=1,
-    )
+def _target_result(run_id: str, url: str, marker: str) -> Result:
+    payload = json.loads((FIXTURES / "completed.v1.json").read_text(encoding="utf-8"))
+    payload["site_skill_used"] = None
+    manifest = payload["manifest"]
+    manifest["run_id"] = run_id
+    manifest["requested_url"] = url
+    manifest["current_url"] = url
+    manifest["final_url"] = url
+    manifest["redirects"] = []
+    manifest["site_skill"] = None
+    attempt = payload["attempts"][0]
+    attempt["attempt_id"] = run_id
+    attempt["requested_url"] = url
+    attempt["final_url"] = url
+    manifest["attempts"] = [dict(attempt)]
+    for artifact in payload["artifacts"]:
+        artifact["observation_id"] = "observation-" + marker * 32
+        artifact["source_url"] = url
+    manifest["artifacts"] = [dict(item) for item in payload["artifacts"]]
+    return Result.from_dict(payload)
 
 
 def _discovery_attempt() -> Attempt:
     return Attempt(
-        order=0,
+        order=1,
         attempt_id="explore-discovery-1",
         outcome="succeeded",
         tool_id="discovery.html_links",
@@ -112,18 +115,22 @@ def _completed(coverage: str = "complete") -> SiteExploreResult:
     candidate = _candidate()
     discovery_recipe = candidate.discovery
     assert discovery_recipe is not None
+    seed = _target_result("explore-seed", "https://example.test/", "1")
+    acquired = _target_result("explore-candidate-1", "https://example.test/a", "2")
+    source_artifacts = tuple(item.artifacts[0] for item in (seed, acquired))
     state = SiteState(
         "example.test",
         NOW,
         candidate.digest,
         True,
-        (
+        tuple(
             SiteStatePage(
-                "https://example.test/a",
-                "observation-" + "a" * 32,
-                "artifact-" + "b" * 64,
-                "sha256:" + "c" * 64,
-            ),
+                artifact.source_url,
+                artifact.observation_id,
+                artifact.artifact_id,
+                f"sha256:{artifact.sha256}",
+            )
+            for artifact in source_artifacts
         ),
     )
     discovery = DiscoveryEvidence(
@@ -136,7 +143,11 @@ def _completed(coverage: str = "complete") -> SiteExploreResult:
         coverage,
         None,
     )
-    attempt = _attempt()
+    attempts = (
+        replace(seed.attempts[0], order=0),
+        _discovery_attempt(),
+        replace(acquired.attempts[0], order=2),
+    )
     return SiteExploreResult(
         status="completed",
         exploration_complete=True,
@@ -152,8 +163,9 @@ def _completed(coverage: str = "complete") -> SiteExploreResult:
         ),
         site_skill_used=None,
         discovery=(discovery,),
-        attempts=(_discovery_attempt(), attempt),
-        usage=Usage(1, 5, 1, 2),
+        target_results=(seed, acquired),
+        attempts=attempts,
+        usage=Usage(4, 124, 260, 3),
         stop_reason="source_exhausted",
         errors=(),
     )
@@ -175,18 +187,105 @@ def _partial(coverage: str = "complete") -> SiteExploreResult:
 def test_site_explore_result_is_byte_stable_and_strictly_round_trips() -> None:
     result = _completed()
 
+    assert "target_results" in result.to_dict()
+
     rebuilt = site_explore_result_from_mapping(
         json.loads(result.canonical_json_bytes())
     )
 
     assert rebuilt == result
     assert rebuilt.canonical_json_bytes() == result.canonical_json_bytes()
-    assert rebuilt.schema_version == "web-listening-site-explore.v2"
+    assert rebuilt.schema_version == "web-listening-site-explore.v3"
     assert rebuilt.discovery[0].coverage == "complete"
 
 
+@pytest.mark.parametrize("case", ("omitted", "duplicate", "reordered", "forged"))
+def test_target_results_reject_omission_duplicate_reordering_and_forgery(
+    case: str,
+) -> None:
+    result = _completed()
+    seed, candidate = result.target_results
+    if case == "omitted":
+        targets = (seed,)
+    elif case == "duplicate":
+        targets = (seed, candidate, candidate)
+    elif case == "reordered":
+        targets = (candidate, seed)
+    else:
+        targets = (
+            seed,
+            replace(
+                candidate,
+                manifest=replace(
+                    candidate.manifest,
+                    run_id="explore-candidate-2",
+                ),
+            ),
+        )
+
+    with pytest.raises(ResultValidationError, match="site_explore.target_results"):
+        replace(result, target_results=targets)
+
+
+def test_target_results_are_required_by_the_strict_payload() -> None:
+    payload = _completed().to_dict()
+    payload.pop("target_results")
+
+    with pytest.raises(ResultValidationError, match="schema.missing_fields"):
+        site_explore_result_from_mapping(payload)
+
+
+def test_target_result_roundtrip_preserves_html_markdown_lineage() -> None:
+    payload = json.loads((FIXTURES / "partial.v1.json").read_text(encoding="utf-8"))
+    payload["site_skill_used"] = None
+    payload["manifest"]["site_skill"] = None
+    payload["manifest"]["run_id"] = "lineage-seed"
+    for index, attempt in enumerate(payload["attempts"]):
+        attempt["attempt_id"] = (
+            "lineage-seed" if index == 0 else f"lineage-seed-acquisition-{index}"
+        )
+    payload["manifest"]["attempts"] = [dict(item) for item in payload["attempts"]]
+    target = Result.from_dict(payload)
+    source = next(item for item in target.artifacts if item.role == "source")
+    result = SiteExploreResult(
+        status="partial",
+        exploration_complete=False,
+        site_state=SiteState(
+            "www.casact.org",
+            NOW,
+            None,
+            False,
+            (
+                SiteStatePage(
+                    source.source_url,
+                    source.observation_id,
+                    source.artifact_id,
+                    f"sha256:{source.sha256}",
+                ),
+            ),
+        ),
+        site_skill_candidate=None,
+        site_skill_used=None,
+        discovery=(),
+        target_results=(target,),
+        attempts=target.attempts,
+        usage=target.usage,
+        stop_reason="acquisition_failed",
+        errors=target.errors,
+    )
+
+    rebuilt = site_explore_result_from_mapping(result.to_dict())
+    derived = next(
+        item for item in rebuilt.target_results[0].artifacts if item.role == "derived"
+    )
+
+    assert derived.mime_type == "text/markdown"
+    assert len(derived.lineage) == 1
+    assert derived.lineage[0].source_artifact_id == source.artifact_id
+
+
 @pytest.mark.parametrize("coverage", ("complete", "truncated", "unknown"))
-def test_site_explore_v2_discovery_coverage_strictly_round_trips(
+def test_site_explore_v3_discovery_coverage_strictly_round_trips(
     coverage: str,
 ) -> None:
     result = _completed(coverage)
@@ -197,7 +296,7 @@ def test_site_explore_v2_discovery_coverage_strictly_round_trips(
 
 
 @pytest.mark.parametrize("coverage", (None, "", "partial", True, 1))
-def test_site_explore_v2_rejects_missing_or_invalid_discovery_coverage(
+def test_site_explore_v3_rejects_missing_or_invalid_discovery_coverage(
     coverage: object,
 ) -> None:
     payload = _completed().to_dict()
@@ -249,7 +348,12 @@ def test_terminal_partial_result_can_have_complete_state_without_candidate() -> 
         exploration_complete=True,
         site_state=replace(partial.site_state, complete=True),
         stop_reason="acquisition_failed",
-        errors=(SafeError("scope.origin_not_allowed", "Candidate was rejected."),),
+        errors=(
+            SafeError(
+                "runtime.site_identity_mismatch",
+                "Candidate was rejected.",
+            ),
+        ),
     )
 
     assert completed_state.exploration_complete is True
@@ -283,21 +387,14 @@ def test_budget_error_requires_budget_exhausted_stop_reason(code: str) -> None:
 
 
 def test_attempt_budget_error_requires_budget_exhausted_stop_reason() -> None:
-    payload = json.loads(
-        (FIXTURES / "site-explore-partial.v1.json").read_text(encoding="utf-8")
-    )
+    payload = _partial().to_dict()
     payload["stop_reason"] = "acquisition_failed"
     payload["errors"] = [
-        SafeError("gateway.timeout", "Acquisition did not complete.").to_dict()
+        SafeError(
+            "eligibility.attempt_budget_exhausted",
+            "Acquisition did not complete.",
+        ).to_dict()
     ]
-    payload["site_state"]["pages"] = []
-    attempt = payload["attempts"][1]
-    attempt["outcome"] = "failed"
-    attempt["final_url"] = None
-    attempt["http_status"] = None
-    attempt["error"] = SafeError(
-        "budget.requests", "Acquisition did not complete."
-    ).to_dict()
 
     with pytest.raises(
         ResultValidationError, match="site_explore.stop_reason_inconsistent"
@@ -306,22 +403,11 @@ def test_attempt_budget_error_requires_budget_exhausted_stop_reason() -> None:
 
 
 def test_discovery_budget_error_requires_budget_exhausted_stop_reason() -> None:
-    payload = json.loads(
-        (FIXTURES / "site-explore-partial.v1.json").read_text(encoding="utf-8")
-    )
+    payload = _partial().to_dict()
     payload["stop_reason"] = "acquisition_failed"
     payload["errors"] = [
-        SafeError("gateway.timeout", "Acquisition did not complete.").to_dict()
+        SafeError("budget.runtime", "Discovery did not complete.").to_dict()
     ]
-    error = SafeError("budget.runtime", "Discovery did not complete.").to_dict()
-    discovery = payload["discovery"][0]
-    discovery["outcome"] = "failed"
-    discovery["candidates"] = []
-    discovery["discovered_from"] = []
-    discovery["error"] = error
-    attempt = payload["attempts"][0]
-    attempt["outcome"] = "failed"
-    attempt["error"] = error
 
     with pytest.raises(
         ResultValidationError, match="site_explore.stop_reason_inconsistent"
@@ -330,9 +416,7 @@ def test_discovery_budget_error_requires_budget_exhausted_stop_reason() -> None:
 
 
 def test_budget_exhausted_stop_reason_requires_partial_status() -> None:
-    payload = json.loads(
-        (FIXTURES / "site-explore-partial.v1.json").read_text(encoding="utf-8")
-    )
+    payload = _partial().to_dict()
     payload["status"] = "failed"
 
     with pytest.raises(
@@ -343,15 +427,20 @@ def test_budget_exhausted_stop_reason_requires_partial_status() -> None:
 
 def test_discovery_evidence_requires_one_matching_local_attempt() -> None:
     result = _completed()
-    acquisition = replace(result.attempts[1], order=0)
+    acquisitions = tuple(
+        replace(attempt, order=index)
+        for index, attempt in enumerate(
+            attempt for target in result.target_results for attempt in target.attempts
+        )
+    )
 
     with pytest.raises(
         ResultValidationError, match="site_explore.discovery_evidence_mismatch"
     ):
         replace(
             result,
-            attempts=(acquisition,),
-            usage=Usage(1, 5, 1, 1),
+            attempts=acquisitions,
+            usage=Usage(4, 124, 260, 2),
         )
 
 
@@ -363,9 +452,7 @@ def test_duplicate_discovery_identity_is_rejected() -> None:
 
 
 def test_frozen_discovery_provenance_must_match_invocation_source() -> None:
-    payload = json.loads(
-        (FIXTURES / "site-explore-completed.v1.json").read_text(encoding="utf-8")
-    )
+    payload = _completed().to_dict()
     payload["discovery"][0]["discovered_from"] = ["https://unrelated.test/"]
 
     with pytest.raises(ResultValidationError, match="site_explore.discovery_invalid"):
@@ -386,9 +473,7 @@ def test_frozen_discovery_provenance_must_match_invocation_source() -> None:
 def test_stop_reason_conflicts_in_frozen_partial_payload_are_rejected(
     case: str,
 ) -> None:
-    payload = json.loads(
-        (FIXTURES / "site-explore-partial.v1.json").read_text(encoding="utf-8")
-    )
+    payload = _partial().to_dict()
     if case == "source_exhausted_without_completion":
         payload["stop_reason"] = "source_exhausted"
     elif case == "cancelled_without_evidence":
@@ -411,38 +496,21 @@ def test_stop_reason_conflicts_in_frozen_partial_payload_are_rejected(
 
 
 @pytest.mark.parametrize(
-    ("name", "expected"),
+    "name",
     [
-        ("site-explore-completed.v2.json", _completed),
-        ("site-explore-partial.v2.json", _partial),
+        "site-explore-completed.v1.json",
+        "site-explore-partial.v1.json",
+        "site-explore-completed.v2.json",
+        "site-explore-partial.v2.json",
     ],
 )
-def test_frozen_site_explore_v2_fixtures(name: str, expected) -> None:
-    payload = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
-
-    result = site_explore_result_from_mapping(payload)
-
-    assert result == expected()
-    assert result.canonical_json_bytes() == expected().canonical_json_bytes()
-
-
-@pytest.mark.parametrize(
-    ("name", "expected"),
-    [
-        ("site-explore-completed.v1.json", _completed),
-        ("site-explore-partial.v1.json", _partial),
-    ],
-)
-def test_frozen_site_explore_v1_migrates_coverage_to_unknown(
-    name: str, expected
+def test_legacy_site_explore_payload_without_target_results_is_rejected(
+    name: str,
 ) -> None:
     payload = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
-    result = site_explore_result_from_mapping(payload)
-
-    assert result == expected("unknown")
-    assert result.schema_version == SITE_EXPLORE_SCHEMA_VERSION
-    assert result.discovery[0].coverage == "unknown"
+    with pytest.raises(ResultValidationError):
+        site_explore_result_from_mapping(payload)
 
 
 def test_unknown_result_or_discovery_fields_are_rejected() -> None:

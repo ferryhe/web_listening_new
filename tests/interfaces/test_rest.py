@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 from threading import get_ident
 from urllib.parse import quote
@@ -37,10 +38,14 @@ from web_listening.request.site_refresh import (
     SiteRefreshRequest,
 )
 from web_listening.result.errors import SafeError
-from web_listening.result.manifest import Usage
+from web_listening.result.manifest import SiteSkillEvidence, Usage
 from web_listening.result.model import Result
 from web_listening.result.site_explore import SiteExploreResult
-from web_listening.result.site_refresh import SiteRefreshResult
+from web_listening.result.site_refresh import (
+    ChangeEvidence,
+    SiteChange,
+    SiteRefreshResult,
+)
 from web_listening.runtime.jobs import Job, JobStateError, JobStatus
 from web_listening.site_skill.model import (
     DiscoveryRecipe,
@@ -86,20 +91,83 @@ def _explore_result() -> SiteExploreResult:
         site_skill_candidate=None,
         site_skill_used=None,
         discovery=(),
+        target_results=(),
         attempts=(),
         usage=Usage(0, 0, 0, 0),
         stop_reason="rejected",
-        errors=(SafeError("test.rejected", "Exploration was rejected."),),
+        errors=(
+            SafeError(
+                "runtime.site_explore_single_seed_required",
+                "Exploration was rejected.",
+            ),
+        ),
     )
 
 
 def _refresh_result() -> SiteRefreshResult:
-    return SiteRefreshResult.from_dict(
-        json.loads(
-            (RESULT_FIXTURES / "site-refresh-partial.v1.json").read_text(
-                encoding="utf-8"
+    target = Result.from_dict(
+        json.loads((RESULT_FIXTURES / "failed.v1.json").read_text(encoding="utf-8"))
+    )
+    skill = SiteSkillEvidence("1", "e" * 64)
+    url = "https://example.test/"
+    attempt = replace(
+        target.attempts[0],
+        attempt_id="refresh-source",
+        requested_url=url,
+    )
+    target = replace(
+        target,
+        manifest=replace(
+            target.manifest,
+            run_id="refresh-source",
+            requested_url=url,
+            current_url=url,
+            site_skill=skill,
+            attempts=(attempt,),
+        ),
+        site_skill_used=skill,
+        attempts=(attempt,),
+    )
+    previous_payload = json.loads(
+        (RESULT_FIXTURES / "site-refresh-partial.v1.json").read_text(encoding="utf-8")
+    )["previous_state"]
+    previous = replace(
+        SiteState.from_dict(previous_payload), site_skill_digest="sha256:" + "e" * 64
+    )
+    current = SiteState(
+        previous.site_key,
+        previous.generated_at,
+        previous.site_skill_digest,
+        False,
+        (),
+    )
+    code = target.errors[0].code
+    return SiteRefreshResult(
+        status="partial",
+        refresh_complete=False,
+        added=(),
+        changed=(),
+        unchanged=(),
+        missing=(),
+        failed=(SiteChange(url, "failed", None, None, (attempt.attempt_id,), (code,)),),
+        unresolved=tuple(
+            SiteChange(
+                page.canonical_url,
+                "unresolved",
+                ChangeEvidence(page.artifact_id, page.content_digest),
+                None,
             )
-        )
+            for page in previous.pages
+        ),
+        previous_state=previous,
+        current_state=current,
+        site_skill_used=skill,
+        site_skill_update=None,
+        target_results=(target,),
+        attempts=(attempt,),
+        usage=target.usage,
+        stop_reason="acquisition_failed",
+        errors=target.errors,
     )
 
 
@@ -321,6 +389,7 @@ def test_site_explore_maps_request_to_one_runtime_call_with_contract_parity(
     assert len(runtime.requests) == 1
     assert runtime.requests[0].site_skill is None
     assert response.json() == _explore_result().to_dict()
+    assert response.json()["target_results"] == []
     assert len(provider_thread_ids) == len(runtime.explore_thread_ids) == 1
     assert runtime.explore_thread_ids[0] != provider_thread_ids[0]
 
@@ -344,6 +413,7 @@ def test_site_refresh_maps_request_to_one_runtime_call_with_contract_parity(
     assert isinstance(request, SiteRefreshRequest)
     assert request.site_skill.digest == request.previous_state.site_skill_digest
     assert response.json() == _refresh_result().to_dict()
+    assert response.json()["target_results"]
     assert SiteRefreshResult.from_dict(response.json()) == _refresh_result()
     assert len(provider_thread_ids) == len(runtime.refresh_thread_ids) == 1
     assert runtime.refresh_thread_ids[0] != provider_thread_ids[0]

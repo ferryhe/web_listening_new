@@ -18,6 +18,7 @@ from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import (
     Budgets,
     ContentType,
+    Request,
     RequestValidationError,
     Scope,
 )
@@ -26,6 +27,10 @@ from web_listening.result.model import ResultStatus
 from web_listening.runtime.site_refresh import (
     run_site_refresh,
     site_refresh_result_from_mapping,
+)
+from web_listening.runtime.workflow import (
+    prior_target_attempts,
+    run_single_target_bounded,
 )
 from web_listening.site_skill.model import (
     DiscoveryRecipe,
@@ -430,6 +435,14 @@ def test_normal_refresh_uses_stored_recipe_and_builds_six_exclusive_sets(
         clock=lambda: NOW,
     )
 
+    assert [item.manifest.run_id for item in result.target_results] == [
+        "refresh-source",
+        "refresh-candidate-1",
+        "refresh-candidate-2",
+        "refresh-candidate-3",
+        "refresh-candidate-4",
+    ]
+
     assert result.status is ResultStatus.COMPLETED
     assert result.refresh_complete is True
     assert result.stop_reason == "source_exhausted"
@@ -531,6 +544,22 @@ def test_allowed_cross_site_candidate_redirect_is_incomplete_and_unresolved(
     assert result.attempts[-1].final_url == redirected
     assert [error.code for error in result.errors] == ["runtime.site_identity_mismatch"]
     assert result.errors[0].details == ()
+    assert site_refresh_result_from_mapping(result.to_dict()) == result
+    forged = run_single_target_bounded(
+        Request(skill.scope, skill, False, limits),
+        Registry(),
+        store,
+        run_id="refresh-candidate-2",
+        clock=lambda: NOW,
+        target_url="https://example.test/z",
+        budget_limits=limits,
+    )
+    assert not forged.attempts
+    forged = replace(forged, errors=(result.errors[0],))
+    payload = result.to_dict()
+    payload["target_results"].append(forged.to_dict())
+    with pytest.raises(ValueError, match="site_refresh.target_results_mismatch"):
+        site_refresh_result_from_mapping(payload)
     store.close()
 
 
@@ -602,6 +631,12 @@ def test_same_site_candidate_redirect_retains_complete_canonical_evidence(
     assert result.failed == result.unresolved == ()
     assert result.errors == ()
     assert result.attempts[-1].final_url == redirected
+    redirected_result = result.target_results[-1]
+    assert redirected_result.manifest.requested_url == candidate
+    assert redirected_result.manifest.final_url == redirected
+    assert [item.to_url for item in redirected_result.manifest.redirects] == [
+        redirected
+    ]
     store.close()
 
 
@@ -1335,6 +1370,16 @@ def test_zero_attempt_source_rejection_keeps_history_unresolved(
     assert [item.url for item in result.unresolved] == [ROOT]
     assert [error.code for error in result.errors] == [error_code]
     assert discovery.calls == 0
+    assert len(result.target_results) == 1
+    source_result = result.target_results[0]
+    assert source_result.status is ResultStatus.REJECTED
+    assert source_result.manifest.run_id == "refresh-source"
+    assert source_result.attempts == ()
+    assert source_result.artifacts == source_result.manifest.artifacts == ()
+    payload = result.to_dict()
+    payload["target_results"].pop()
+    with pytest.raises(ValueError, match="site_refresh.target_results_mismatch"):
+        site_refresh_result_from_mapping(payload)
     store.close()
 
 
@@ -1368,6 +1413,11 @@ def test_missing_recipe_uses_phase_18b_recovery_and_returns_inactive_candidate(
     assert result.site_skill_used.sha256 == skill.digest.removeprefix("sha256:")
     assert recovery_discovery.calls == 1
     assert acquisition.targets == [ROOT, ROOT, "https://example.test/a"]
+    assert [item.manifest.run_id for item in result.target_results] == [
+        "refresh-source",
+        "refresh-recovery-seed",
+        "refresh-recovery-candidate-1",
+    ]
     store.close()
 
 
@@ -1929,7 +1979,9 @@ def test_xml_recovery_serializes_last_per_target_discovery_slot(tmp_path: Path) 
     store.close()
 
 
-def test_xml_recovery_at_per_target_limit_runs_no_discovery_io(tmp_path: Path) -> None:
+def test_xml_recovery_at_per_target_limit_runs_no_discovery_io(  # pylint: disable=too-many-locals
+    tmp_path: Path,
+) -> None:
     old_manifest = replace(HTML_LINKS_MANIFEST, tool_id="discovery.old")
     alternate_manifest = replace(ACQUISITION_MANIFEST, tool_id="acquisition.alternate")
     limits = Budgets(8, 65536, 30, 4)
@@ -2003,6 +2055,35 @@ def test_xml_recovery_at_per_target_limit_runs_no_discovery_io(tmp_path: Path) -
     assert "budget.exhausted" in {error.code for error in result.errors}
     assert result.usage.requests == 3
     assert result.usage.tool_attempts == 4
+    prior = tuple(
+        attempt
+        for attempt in result.attempts
+        if attempt.outcome != "skipped" and attempt.requested_url == ROOT
+    )
+    assert len(prior) == limits.max_tool_attempts_per_target
+    with prior_target_attempts(prior):
+        blocked = run_single_target_bounded(
+            Request(skill.scope, None, True, limits),
+            registry,
+            store,
+            run_id="refresh-recovery-candidate-1",
+            clock=lambda: NOW,
+            target_url=ROOT,
+            budget_limits=limits,
+        )
+    assert not blocked.attempts
+    assert [error.code for error in blocked.errors] == [
+        "eligibility.attempt_budget_exhausted"
+    ]
+    with_child = replace(
+        result,
+        target_results=result.target_results + (blocked,),
+        errors=result.errors + blocked.errors,
+    )
+    payload = with_child.to_dict()
+    payload["target_results"].pop()
+    with pytest.raises(ValueError, match="site_refresh.target_results_mismatch"):
+        site_refresh_result_from_mapping(payload)
     store.close()
 
 

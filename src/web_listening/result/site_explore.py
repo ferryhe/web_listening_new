@@ -1,4 +1,4 @@
-"""Strict deterministic SiteExploreResult v2 contract."""
+"""Strict deterministic SiteExploreResult v3 contract."""
 
 # pylint: disable=duplicate-code,missing-function-docstring
 # pylint: disable=too-many-boolean-expressions,unidiomatic-typecheck
@@ -19,9 +19,9 @@ from web_listening.result.errors import (
     validate_url,
 )
 from web_listening.result.manifest import Usage
-from web_listening.result.model import ResultStatus
+from web_listening.result.model import Result, ResultStatus
 
-SITE_EXPLORE_SCHEMA_VERSION = "web-listening-site-explore.v2"
+SITE_EXPLORE_SCHEMA_VERSION = "web-listening-site-explore.v3"
 _DISCOVERY_OUTCOMES = frozenset({"succeeded", "failed"})
 _DISCOVERY_COVERAGES = frozenset({"complete", "truncated", "unknown"})
 _STOP_REASONS = frozenset(
@@ -44,6 +44,20 @@ _BUDGET_ERROR_CODES = frozenset(
         "eligibility.byte_budget_exhausted",
         "eligibility.runtime_budget_exhausted",
         "eligibility.attempt_budget_exhausted",
+    }
+)
+_PARENT_ONLY_ERROR_CODES = frozenset(
+    {
+        "budget.exhausted",
+        "discovery.no_candidates",
+        "runtime.discovery_unavailable",
+        "runtime.discovery_url_unrepresentable",
+        "runtime.quality_minimum_words",
+        "runtime.site_explore_requires_no_site_skill",
+        "runtime.site_explore_single_seed_required",
+        "runtime.site_identity_mismatch",
+        "runtime.site_skill_discovery_unverified",
+        "runtime.site_skill_tool_unverified",
     }
 )
 _TOOL_ID = re.compile(r"[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*\Z")
@@ -213,6 +227,7 @@ class SiteExploreResult:  # pylint: disable=too-many-instance-attributes
     site_skill_candidate: SiteSkillCandidateEvidence | None
     site_skill_used: None
     discovery: tuple[DiscoveryEvidence, ...]
+    target_results: tuple[Result, ...]
     attempts: tuple[Attempt, ...]
     usage: Usage
     stop_reason: str
@@ -259,9 +274,60 @@ class SiteExploreResult:  # pylint: disable=too-many-instance-attributes
             isinstance(error, SafeError) for error in self.errors
         ):
             raise ResultValidationError("site_explore.errors_invalid")
+        self._validate_target_results()
         self._validate_consistency()
 
-    def _validate_consistency(self) -> None:
+    def _validate_target_results(self) -> None:
+        if type(self.target_results) is not tuple or not all(
+            type(item) is Result for item in self.target_results
+        ):
+            raise ResultValidationError("site_explore.target_results_invalid")
+        if not self.target_results:
+            if (
+                self.attempts
+                or self.discovery
+                or self.site_state.pages
+                or self.status is not ResultStatus.REJECTED
+                or self.stop_reason != "rejected"
+                or {error.code for error in self.errors}
+                not in (
+                    {"runtime.site_explore_requires_no_site_skill"},
+                    {"runtime.site_explore_single_seed_required"},
+                )
+            ):
+                raise ResultValidationError("site_explore.target_results_mismatch")
+            return
+        run_ids = tuple(item.manifest.run_id for item in self.target_results)
+        if len(run_ids) != len(set(run_ids)) or not run_ids[0].endswith("-seed"):
+            raise ResultValidationError("site_explore.target_results_duplicate")
+        if any(
+            result.attempts and result.attempts[0].attempt_id != result.manifest.run_id
+            for result in self.target_results
+        ):
+            raise ResultValidationError("site_explore.target_results_mismatch")
+        prefix = run_ids[0][:-5]
+        candidate_numbers: list[int] = []
+        for run_id in run_ids[1:]:
+            match = re.fullmatch(rf"{re.escape(prefix)}-candidate-([1-9]\d*)", run_id)
+            if match is None:
+                raise ResultValidationError("site_explore.target_results_mismatch")
+            candidate_numbers.append(int(match.group(1)))
+        if candidate_numbers != sorted(set(candidate_numbers)):
+            raise ResultValidationError("site_explore.target_results_order_invalid")
+        candidate_urls = tuple(
+            item.manifest.requested_url for item in self.target_results[1:]
+        )
+        discovered_urls = {
+            url for evidence in self.discovery for url in evidence.candidates
+        }
+        if (
+            candidate_urls != tuple(sorted(set(candidate_urls)))
+            or not set(candidate_urls).issubset(discovered_urls)
+            or any(item.site_skill_used is not None for item in self.target_results)
+        ):
+            raise ResultValidationError("site_explore.target_results_order_invalid")
+
+    def _validate_consistency(self) -> None:  # pylint: disable=too-many-branches
         candidate = self.site_skill_candidate
         if self.status is ResultStatus.COMPLETED and candidate is None:
             raise ResultValidationError("site_explore.completed_invalid")
@@ -316,7 +382,77 @@ class SiteExploreResult:  # pylint: disable=too-many-instance-attributes
             )
             if len(matching_attempts) != 1:
                 raise ResultValidationError("site_explore.discovery_evidence_mismatch")
+        discovery_attempt_ids = {
+            attempt.attempt_id
+            for evidence in self.discovery
+            for attempt in self.attempts
+            if attempt.tool_id == evidence.tool_id
+            and attempt.tool_version == evidence.tool_version
+            and attempt.requested_url == evidence.source_url
+            and attempt.final_url is None
+            and attempt.requests == 0
+            and attempt.bytes_received == 0
+            and attempt.outcome == evidence.outcome
+            and (
+                (attempt.error is None and evidence.error is None)
+                or (
+                    attempt.error is not None
+                    and evidence.error is not None
+                    and attempt.error.code == evidence.error.code
+                )
+            )
+        }
+        _validate_target_attempts(
+            self.target_results,
+            self.attempts,
+            discovery_attempt_ids=discovery_attempt_ids,
+            code="site_explore.target_results_mismatch",
+        )
+        discovery_attempts = tuple(
+            attempt
+            for attempt in self.attempts
+            if attempt.attempt_id in discovery_attempt_ids
+        )
+        expected_usage = Usage(
+            sum(result.usage.requests for result in self.target_results)
+            + sum(attempt.requests for attempt in discovery_attempts),
+            sum(result.usage.bytes_received for result in self.target_results)
+            + sum(attempt.bytes_received for attempt in discovery_attempts),
+            sum(result.usage.runtime_ms for result in self.target_results)
+            + sum(attempt.runtime_ms for attempt in discovery_attempts),
+            sum(result.usage.tool_attempts for result in self.target_results)
+            + sum(attempt.outcome != "skipped" for attempt in discovery_attempts),
+        )
+        if self.usage != expected_usage:
+            raise ResultValidationError("site_explore.target_results_mismatch")
+        source_evidence = {
+            (
+                artifact.source_url,
+                artifact.observation_id,
+                artifact.artifact_id,
+                f"sha256:{artifact.sha256}",
+            )
+            for result in self.target_results
+            for artifact in result.artifacts
+            if artifact.role == "source"
+        }
+        if any(
+            (
+                page.canonical_url,
+                page.observation_id,
+                page.artifact_id,
+                page.content_digest,
+            )
+            not in source_evidence
+            for page in self.site_state.pages
+        ):
+            raise ResultValidationError("site_explore.target_results_mismatch")
         self._validate_stop_reason_consistency(candidate)
+        _validate_target_errors(
+            self.target_results,
+            self.discovery,
+            self.errors,
+        )
         if self.status is ResultStatus.COMPLETED:
             successful_discovery_keys = {
                 (item.tool_id, item.tool_version, item.source_url)
@@ -409,13 +545,14 @@ class SiteExploreResult:  # pylint: disable=too-many-instance-attributes
                 "site_skill_candidate",
                 "site_skill_used",
                 "discovery",
+                "target_results",
                 "attempts",
                 "usage",
                 "stop_reason",
                 "errors",
             },
         )
-        for field in ("discovery", "attempts", "errors"):
+        for field in ("discovery", "target_results", "attempts", "errors"):
             if not isinstance(payload[field], list):
                 raise ResultValidationError("schema.invalid")
         candidate_payload = payload["site_skill_candidate"]
@@ -440,6 +577,9 @@ class SiteExploreResult:  # pylint: disable=too-many-instance-attributes
             discovery=tuple(
                 DiscoveryEvidence.from_dict(item) for item in payload["discovery"]
             ),
+            target_results=tuple(
+                Result.from_dict(item) for item in payload["target_results"]
+            ),
             attempts=tuple(Attempt.from_dict(item) for item in payload["attempts"]),
             usage=Usage.from_dict(payload["usage"]),
             stop_reason=payload["stop_reason"],
@@ -459,6 +599,7 @@ class SiteExploreResult:  # pylint: disable=too-many-instance-attributes
             ),
             "site_skill_used": None,
             "discovery": [item.to_dict() for item in self.discovery],
+            "target_results": [item.to_dict() for item in self.target_results],
             "attempts": [attempt.to_dict() for attempt in self.attempts],
             "usage": self.usage.to_dict(),
             "stop_reason": self.stop_reason,
@@ -467,6 +608,59 @@ class SiteExploreResult:  # pylint: disable=too-many-instance-attributes
 
     def canonical_json_bytes(self) -> bytes:
         return _canonical_bytes(self.to_dict())
+
+
+def _validate_target_attempts(
+    target_results: tuple[Result, ...],
+    attempts: tuple[Attempt, ...],
+    *,
+    discovery_attempt_ids: set[str],
+    code: str,
+) -> None:
+    child_attempts = tuple(
+        attempt for result in target_results for attempt in result.attempts
+    )
+    child_ids = tuple(attempt.attempt_id for attempt in child_attempts)
+    if len(child_ids) != len(set(child_ids)):
+        raise ResultValidationError(code)
+    aggregate_acquisition = tuple(
+        attempt
+        for attempt in attempts
+        if attempt.attempt_id not in discovery_attempt_ids
+    )
+    if tuple(item.attempt_id for item in aggregate_acquisition) != child_ids:
+        raise ResultValidationError(code)
+    for child, aggregate in zip(child_attempts, aggregate_acquisition):
+        child_payload = child.to_dict()
+        aggregate_payload = aggregate.to_dict()
+        child_payload.pop("order")
+        aggregate_payload.pop("order")
+        if child_payload != aggregate_payload:
+            raise ResultValidationError(code)
+
+
+def _validate_target_errors(
+    target_results: tuple[Result, ...],
+    discovery: tuple[DiscoveryEvidence, ...],
+    errors: tuple[SafeError, ...],
+) -> None:
+    if any(
+        not result.attempts
+        and any(error.code in _PARENT_ONLY_ERROR_CODES for error in result.errors)
+        for result in target_results[1:]
+    ):
+        raise ResultValidationError("site_explore.target_results_mismatch")
+    remaining = list(errors)
+    attributed = tuple(
+        error for result in target_results for error in result.errors
+    ) + tuple(item.error for item in discovery if item.error is not None)
+    for error in attributed:
+        try:
+            remaining.remove(error)
+        except ValueError as exc:
+            raise ResultValidationError("site_explore.target_results_mismatch") from exc
+    if any(error.code not in _PARENT_ONLY_ERROR_CODES for error in remaining):
+        raise ResultValidationError("site_explore.target_results_mismatch")
 
 
 __all__ = [

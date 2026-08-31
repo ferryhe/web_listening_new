@@ -50,7 +50,6 @@ from web_listening.tool_registry.protocols.discovery import (
 from web_listening.tool_registry.registry import Registry
 
 _MAX_CANDIDATES = 2
-_SITE_EXPLORE_V1 = "web-listening-site-explore.v1"
 _BUDGET_TERMINAL_CODES = frozenset(
     {
         "budget.requests",
@@ -69,7 +68,6 @@ _SHARED_BUDGET_TERMINAL_CODES = _BUDGET_TERMINAL_CODES - frozenset(
 
 def site_explore_result_from_mapping(value: object) -> SiteExploreResult:
     """Parse a result while delegating candidate semantics to Site Skill authority."""
-    value = _migrate_site_explore_v1(value)
     candidate_evidence = None
     if isinstance(value, Mapping):
         candidate_mapping = value.get("site_skill_candidate")
@@ -78,26 +76,6 @@ def site_explore_result_from_mapping(value: object) -> SiteExploreResult:
                 site_skill_from_mapping(candidate_mapping)
             )
     return SiteExploreResult.from_dict(value, site_skill_candidate=candidate_evidence)
-
-
-def _migrate_site_explore_v1(value: object) -> object:
-    if (
-        not isinstance(value, Mapping)
-        or value.get("schema_version") != _SITE_EXPLORE_V1
-    ):
-        return value
-    discovery = value.get("discovery")
-    if not isinstance(discovery, list) or any(
-        not isinstance(item, Mapping) or "coverage" in item for item in discovery
-    ):
-        return value
-    migrated = dict(value)
-    migrated["schema_version"] = "web-listening-site-explore.v2"
-    migrated["discovery"] = [
-        {**dict(item), "coverage": DiscoveryCoverage.UNKNOWN.value}
-        for item in discovery
-    ]
-    return migrated
 
 
 def run_site_explore(  # pylint: disable=too-many-arguments
@@ -820,6 +798,7 @@ def _result(  # pylint: disable=too-many-arguments
         site_skill_candidate=candidate_evidence,
         site_skill_used=None,
         discovery=discovery,
+        target_results=tuple(results),
         attempts=attempts,
         usage=usage,
         stop_reason=stop_reason,
@@ -843,6 +822,7 @@ def _empty_failure(
         site_skill_candidate=None,
         site_skill_used=None,
         discovery=(),
+        target_results=(),
         attempts=(),
         usage=Usage(0, 0, 0, 0),
         stop_reason="rejected",
