@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from web_listening.result.errors import ResultValidationError
+from web_listening.result.errors import ResultValidationError, SafeError
 from web_listening.result.model import ResultStatus
 from web_listening.result.site_batch import SiteBatchMode
 from web_listening.runtime.site_batch import site_batch_result_from_mapping
@@ -72,6 +72,61 @@ def test_recovered_fixture_keeps_partial_coverage_and_rollback_evidence() -> Non
         assert context.site_skill.scope.allowed_origins == (
             f"https://{context.site_skill.site_key}",
         )
+
+
+@pytest.mark.parametrize(
+    ("requested_url", "site_key"),
+    (
+        ("https://[::1]/", "::1"),
+        ("https://[::1]:8443/", "::1"),
+        ("https://[fe80::1%25eth0]:8443/", "fe80::1%25eth0"),
+    ),
+)
+def test_result_round_trips_canonical_ipv6_request_identity(
+    requested_url: str,
+    site_key: str,
+) -> None:
+    payload = _payload("site-batch-first-usable.v1.json")
+    child = payload["site_results"][0]
+    error = SafeError(
+        "budget.exhausted",
+        "Exploration budget was exhausted.",
+    ).to_dict()
+    payload["site_keys"][0] = site_key
+    payload["usable_site_keys"][0] = site_key
+    payload["next_refresh_contexts"].pop(0)
+    payload["status"] = "partial"
+    payload["stop_reason"] = "partial"
+    payload["errors"] = [error]
+    child["status"] = "partial"
+    child["exploration_complete"] = False
+    child["site_skill_candidate"] = None
+    child["site_state"]["complete"] = False
+    child["site_state"]["site_skill_digest"] = None
+    child["stop_reason"] = "budget_exhausted"
+    child["errors"] = [error]
+    seed = child["target_results"][0]
+    seed["manifest"]["requested_url"] = requested_url
+    seed["manifest"]["redirects"] = [
+        {
+            "order": 0,
+            "from_url": requested_url,
+            "to_url": "https://one.test/",
+            "http_status": 302,
+            "decision": "followed",
+        }
+    ]
+    seed["attempts"][0]["requested_url"] = requested_url
+    seed["manifest"]["attempts"][0]["requested_url"] = requested_url
+    child["attempts"][0]["requested_url"] = requested_url
+
+    result = site_batch_result_from_mapping(payload)
+
+    assert result.site_keys[0] == site_key
+    assert result.site_results[0].target_results[0].manifest.requested_url == (
+        requested_url
+    )
+    assert json.loads(result.canonical_json_bytes()) == payload
 
 
 @pytest.mark.parametrize(

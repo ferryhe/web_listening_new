@@ -29,7 +29,9 @@ from web_listening.result.site_refresh import SiteRefreshResult, SiteSkillUpdate
 SITE_BATCH_RESULT_SCHEMA_VERSION = "web-listening-site-batch-result.v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _HTTP_URL_HOST = re.compile(
-    r"https?://(?P<host>[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)"
+    r"https?://(?:"
+    r"(?P<dns_host>[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)|"
+    r"\[(?P<ipv6_host>[^\]]+)\])"
     r"(?::[1-9][0-9]{0,4})?(?:/|\Z)"
 )
 _DIRECT_CHILD_RUN_ID_MAXIMUM = 96
@@ -345,7 +347,7 @@ def _requested_site_key(result: SiteResult) -> str:
     matched = _HTTP_URL_HOST.match(result.target_results[0].manifest.requested_url)
     if matched is None:
         raise ResultValidationError("site_batch.site_order_invalid")
-    return matched.group("host")
+    return matched.group("dns_host") or matched.group("ipv6_host")
 
 
 def _usage(results: tuple[SiteResult, ...]) -> Usage:
