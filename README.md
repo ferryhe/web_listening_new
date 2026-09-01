@@ -179,6 +179,13 @@ Site Skill v1 stops working
 
 The Site Skill is a client-owned input and output. Web Listening may return an update candidate, but it must not silently replace the client's active version.
 
+For a multi-site run, the batch Result makes that handoff explicit. Each usable site
+gets a persisted `next_refresh_context`: replay keeps the Site Skill that actually
+worked, while governed recovery binds a validated replacement candidate to the
+new Current State. The replacement retains `previous_digest`, so the caller can
+audit or roll back the lineage. Coverage evidence such as `truncated` or `unknown`
+does not erase content already acquired successfully.
+
 ## 5. Simple Request Contract
 
 The common Request should expose only four important inputs:
@@ -713,6 +720,13 @@ The first production-ready version must prove that:
 15. External tool upgrades support side-by-side qualification, atomic activation, and rollback.
 16. Adding a conforming tool does not change the public CLI, REST, or MCP Request shape.
 
+Availability-first batch acceptance is implemented as a strict `first`/`refresh`
+Request and Result boundary. Sites run serially with independent per-site budgets;
+only explicit cancellation stops later sites. Results expose
+`replayed | recovered | failed`, `usable_site_keys`, exact aggregate Usage, and
+strictly round-trippable `next_refresh_contexts`. The fixed SOA/CAS/IAA live proof
+remains opt-in and requires an explicit authorization window.
+
 ## 20. Final Positioning
 
 ```text
@@ -729,3 +743,9 @@ Result         = one consistent delivery for people and agents
 The most important outcome is:
 
 > An agent may explore once and leave behind a Site Skill. Later runs can execute predictably without AI or repeated exploration, while every successful visit still creates a new immutable observation for monitoring and change detection.
+
+Phase 20 applies this model availability-first across sites: each authorized site
+gets its own bounded ledger, saved recipes recover through the same governed
+single-site path, and successful HTML, Markdown, or download evidence remains
+deliverable even when discovery coverage is incomplete. Coverage reports what was
+proved; it does not decide whether verified Current pages are usable.

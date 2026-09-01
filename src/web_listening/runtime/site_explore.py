@@ -961,11 +961,10 @@ def _passes_success_checks(
 ) -> bool:
     for result in results:
         source = _source_artifact(result)
-        if source is None or source.mime_type not in {
-            "application/xhtml+xml",
-            "text/html",
-        }:
+        if source is None:
             return False
+        if source.mime_type not in {"application/xhtml+xml", "text/html"}:
+            continue
         stored = artifact_store.read_artifact(source.artifact_id)
         if len(stored.content.decode("utf-8", errors="ignore").split()) < 1:
             return False

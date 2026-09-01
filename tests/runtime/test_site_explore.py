@@ -2119,6 +2119,62 @@ def test_candidate_recipe_uses_successful_candidate_discovery_provenance(
     store.close()
 
 
+def test_complete_mixed_html_and_file_builds_replayable_candidate(
+    tmp_path: Path,
+) -> None:
+    file_url = "https://example.test/report.pdf"
+    acquisition = _Acquisition(
+        {
+            "https://example.test/": b"<a href='/report.pdf'>report</a>",
+            file_url: b"%PDF-1.7 offline evidence",
+        },
+        mime_types={
+            "https://example.test/": "text/html",
+            file_url: "application/pdf",
+        },
+    )
+    registry = Registry()
+    registry.register(
+        HTML_LINKS_MANIFEST,
+        _StaticDiscovery(file_url, HTML_LINKS_MANIFEST),
+    )
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "artifacts-mixed-candidate")
+    request = replace(
+        _request(max_requests=2, max_attempts=3),
+        scope=replace(
+            _request().scope,
+            content_types=(ContentType.HTML, ContentType.FILE),
+        ),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="explore-mixed-candidate",
+        clock=lambda: NOW,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert result.site_skill_candidate is not None
+    assert result.discovery[0].candidates == (file_url,)
+    assert [item.manifest.mime_type for item in result.target_results] == [
+        "text/html",
+        "application/pdf",
+    ]
+    candidate = site_skill_from_mapping(result.site_skill_candidate.to_dict())
+    assert candidate.success_checks.allowed_mime_types == (
+        "application/pdf",
+        "text/html",
+    )
+    assert [page.canonical_url for page in result.site_state.pages] == [
+        "https://example.test/",
+        file_url,
+    ]
+    store.close()
+
+
 def test_candidate_body_must_pass_actual_stored_success_checks(tmp_path: Path) -> None:
     acquisition, registry, store = _runtime(
         tmp_path,
