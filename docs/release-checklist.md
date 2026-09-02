@@ -77,11 +77,12 @@ GO requires every item. A missing, skipped, failed, or `BLOCKED` item is NO-GO.
   cap.
 - [x] Branch, base-to-working-tree name status, and exact untracked paths are
   recorded; only the seven Issue-authorized paths exist.
-- [ ] A replacement immutable runtime candidate is recorded. The prior candidate
+- [x] Replacement immutable runtime candidate
+  `9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d` is recorded. The prior candidate
   `40c5bf091a7c536e9985c719312156da670036d6` and its Live/audit evidence were
   superseded when both parity runtime-critical files changed.
-- [ ] Replacement-candidate cache cleanup removes all worktree `__pycache__`,
-  pytest/tool caches, and `.pyc` files and independently re-enumerates zero.
+- [x] After the replacement candidate commit, worktree `__pycache__`,
+  pytest/tool caches, and `.pyc` files were independently re-enumerated as zero.
 - [ ] Authorized replacement Live run(s), repeated on failure until one passes,
   prove all four frozen sites, ordinary HTML, derived Markdown, and a
   discovered/re-authorized PDF or download whose same canonical URL is refetched
@@ -94,11 +95,16 @@ GO requires every item. A missing, skipped, failed, or `BLOCKED` item is NO-GO.
 - [ ] Required CI/checks pass on the final candidate.
 - [ ] A human with separate production authority explicitly authorizes a switch.
 
-Current recommendation: **NO-GO**. Replacement candidate/cache identity,
-replacement Live and independent I/O audit, required CI, and separate
-production-switch authorization remain.
+Current recommendation: **NO-GO**. Replacement Live and independent I/O audit,
+required CI, and separate production-switch authorization remain.
 
 ## Candidate identity and path integrity
+
+The active, tested runtime candidate is immutable commit
+`9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d`. After that commit, the manager
+verified a clean worktree and zero cache directories or `.pyc` files. This
+two-document evidence overlay changes none of the four runtime-critical file
+identities recorded in the delivery report.
 
 The superseded prior candidate and Live preparation recorded:
 
@@ -127,7 +133,8 @@ The superseded prior candidate and Live preparation recorded:
    authorized rerun.
 
 The two parity-file byte changes supersede that prior candidate's Live and audit
-evidence. Record replacement runtime-critical hashes and complete the authorized
+evidence. Replacement candidate `9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d`
+and its runtime-critical hashes are now frozen; complete the authorized
 replacement Live and different fresh audit before checking those gates. The
 historical evidence below remains factual but is not active release evidence.
 

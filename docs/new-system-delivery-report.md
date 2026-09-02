@@ -276,10 +276,10 @@ as the sole continuation authority, all six change sets and the feed, the
 status guard, and all four runtime-critical hashes.
 
 These results remain factual historical evidence for the prior runtime
-candidate, but they do not satisfy the current Live or audit gate. After the
-replacement parity candidate is frozen, authorized Live run(s) may repeat on
-failure until one passes, followed by a different fresh audit of that passing
-bundle.
+candidate, but they do not satisfy the current Live or audit gate. Replacement
+runtime candidate `9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d` is now frozen;
+authorized Live run(s) may repeat on failure until one passes, followed by a
+different fresh audit of that passing bundle.
 
 ## Files changed
 
@@ -536,14 +536,13 @@ remaining rows are retained from the prior #72/#69 candidate:
 
 ## Path, cache, and Git audit
 
-Branch is `codex/issue-72-independent-refresh-budget`. The superseded prior
-pre-Live candidate is `40c5bf091a7c536e9985c719312156da670036d6`; its Issue base is
-`f43000ab0f170b376b5b19cd84ee3bb2f51f13f6`. The candidate contains the exact
-seven authorized Issue paths and the merged #75, #78, and #83 prerequisites.
-Candidate cache cleanup was completed and independently re-enumerated as zero
-before the prior Live. The current remote-feedback worktree modifies both parity
-files, README's status line, and the two Issue documentation files. A replacement
-candidate and cache re-enumeration are pending.
+Branch is `codex/issue-72-independent-refresh-budget`. Tested replacement runtime
+candidate `9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d` is based on
+`f43000ab0f170b376b5b19cd84ee3bb2f51f13f6` and contains the exact seven
+authorized Issue paths plus the merged #75, #78, and #83 prerequisites. After
+the candidate commit, the manager verified a clean worktree and independently
+re-enumerated zero cache directories and zero `.pyc` files. This two-document
+evidence-only overlay changes none of the four runtime-critical identities.
 
 Current replacement-pre-Live runtime-critical identities are:
 
@@ -555,22 +554,22 @@ Current replacement-pre-Live runtime-critical identities are:
 | `tests/live/phase_20_new_system_delivery_targets.json` | 4512 | `571F6DEDA8A7D121415495DF62A058793DCC7E157A10A99D5D76E3B6CEE604A6` |
 
 These two parity identities differ from the prior Live candidate, so that Live
-and audit are superseded. Freeze a replacement candidate, re-enumerate caches,
-then run authorized replacement Live attempts until one passes and have a
-different fresh auditor inspect its bundle.
+and audit are superseded. They are frozen in replacement candidate
+`9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d`; run authorized replacement Live
+attempts until one passes and have a different fresh auditor inspect its bundle.
 
 ## Risks and blockers
 
-- A replacement candidate/cache record, passing authorized Live, and different
-  fresh I/O audit remain pending.
+- A passing authorized replacement Live and different fresh I/O audit remain
+  pending.
 - Required CI has not yet passed on the final candidate.
 - Separate production-switch authority has not authorized a switch. No
   production switch is recommended or executed.
 
-## Current Git status
+## Historical pre-commit worktree snapshot
 
-After this remote-feedback fix, `git status --short --untracked-files=all`
-reports exactly these five authorized paths:
+Immediately before commit `9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d`, the
+remote-feedback fix had exactly these five authorized paths:
 
 ```text
  M README.md
@@ -580,7 +579,8 @@ reports exactly these five authorized paths:
  M tests/parity/test_phase_20_new_system_delivery.py
 ```
 
-This remote-feedback fix performed no commit, push, PR, merge,
-branch/worktree deletion, production switch, bundle mutation, or Live network
-call. Prior Live/audit facts remain historical; replacement external evidence is
-pending.
+Commit `9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d` froze those runtime and
+documentation changes; the manager then verified a clean worktree and zero
+caches. This worker's subsequent two-document evidence overlay performs no
+runtime change, production switch, bundle mutation, or Live network call. Prior
+Live/audit facts remain historical; replacement external evidence is pending.
