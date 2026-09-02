@@ -10,9 +10,10 @@ concurrency 1 and retry 0. The frozen
 README evidence matrix remains complete. After prerequisites #75, #78, and #83, both
 public batch calls retain their real ordered child target Results, including derived
 Markdown, lineage, Transform Attempts, and goal-aware file evidence without
-creating another Request or network budget. The authorized multi-site Live run and fresh independent I/O
-audit have not run, so the release decision remains **NO-GO**. This change does
-not execute a production switch.
+creating another Request or network budget. The one authorized multi-site Live
+run and the different fresh independent I/O audit both passed. Required CI and
+separate production-switch authorization remain, so the release decision is
+still **NO-GO**. This change does not execute a production switch.
 
 ## Frozen README authority and matrix
 
@@ -72,8 +73,8 @@ Clause counts are:
 | 17 | 8 | 19 | 16 | Total | 191 |
 
 The complete machine-readable matrix is returned by
-`readme_evidence_matrix`; the independent auditor can reconstruct and compare
-all rows without trusting this report.
+`readme_evidence_matrix`; the independent auditor reconstructed and compared all
+rows without trusting this report.
 
 ## Section 19 exact matrix
 
@@ -149,8 +150,9 @@ acquisition in the test layer. The runner uses production
 
 Live execution defaults to offline and additionally requires
 `WEB_LISTENING_RUN_LIVE=1` plus a nonempty authorization-window reference. The
-environment cannot supply a URL. Live is still pending, so the required three
-successful sites and three complete capabilities remain `BLOCKED` for release.
+environment cannot supply a URL. The one authorized run set only those two
+inputs, injected no URL, and returned exit 0 with all four frozen sites plus the
+HTML, Markdown-lineage, and same-PDF refresh capabilities passing.
 
 ### AC-3 — complete content-free delivery
 
@@ -215,15 +217,55 @@ the eligible-HTML rule executes the default HTML-to-Markdown Transform; and
 §19 MCP, eligibility-intersection, and interface-shape rows execute their real
 public contracts rather than relying on source scans or one negative example.
 
-Live writes outside the checkout to a fixed sibling audit root. A unique staging
-directory contains the real batch SQLite/blob store, per-site canonical SiteStates,
-and content-free evidence, then receives a size/SHA manifest and is atomically
-renamed. The emitted locator includes the exact final path, run ID, manifest
-size/SHA, and retention rule. A fresh auditor can verify the file set and reopen
-SQLite in read-only immutable mode. The bundle is retained until that different
-audit completes, then is eligible for exact-locator cleanup. Live, independent
-I/O audit, final CI, and production authorization remain required and therefore
-release is not recommended yet.
+Live wrote outside the checkout to the fixed sibling audit root. Its unique
+staging directory contained the real batch SQLite/blob store, per-site canonical
+SiteStates, and content-free evidence, then received a size/SHA manifest and was
+atomically renamed. The emitted locator includes the exact final path, run ID,
+manifest SHA, and retention rule. A different fresh auditor reopened SQLite in
+read-only immutable mode and returned `AUDIT PASS` after 1,944 atomic checks.
+Required CI and separate production authorization remain, so release is not
+recommended yet.
+
+#### Authorized Live and independent audit
+
+Immutable pre-Live candidate commit is
+`40c5bf091a7c536e9985c719312156da670036d6`. A fresh tester used a temporary
+Python 3.14 candidate runtime with
+`-m pytest -q -m live tests/live/test_phase_20_new_system_delivery_live.py`.
+The environment contained only `WEB_LISTENING_RUN_LIVE=1` and
+`WEB_LISTENING_LIVE_AUTHORIZED_WINDOW=issue-72-authorized-2026-09-02`; no URL was
+injected. The command returned exit 0 with
+`1 passed, 7 deselected in 19.77s`.
+
+Run ID is `phase-20-20260902T141716Z-00301780615b4f628e70454be9b778dc`.
+The retained bundle locator is
+`C:\Users\ferry\.codex\worktrees\eb2f\.web-listening-audit-bundles\issue-72\phase-20-20260902T141716Z-00301780615b4f628e70454be9b778dc`;
+manifest SHA-256 is
+`265bc3639582d93bd02d0c98662aba00459ec14502f74d20c0f0374be71b91c2`.
+SOA, CAS, IAA, and IPCC were all `PASS`. HTML, Markdown lineage, and PDF
+capabilities were all true. CAS and IAA each proved that the same canonical PDF
+was refreshed with a new Observation and that unchanged content reused the
+Artifact/Blob identity.
+
+FIRST Request hash is
+`42991abe5a968c1246aa475ba49b489c788b9091a444d63cefdd7ecdef829523`;
+REFRESH Request hash is
+`f19955f40fd16dca8cd90695efb4975479ed8fb6c701533a89215f4a4088b238`.
+Every site in both phases started from zero with limits of 12 requests,
+52,428,800 bytes, 60 seconds, concurrency 1, and retry 0. Every per-site budget
+and reconciliation check passed. Audit-only totals were FIRST
+`20 requests / 22,428,878 bytes`, REFRESH
+`24 requests / 22,290,427 bytes`, and combined
+`44 requests / 44,719,305 bytes / 19.133537 seconds`.
+
+The different fresh auditor returned `AUDIT PASS` after 1,944 atomic checks. It
+closed exactly 36 of 36 manifest payloads with no missing, extra, or escaping
+path. Read-only SQLite inspection reconciled 26 Blobs, 26 Artifacts,
+36 Observations, 43 FIRST child Results, 12 REFRESH child Results, and 16 Markdown
+lineage records. It also closed four canonical SiteState/SiteSkill strict reloads
+as the sole continuation authority, all six change sets and the feed, the
+191-row README matrix, the `2fed958e...` baseline, the `f43000ab...` candidate
+status guard, and all four runtime-critical hashes.
 
 ## Files changed
 
@@ -281,14 +323,16 @@ Live snapshot contract reads only the Issue-owned operational target file.
    capabilities.
 4. A download is delivered as its actual governed MIME and original Artifact; no
    document content parser is implied.
-5. Matrix `PASS` records the actual successful command on this candidate. A fresh
-   auditor must rerun it; documentation alone is not evidence.
+5. Matrix `PASS` records the actual successful command on this candidate. The
+   different fresh auditor reconstructed all 191 rows; documentation alone is
+   not evidence.
 6. Candidate failures and policy rejections are delivery evidence, not SiteState
    pages. They remain content-free Results while only a successful source
    Artifact may enter the client-owned initial state projection.
 7. The fixed checkout-sibling audit root is local operational evidence, not a
-   business-authority input. Live accepts neither URLs nor a bundle path from the
-   environment, and the emitted exact locator governs later audit and cleanup.
+   business-authority input. Live accepted neither URLs nor a bundle path from
+   the environment, and the emitted exact locator governed the completed audit
+   and any later authorized cleanup.
 8. A fenced block is normative only when the frozen README binds it through one
    of the three exact §5/§12 contract lead-ins. A colon-ending prose line is
    independently normative only when it is one of the five frozen claims named
@@ -326,10 +370,10 @@ Live snapshot contract reads only the Issue-owned operational target file.
 - Offline candidate acquisition covers successful Discovery-provided candidates,
   a real acquisition-tool failure, and a scope-rejected candidate. Every returned
   Result is delivered; only the successful subset can become state pages.
-- The bundle sibling audit covers unique staging/final names, same-parent atomic
+- The completed bundle sibling audit covered unique staging/final names, same-parent atomic
   rename, exact relative-path containment, manifest file-set/size/SHA checks,
   blob size/SHA checks, and SQLite read-only immutable reopening. Completed
-  bundles are retained for a different fresh auditor, not pytest cleanup.
+  evidence was retained through the different fresh auditor, not pytest cleanup.
 - Goal-aware production tests include alphabetically earlier HTML siblings before
   a PDF, CAS/IAA `required`, SOA/IPCC `not_required`, strict child scopes, and
   factual Result status. Candidate choice and authorization remain entirely in
@@ -396,7 +440,7 @@ used to remove general release control:
 | Independent I/O audit | Retained for one-system Result/ArtifactStore/SiteState/refresh/feed/budget reconciliation and frozen README reconstruction |
 | Required CI and separate production authority | Retained as unchecked release gates |
 | Rollback | Retained as non-executing advice to preserve the currently approved immutable release, check new-system health after an authorized switch, and revert on failure |
-| Evidence retention and secret/body exclusion | Retained with exact required artifacts and prohibited content; the real bundle survives until fresh I/O audit and is then cleaned by exact locator |
+| Evidence retention and secret/body exclusion | Retained with exact required artifacts and prohibited content; the real bundle survived through the fresh I/O audit and is eligible for authorized exact-locator cleanup |
 
 The rewritten checklist therefore removes comparison-only machinery while
 preserving every generally applicable new-system release, audit, identity,
@@ -430,8 +474,8 @@ The interpreter has no editable install, so accepted commands use `PYTHONPATH=sr
 | `py -3.14 -m isort --check-only src tests` | PASS; exit 0, no output |
 | `py -3.14 -m pylint src/web_listening tests` with `PYTHONPATH=src` | PASS; exit 0, `10.00/10` |
 | `git diff --check` | PASS; exit 0; only Git line-ending notices |
-| Authorized Live | Not run; required fresh Live evidence pending |
-| Independent I/O audit | Not run; required fresh audit pending |
+| Authorized Live | PASS; exit 0, `1 passed, 7 deselected in 19.77s`; four of four sites and all HTML/Markdown/PDF capabilities passed |
+| Independent I/O audit | `AUDIT PASS`; 1,944 atomic checks and 36/36 manifest payloads closed |
 
 The host's default `python` resolves to Python 3.11, while this repository's
 subprocess runner uses `Path.is_junction` and requires the documented Python 3.14
@@ -476,23 +520,16 @@ remaining rows are retained from the prior #72/#69 candidate:
 
 ## Path, cache, and Git audit
 
-Branch is `codex/issue-72-independent-refresh-budget`. Current `HEAD` and
-merge-base are both `f43000ab0f170b376b5b19cd84ee3bb2f51f13f6`; no commit was created
-because this worker is not authorized to commit. The dirty exact-seven-path
-candidate was preserved byte-for-byte while the branch advanced through the
-merged #75, #78, and #83 prerequisites. `git diff --name-status -M <base>` reports
-only modified `README.md` and `docs/release-checklist.md`. The exact untracked
-audit reports the other five authorized paths, for seven paths total and no
-extra path.
+Branch is `codex/issue-72-independent-refresh-budget`. Immutable pre-Live
+candidate `HEAD` is `40c5bf091a7c536e9985c719312156da670036d6`; its Issue base is
+`f43000ab0f170b376b5b19cd84ee3bb2f51f13f6`. The candidate contains the exact
+seven authorized Issue paths and the merged #75, #78, and #83 prerequisites.
+Candidate cache cleanup was completed and independently re-enumerated as zero
+before Live. This post-Live overlay modifies only README's status line and the
+two Issue documentation files.
 
-This worker did not perform cache cleanup because its authority is limited to
-the exact seven Issue paths and explicitly excludes cleanup. The final manager
-must resolve and verify every generated cache target inside this exact worktree,
-remove only those generated targets, and re-enumerate zero before publication.
-The worker's final read-only enumeration found 16 `__pycache__` directories and
-55 `.pyc` files; all other Git-visible paths match the expected exact seven.
-
-Current runtime-critical pre-Live identities are:
+Immutable candidate runtime-critical identities used by Live and rechecked
+unchanged after this documentation overlay are:
 
 | Path | Bytes | SHA-256 |
 |---|---:|---|
@@ -501,36 +538,27 @@ Current runtime-critical pre-Live identities are:
 | `tests/live/test_phase_20_new_system_delivery_live.py` | 70124 | `C3184E9AE248EADDC7C45D60D88F51C6C9E73ECE97C326F5DB9AE383D800090B` |
 | `tests/live/phase_20_new_system_delivery_targets.json` | 4512 | `571F6DEDA8A7D121415495DF62A058793DCC7E157A10A99D5D76E3B6CEE604A6` |
 
-A fresh tester must recompute these after the publisher creates an immutable
-candidate revision; any runtime-critical difference requires rerunning Live.
+Any runtime-critical difference after this point invalidates the recorded Live
+evidence and requires a new explicitly authorized run.
 
 ## Risks and blockers
 
-- Live behavior can change with real site availability and content. The fixed
-  snapshot allows extra honest failures but requires three distinct successful
-  sites and all capabilities; until observed, release remains blocked.
-- The PDF capability depends on a reviewed page actually exposing an in-scope PDF
-  link during the authorized window; the test will not guess a replacement URL.
-- Independent I/O audit, required CI, and separate production authority are
-  missing. No production switch is recommended or executed.
-- The final immutable candidate revision does not exist yet because this worker
-  was explicitly prohibited from committing; the publisher must record it before
-  Live/release.
+- Required CI has not yet passed on the final documentation candidate.
+- Separate production-switch authority has not authorized a switch. No
+  production switch is recommended or executed.
 
 ## Current Git status
 
-After the manager removes the enumerated generated caches,
-`git status --short --untracked-files=all` must report exactly:
+After this documentation overlay, `git status --short --untracked-files=all`
+reports exactly these three authorized paths:
 
 ```text
  M README.md
  M docs/release-checklist.md
-?? docs/new-system-delivery-report.md
-?? tests/live/phase_20_new_system_delivery_targets.json
-?? tests/live/test_phase_20_new_system_delivery_live.py
-?? tests/parity/phase_20_new_system_delivery.py
-?? tests/parity/test_phase_20_new_system_delivery.py
+ M docs/new-system-delivery-report.md
 ```
 
-No commit, push, PR, merge, branch/worktree deletion, production switch, or Live
-network call was performed.
+This documentation overlay performed no commit, push, PR, merge,
+branch/worktree deletion, production switch, bundle mutation, or Live network
+call. The single authorized Live run and different fresh audit are the completed
+external evidence recorded above.

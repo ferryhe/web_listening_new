@@ -1,6 +1,6 @@
 # Web Listening Modular Redesign
 
-> Status: Proposed target design; Issue #72 production SiteBatch file-goal and independent per-site 50 MiB offline evidence complete, authorized Live and independent I/O audit pending
+> Status: Proposed target design; Issue #72 offline, authorized Live, and independent I/O audit evidence complete; required CI and separate production-switch authorization pending
 > Audience: Product owners, client developers, tool integrators, and maintainers  
 > Important: This document describes the intended future design, not functionality already enabled in the current repository.
 
