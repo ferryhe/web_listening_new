@@ -18,9 +18,11 @@ switch.
 - Runtime evidence: only the current `web_listening` public production APIs and
   the real `ArtifactStore`.
 
-The post-Live documentation overlay changes only the working README status line.
-Tests always reconstruct acceptance clauses from the older frozen Git object,
-never from the working copy.
+The exact older README bytes are embedded in the parity evidence and verified by
+their Git blob identity, canonical CRLF SHA-256, and 731-line count. Tests never
+depend on checkout history or the working README for acceptance truth. The
+candidate status guard normalizes only the working README status line and
+verifies the entire result against the frozen Issue-base README blob identity.
 
 ## GO / NO-GO gate
 
@@ -75,34 +77,40 @@ GO requires every item. A missing, skipped, failed, or `BLOCKED` item is NO-GO.
   cap.
 - [x] Branch, base-to-working-tree name status, and exact untracked paths are
   recorded; only the seven Issue-authorized paths exist.
-- [x] Immutable pre-Live candidate revision
-  `40c5bf091a7c536e9985c719312156da670036d6` is recorded.
-- [x] Candidate cache cleanup removed all worktree `__pycache__`, pytest/tool
-  caches, and `.pyc` files and independently re-enumerated zero before Live.
-- [x] Fresh authorized Live passed all four frozen sites and proved
-  ordinary HTML, derived Markdown, and a discovered/re-authorized PDF or download
-  whose same canonical URL is refetched on refresh with a new Observation and
-  valid same-byte reuse or changed-byte Artifact/Blob identity.
-- [x] A different fresh I/O auditor reconciled the emitted content-free evidence
-  with the real `ArtifactStore`, Result, SiteState, and physical network budget:
-  `AUDIT PASS`, 1,944 atomic checks.
+- [ ] A replacement immutable runtime candidate is recorded. The prior candidate
+  `40c5bf091a7c536e9985c719312156da670036d6` and its Live/audit evidence were
+  superseded when both parity runtime-critical files changed.
+- [ ] Replacement-candidate cache cleanup removes all worktree `__pycache__`,
+  pytest/tool caches, and `.pyc` files and independently re-enumerates zero.
+- [ ] Authorized replacement Live run(s), repeated on failure until one passes,
+  prove all four frozen sites, ordinary HTML, derived Markdown, and a
+  discovered/re-authorized PDF or download whose same canonical URL is refetched
+  on refresh with a new Observation and valid same-byte reuse or changed-byte
+  Artifact/Blob identity.
+- [ ] After the passing replacement Live, a different fresh replacement I/O
+  auditor reconciles the emitted
+  content-free evidence with the real `ArtifactStore`, Result, SiteState, and
+  physical network budget.
 - [ ] Required CI/checks pass on the final candidate.
 - [ ] A human with separate production authority explicitly authorizes a switch.
 
-Current recommendation: **NO-GO**. Required CI and separate production-switch
-authorization are the only remaining gates.
+Current recommendation: **NO-GO**. Replacement candidate/cache identity,
+replacement Live and independent I/O audit, required CI, and separate
+production-switch authorization remain.
 
 ## Candidate identity and path integrity
 
-The candidate and Live preparation recorded:
+The superseded prior candidate and Live preparation recorded:
 
 1. Immutable candidate commit
    `40c5bf091a7c536e9985c719312156da670036d6` on
    `codex/issue-72-independent-refresh-budget`; a mutable branch name alone is
    not the release identity.
-2. Treat `f43000ab0f170b376b5b19cd84ee3bb2f51f13f6:README.md` as the immutable
+2. Treat revision `f43000ab0f170b376b5b19cd84ee3bb2f51f13f6` and README blob
+   `af52bc5ea28f4e1e42430462b86653629397ae3e` as the self-contained immutable
    candidate status-line guard, distinct from the older frozen clause-matrix
-   object above. Run
+   authority above. The guard needs no Git history: it restores only the exact
+   frozen status line and derives the complete README blob identity. Run
    `git diff --name-status -M f43000ab0f170b376b5b19cd84ee3bb2f51f13f6`
    and `git ls-files --others --exclude-standard`. Reject missing, extra, deleted,
    conflicted, or out-of-scope paths. The only allowed paths are the two new
@@ -118,9 +126,10 @@ The candidate and Live preparation recorded:
    runtime-critical files invalidates Live evidence and requires a fresh
    authorized rerun.
 
-Documentation-only updates after Live must not rewrite runtime evidence. The
-completed independent audit recorded the immutable runtime candidate; this
-documentation-only overlay is tracked separately.
+The two parity-file byte changes supersede that prior candidate's Live and audit
+evidence. Record replacement runtime-critical hashes and complete the authorized
+replacement Live and different fresh audit before checking those gates. The
+historical evidence below remains factual but is not active release evidence.
 
 ## Exact commands
 
@@ -171,7 +180,7 @@ it does not prefill or guess a PDF URL. A required site passes only when both
 FIRST and REFRESH return production `satisfied` status and the real child Results
 also prove the same canonical PDF/download refresh semantics.
 
-The one authorized run used a temporary Python 3.14 candidate runtime with
+The superseded prior authorized run used a temporary Python 3.14 candidate runtime with
 `-m pytest -q -m live tests/live/test_phase_20_new_system_delivery_live.py`.
 Only `WEB_LISTENING_RUN_LIVE=1` and
 `WEB_LISTENING_LIVE_AUTHORIZED_WINDOW=issue-72-authorized-2026-09-02` were set;
@@ -196,7 +205,7 @@ FIRST `20 requests / 22,428,878 bytes`, REFRESH
 `24 requests / 22,290,427 bytes`, and combined
 `44 requests / 44,719,305 bytes / 19.133537 seconds`.
 
-## Recorded Live evidence
+## Required replacement Live evidence
 
 Retain one redacted JSON packet containing:
 
@@ -233,9 +242,9 @@ contains each real ArtifactStore SQLite/blob repository, canonical persisted
 SiteState files, the content-free packet, and a self-checking file manifest. It
 does not accept a bundle path or target URL from the environment.
 
-## Recorded independent I/O audit
+## Required replacement independent I/O audit
 
-The different fresh auditor independently reconstructed the 191 frozen README
+The superseded prior different fresh auditor independently reconstructed the 191 frozen README
 clauses and checked every stable ID, test node, exact command, evidence field,
 and result. It used the emitted locator and manifest digest to reopen each SQLite
 database in read-only immutable mode, hashed the declared blobs without printing
@@ -254,15 +263,19 @@ reloads that were the sole continuation authority. The six change sets, update
 feed, 191-row README matrix, `2fed958e...` baseline, `f43000ab...` status guard,
 and all four runtime-critical hashes also closed without mismatch.
 
+These prior counts are retained only as historical evidence. A replacement
+auditor must repeat the same content-free reconciliation against the replacement
+Live bundle before this gate is checked.
+
 ## Evidence retention
 
 Retain the immutable candidate identity, exact environment and commands, exit
 codes/counts, per-file runtime-critical hashes/sizes, redacted Live JSON, the
 complete audit bundle, physical budget evidence, independent audit verdict,
 required CI results, and production authorization/switch/rollback timestamps.
-The real SQLite/blob/State bundle remained intact through the different fresh I/O
-auditor's completed verdict. It is now eligible for authorized cleanup using the
-exact emitted locator. Never print page bodies, raw sensitive queries,
+The prior SQLite/blob/State bundle remained intact through its different fresh
+I/O auditor's completed verdict. Retain it as historical evidence; the active
+gate requires a new bundle and verdict. Never print page bodies, raw sensitive queries,
 credentials, or authorization headers, and remove tool caches separately.
 
 ## Reversible release advice

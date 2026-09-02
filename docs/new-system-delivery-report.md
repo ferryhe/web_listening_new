@@ -10,10 +10,12 @@ concurrency 1 and retry 0. The frozen
 README evidence matrix remains complete. After prerequisites #75, #78, and #83, both
 public batch calls retain their real ordered child target Results, including derived
 Markdown, lineage, Transform Attempts, and goal-aware file evidence without
-creating another Request or network budget. The one authorized multi-site Live
-run and the different fresh independent I/O audit both passed. Required CI and
-separate production-switch authorization remain, so the release decision is
-still **NO-GO**. This change does not execute a production switch.
+creating another Request or network budget. The prior authorized multi-site Live
+run and different fresh independent I/O audit passed, but changing both parity
+runtime-critical files supersedes that evidence. A replacement authorized Live,
+different fresh I/O audit, required CI, and separate production-switch
+authorization remain, so the release decision is still **NO-GO**. This change
+does not execute a production switch.
 
 ## Frozen README authority and matrix
 
@@ -29,8 +31,10 @@ Acceptance truth is the baseline Git object, not the working README:
 | Unique commands | 91 |
 | Missing/duplicate/unexplained N/A | 0 / 0 / 0 |
 
-`load_frozen_readme` reads the exact Git blob with `git cat-file`, verifies its
-type, revision binding, canonical CRLF SHA-256, and line count. It never reads the
+`load_frozen_readme` decodes the embedded exact README bytes and independently
+derives their Git blob identity, canonical CRLF SHA-256, and line count. The
+frozen revision/blob pair remains explicit acceptance metadata, while runtime
+verification needs neither `.git` nor checkout history and never reads the
 working README as acceptance truth. `extract_readme_clauses` then reconstructs
 only verifiable normative prose, list, contract-table claims, five exact
 independently normative colon-ending lead-ins, and three precisely bound
@@ -55,11 +59,13 @@ Every non-§19 ID is
 ordered IDs `README-19-01` through `README-19-16`. Each `EvidenceRow` contains the
 full clause text, exact pytest node IDs, an exact `py -3.14` command, actual
 observable fields, `PASS`/`BLOCKED`, and an optional N/A reason. The final matrix
-has only `PASS` and no N/A. Tests also prove the working README differs from the
-immutable Issue-base object
-`f43000ab0f170b376b5b19cd84ee3bb2f51f13f6:README.md` only at the status line;
-the older `2fed958ee67d3c7d714fde40a372bc8b7389bf87` frozen object remains the clause
-matrix acceptance authority.
+has only `PASS` and no N/A. Tests also normalize only the working README status
+line to the exact frozen Issue-base status text, derive the complete README Git
+blob, and require `af52bc5ea28f4e1e42430462b86653629397ae3e`. Revision
+`f43000ab0f170b376b5b19cd84ee3bb2f51f13f6` remains its immutable metadata; no
+runtime history read is needed. The older
+`2fed958ee67d3c7d714fde40a372bc8b7389bf87` README bytes remain the clause-matrix
+acceptance authority.
 
 Clause counts are:
 
@@ -150,9 +156,9 @@ acquisition in the test layer. The runner uses production
 
 Live execution defaults to offline and additionally requires
 `WEB_LISTENING_RUN_LIVE=1` plus a nonempty authorization-window reference. The
-environment cannot supply a URL. The one authorized run set only those two
-inputs, injected no URL, and returned exit 0 with all four frozen sites plus the
-HTML, Markdown-lineage, and same-PDF refresh capabilities passing.
+environment cannot supply a URL. The superseded prior authorized run set only
+those two inputs, injected no URL, and returned exit 0 with all four frozen sites
+plus the HTML, Markdown-lineage, and same-PDF refresh capabilities passing.
 
 ### AC-3 — complete content-free delivery
 
@@ -223,10 +229,12 @@ SiteStates, and content-free evidence, then received a size/SHA manifest and was
 atomically renamed. The emitted locator includes the exact final path, run ID,
 manifest SHA, and retention rule. A different fresh auditor reopened SQLite in
 read-only immutable mode and returned `AUDIT PASS` after 1,944 atomic checks.
-Required CI and separate production authorization remain, so release is not
-recommended yet.
+That prior evidence is now superseded by the two parity-file byte changes.
+Replacement Live run(s) may repeat on failure until one passes; a different fresh
+audit of the passing bundle, required CI, and separate production authorization
+remain, so release is not recommended yet.
 
-#### Authorized Live and independent audit
+#### Superseded prior authorized Live and independent audit
 
 Immutable pre-Live candidate commit is
 `40c5bf091a7c536e9985c719312156da670036d6`. A fresh tester used a temporary
@@ -258,7 +266,7 @@ and reconciliation check passed. Audit-only totals were FIRST
 `24 requests / 22,290,427 bytes`, and combined
 `44 requests / 44,719,305 bytes / 19.133537 seconds`.
 
-The different fresh auditor returned `AUDIT PASS` after 1,944 atomic checks. It
+The prior different fresh auditor returned `AUDIT PASS` after 1,944 atomic checks. It
 closed exactly 36 of 36 manifest payloads with no missing, extra, or escaping
 path. Read-only SQLite inspection reconciled 26 Blobs, 26 Artifacts,
 36 Observations, 43 FIRST child Results, 12 REFRESH child Results, and 16 Markdown
@@ -266,6 +274,12 @@ lineage records. It also closed four canonical SiteState/SiteSkill strict reload
 as the sole continuation authority, all six change sets and the feed, the
 191-row README matrix, the `2fed958e...` baseline, the `f43000ab...` candidate
 status guard, and all four runtime-critical hashes.
+
+These results remain factual historical evidence for the prior runtime
+candidate, but they do not satisfy the current Live or audit gate. After the
+replacement parity candidate is frozen, authorized Live run(s) may repeat on
+failure until one passes, followed by a different fresh audit of that passing
+bundle.
 
 ## Files changed
 
@@ -464,18 +478,19 @@ The interpreter has no editable install, so accepted commands use `PYTHONPATH=sr
 | Round6 expired-before-resolver targeted node | `1 passed in 0.17s`; resolver calls `0` |
 | Round7 production file-goal targeted node | `1 passed in 0.84s`; legacy shape produced four `not_requested` statuses and only seed/a.html/b.html before the production declaration supplied required file acquisition |
 | Round8 immutable candidate README targeted node | pre-fix `1 failed in 0.45s` on the explicit moving-`HEAD` source guard; final behavior-only regression `1 passed in 0.33s` |
-| `py -3.14 -m pytest -q tests/parity/test_phase_20_new_system_delivery.py -m "not live"` | `28 passed in 2.77s` |
-| `py -3.14 -m pytest -q tests/request/test_site_batch_request.py tests/result/test_site_batch_result.py tests/runtime/test_site_batch.py tests/runtime/test_site_explore.py tests/runtime/test_site_refresh.py tests/tool_registry/test_html_links.py tests/runtime/test_service.py tests/runtime/test_transform_flow.py` | `287 passed in 12.69s` |
-| `py -3.14 -m pytest -q tests/live/test_phase_20_new_system_delivery_live.py -m "not live"` | `7 passed, 1 deselected in 0.26s` |
+| Remote AC-5 shallow-checkout README regression | depth-1 checkout: both old-object commands returned exit 128 and the five README nodes returned `5 failed in 0.68s`; no-`.git` source snapshot: the same nodes returned `5 passed in 0.25s` using self-contained frozen bytes/blob identities |
+| `py -3.14 -m pytest -q tests/parity/test_phase_20_new_system_delivery.py -m "not live"` | `28 passed in 3.14s` |
+| `py -3.14 -m pytest -q tests/request/test_site_batch_request.py tests/result/test_site_batch_result.py tests/runtime/test_site_batch.py tests/runtime/test_site_explore.py tests/runtime/test_site_refresh.py tests/tool_registry/test_html_links.py tests/runtime/test_service.py tests/runtime/test_transform_flow.py` | `287 passed in 8.86s` |
+| `py -3.14 -m pytest -q tests/live/test_phase_20_new_system_delivery_live.py -m "not live"` | `7 passed, 1 deselected in 0.36s` |
 | Restored #69 README matrix commands 01–91 | every exact command returned exit 0 with its named tests passing; no matrix-helper byte changed in #72 |
 | Restored matrix aggregate | `91 commands`, `191 rows`, `MATRIX END commands=91 rows=191 failed=0`; current full suite passes every named node |
-| `py -3.14 -m pytest -q` | `1952 passed, 7 skipped, 45 deselected, 1 warning in 63.48s` |
+| `py -3.14 -m pytest -q` | `1952 passed, 7 skipped, 45 deselected, 1 warning in 49.12s` |
 | `py -3.14 -m black --check src tests` | PASS; `151 files would be left unchanged` |
 | `py -3.14 -m isort --check-only src tests` | PASS; exit 0, no output |
 | `py -3.14 -m pylint src/web_listening tests` with `PYTHONPATH=src` | PASS; exit 0, `10.00/10` |
 | `git diff --check` | PASS; exit 0; only Git line-ending notices |
-| Authorized Live | PASS; exit 0, `1 passed, 7 deselected in 19.77s`; four of four sites and all HTML/Markdown/PDF capabilities passed |
-| Independent I/O audit | `AUDIT PASS`; 1,944 atomic checks and 36/36 manifest payloads closed |
+| Superseded prior authorized Live | Historical PASS; exit 0, `1 passed, 7 deselected in 19.77s`; invalidated as an active gate by the two parity-file byte changes |
+| Superseded prior independent I/O audit | Historical `AUDIT PASS`; 1,944 atomic checks and 36/36 manifest payloads closed; replacement audit pending after a passing replacement Live |
 
 The host's default `python` resolves to Python 3.11, while this repository's
 subprocess runner uses `Path.is_junction` and requires the documented Python 3.14
@@ -483,7 +498,7 @@ environment. Accepted `python -m ...` gates therefore prepend the Python 3.14
 directory to `PATH` and set this checkout's `src` directory as `PYTHONPATH`.
 Python 3.11 development feedback is not used as release evidence.
 
-Twenty-six test/evidence-layer bug shapes were fixed with controlled RED→GREEN
+Twenty-seven test/evidence-layer bug shapes were fixed with controlled RED→GREEN
 evidence and no `src/**` change. The first three rows are the accepted Round1
 findings, the next three cover Round2 and its directly exposed timing sibling,
 and the following six are the accepted Round3 through Round8 findings. The
@@ -502,7 +517,8 @@ remaining rows are retained from the prior #72/#69 candidate:
 | Round5 F1: cross-site DNS time was charged to the previously active site because the physical ledger switched only at transport send | fake clock reproduced `one=61s/BLOCKED`, `two=1s/PASS`, then the resolver-entry wrapper assertion failed | phase-aware Acquisition wrapper activates before the production resolver; corrected FIRST and REFRESH evidence is `one=2s`, `two=60s`, both PASS | all four ordered sites, both phases, same-site robots/target/redirect sends, skipped/no-I/O sites, failed attempts, unknown/backward hosts, physical runtime evidence, and audit-only aggregates covered |
 | Round6 F1: each delegated production tool created a fresh target-level 60-second gateway deadline, allowing an expired phase ledger to enter robots/DNS before the transport stopped it | an already-expired site returned `robots.timeout`, and the real fake resolver recorded `[('one.test', 443)]` | each invocation passes the active ledger's absolute deadline to a fresh public `WebHttpAcquisitionTool`; expired evidence returns `budget.runtime` with zero resolver calls | FIRST/REFRESH registries, four sites, same-site seeds/candidates, expiry before robots/DNS, exact boundary, failed/zero-I/O sites, unknown/backward hosts, and one-tool/transport-per-attempt close lifecycle covered |
 | Round7 F1: `try_discovered_pdf` was only post-run scoring and the claimed candidate cap was not a production input, so a/b HTML candidates displaced z-report.pdf | the real legacy SiteBatch produced four `not_requested` statuses and only seed/a.html/b.html, then the new regression failed with `KeyError: '_batch_sites'` | the same real batch test passes with snapshot-driven `SiteBatchSite` declarations; CAS/IAA return `satisfied` and production ordered Results contain the PDF | CAS/IAA required, SOA/IPCC not-required, FIRST/REFRESH, child Scope and Request/Result round trips, persisted SiteSkill scope, and goal-aware discovery covered |
-| Round8 F1: the candidate README status-line guard compared with moving `HEAD`, so it would collapse to no difference after the candidate commit | the strengthened source contract rejected literal `HEAD:README.md` and failed on the existing command | the guard reads immutable `f43000ab0f170b376b5b19cd84ee3bb2f51f13f6:README.md`; the working README remains 751 lines and differs only at index 2 | candidate status guard and report/checklist wording covered; the separate `2fed958e...` README blob/revision continues to own clause-matrix acceptance |
+| Round8 F1: the candidate README status-line guard compared with moving `HEAD`, so it would collapse to no difference after the candidate commit | the strengthened source contract rejected literal `HEAD:README.md` and failed on the existing command | the guard normalizes only line 3 and derives the complete frozen Issue-base README blob `af52bc5e...`; the working README remains 751 lines | candidate status guard and report/checklist wording covered; the separate `2fed958e...` README bytes continue to own clause-matrix acceptance |
+| Remote AC-5: shallow CI lacked both the 2fed clause README object and f430 candidate README object | depth-1 clone: both old-object reads returned exit 128 and all five README evidence nodes failed | exact 2fed README bytes are self-contained and verified against blob `edcc24b4...`, canonical SHA, and 731 lines; the f430 guard derives blob `af52bc5e...`; the same five nodes pass with no `.git` directory | both accepted comments, all executable history/object calls in the two parity files, clause-matrix authority, status guard, and report/checklist wording covered |
 | First acquisition and refresh shared one 8 MiB physical ledger and used the remainder as refresh authority | new focused regression against exact #69 payload failed with `KeyError: network_limits_per_request`; the restored payload exposed only `network_limits_per_site_first_and_refresh` with 8,388,608 bytes | focused command: `21 passed`; Live offline contract: `7 passed, 1 deselected` | exact7 search covered fixed limits, remaining-budget construction, physical reconciliation, request identities, combined totals, evidence/checklist text, and audit-root identity |
 | Redirected discovery source was compared only with the original seed, which could drop a real discovered PDF | `test_phase_20_pdf_selection_uses_only_discovery_provenance`: `TypeError`, 1 failed | same node: `1 passed in 0.09s` | original-seed, redirected-source, out-of-scope, and wrong-provenance candidates |
 | Remaining time was clamped to zero before the within-budget test, so a 61-second run could appear within 60 seconds | `test_phase_20_physical_budget_reports_a_real_deadline_overrun`: missing `runtime_seconds`, 1 failed | same node: `1 passed in 0.09s` | request, byte, exact elapsed runtime, and deadline predicates |
@@ -520,45 +536,51 @@ remaining rows are retained from the prior #72/#69 candidate:
 
 ## Path, cache, and Git audit
 
-Branch is `codex/issue-72-independent-refresh-budget`. Immutable pre-Live
-candidate `HEAD` is `40c5bf091a7c536e9985c719312156da670036d6`; its Issue base is
+Branch is `codex/issue-72-independent-refresh-budget`. The superseded prior
+pre-Live candidate is `40c5bf091a7c536e9985c719312156da670036d6`; its Issue base is
 `f43000ab0f170b376b5b19cd84ee3bb2f51f13f6`. The candidate contains the exact
 seven authorized Issue paths and the merged #75, #78, and #83 prerequisites.
 Candidate cache cleanup was completed and independently re-enumerated as zero
-before Live. This post-Live overlay modifies only README's status line and the
-two Issue documentation files.
+before the prior Live. The current remote-feedback worktree modifies both parity
+files, README's status line, and the two Issue documentation files. A replacement
+candidate and cache re-enumeration are pending.
 
-Immutable candidate runtime-critical identities used by Live and rechecked
-unchanged after this documentation overlay are:
+Current replacement-pre-Live runtime-critical identities are:
 
 | Path | Bytes | SHA-256 |
 |---|---:|---|
-| `tests/parity/phase_20_new_system_delivery.py` | 75467 | `1D62A383D695F5921465C3DD4386B46E40B8BE33D5AF60DDA50DB262D50F5A09` |
-| `tests/parity/test_phase_20_new_system_delivery.py` | 72291 | `55E1E6518827700CAEA227AD0CDC0A99915C6B9501990952009C1057EA8C9413` |
+| `tests/parity/phase_20_new_system_delivery.py` | 84975 | `5E3465ECB670120BDEBE5E83BF5148CCFCFAF91FED842C52AE0E79756DDCE191` |
+| `tests/parity/test_phase_20_new_system_delivery.py` | 70597 | `C52237BA3625397A62FD2746410EDABA3CE2ECD1039694386DD3A22D925B2E97` |
 | `tests/live/test_phase_20_new_system_delivery_live.py` | 70124 | `C3184E9AE248EADDC7C45D60D88F51C6C9E73ECE97C326F5DB9AE383D800090B` |
 | `tests/live/phase_20_new_system_delivery_targets.json` | 4512 | `571F6DEDA8A7D121415495DF62A058793DCC7E157A10A99D5D76E3B6CEE604A6` |
 
-Any runtime-critical difference after this point invalidates the recorded Live
-evidence and requires a new explicitly authorized run.
+These two parity identities differ from the prior Live candidate, so that Live
+and audit are superseded. Freeze a replacement candidate, re-enumerate caches,
+then run authorized replacement Live attempts until one passes and have a
+different fresh auditor inspect its bundle.
 
 ## Risks and blockers
 
-- Required CI has not yet passed on the final documentation candidate.
+- A replacement candidate/cache record, passing authorized Live, and different
+  fresh I/O audit remain pending.
+- Required CI has not yet passed on the final candidate.
 - Separate production-switch authority has not authorized a switch. No
   production switch is recommended or executed.
 
 ## Current Git status
 
-After this documentation overlay, `git status --short --untracked-files=all`
-reports exactly these three authorized paths:
+After this remote-feedback fix, `git status --short --untracked-files=all`
+reports exactly these five authorized paths:
 
 ```text
  M README.md
  M docs/release-checklist.md
  M docs/new-system-delivery-report.md
+ M tests/parity/phase_20_new_system_delivery.py
+ M tests/parity/test_phase_20_new_system_delivery.py
 ```
 
-This documentation overlay performed no commit, push, PR, merge,
+This remote-feedback fix performed no commit, push, PR, merge,
 branch/worktree deletion, production switch, bundle mutation, or Live network
-call. The single authorized Live run and different fresh audit are the completed
-external evidence recorded above.
+call. Prior Live/audit facts remain historical; replacement external evidence is
+pending.

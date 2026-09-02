@@ -9,7 +9,6 @@ import hashlib
 import inspect
 import json
 import runpy
-import subprocess
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -19,6 +18,7 @@ import pytest
 from phase_20_new_system_delivery import (  # pylint: disable=import-error
     BASELINE_README_BLOB,
     BASELINE_README_LINE_COUNT,
+    BASELINE_README_REVISION,
     BASELINE_README_SHA256,
     build_update_feed,
     delivery_record,
@@ -110,6 +110,12 @@ LIVE_TEST = (
     PROJECT_ROOT / "tests" / "live" / "test_phase_20_new_system_delivery_live.py"
 )
 LIVE_TARGETS = LIVE_TEST.with_name("phase_20_new_system_delivery_targets.json")
+ISSUE_BASE_README_IDENTITY = (
+    "f43000ab0f170b376b5b19cd84ee3bb2f51f13f6",
+    "af52bc5ea28f4e1e42430462b86653629397ae3e",
+)
+ISSUE_BASE_README_LINE_COUNT = 751
+ISSUE_BASE_README_STATUS_LINE = "> Status: Proposed target design  "
 
 
 def _html(label: str) -> bytes:
@@ -1229,6 +1235,7 @@ def test_frozen_readme_identity_and_clause_matrix_are_complete() -> None:
     repository_root = Path(__file__).parents[2]
     frozen = load_frozen_readme(repository_root)
 
+    assert frozen.revision == BASELINE_README_REVISION
     assert frozen.blob == BASELINE_README_BLOB
     assert frozen.sha256 == BASELINE_README_SHA256
     assert frozen.line_count == BASELINE_README_LINE_COUNT == 731
@@ -1279,30 +1286,21 @@ def test_frozen_readme_identity_and_clause_matrix_are_complete() -> None:
         "tests/parity/test_phase_20_new_system_delivery.py::"
         "test_valid_site_skill_uses_preferred_tool_without_rediscovery_or_alternate",
     )
-    baseline_lines = subprocess.run(
-        [
-            "git",
-            "show",
-            "f43000ab0f170b376b5b19cd84ee3bb2f51f13f6:README.md",
-        ],
-        cwd=repository_root,
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    ).stdout.splitlines()
-    current_lines = (
-        (repository_root / "README.md").read_text(encoding="utf-8").splitlines()
-    )
-    assert len(current_lines) == len(baseline_lines)
-    assert [
-        index
-        for index, (baseline, current) in enumerate(
-            zip(baseline_lines, current_lines, strict=True)
-        )
-        if baseline != current
-    ] == [2]
+    readme_path = repository_root / "README.md"
+    current_raw = readme_path.read_bytes()
+    current_lines = readme_path.read_text(encoding="utf-8").splitlines()
+    assert current_raw.endswith(b"\n")
+    assert len(current_lines) == ISSUE_BASE_README_LINE_COUNT
     assert current_lines[2].startswith("> Status:")
+    assert current_lines[2] != ISSUE_BASE_README_STATUS_LINE
+    normalized_lines = list(current_lines)
+    normalized_lines[2] = ISSUE_BASE_README_STATUS_LINE
+    normalized_raw = ("\n".join(normalized_lines) + "\n").encode("utf-8")
+    git_blob_header = f"blob {len(normalized_raw)}\0".encode("ascii")
+    assert (
+        hashlib.sha1(git_blob_header + normalized_raw).hexdigest()
+        == ISSUE_BASE_README_IDENTITY[1]
+    )
 
 
 def test_normative_fenced_contracts_are_extracted_without_examples() -> None:
