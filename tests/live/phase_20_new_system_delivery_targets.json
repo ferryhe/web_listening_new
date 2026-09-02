@@ -1,0 +1,156 @@
+{
+  "schema_version": "phase-20-new-system-delivery-targets.v3",
+  "phase": "20-replacement",
+  "network_limits_per_request": {
+    "max_requests": 12,
+    "max_bytes": 52428800,
+    "max_runtime_seconds": 60,
+    "concurrency": 1,
+    "retry": 0
+  },
+  "target_plans": [
+    {
+      "site_key": "soa",
+      "source_url_field": "monitor",
+      "required_capability": "ordinary_html",
+      "file_discovery_goal": "not_required"
+    },
+    {
+      "site_key": "cas",
+      "source_url_field": "document",
+      "required_capability": "ordinary_html",
+      "file_discovery_goal": "required"
+    },
+    {
+      "site_key": "iaa",
+      "source_url_field": "document",
+      "required_capability": "ordinary_html",
+      "file_discovery_goal": "required"
+    },
+    {
+      "site_key": "ipcc",
+      "source_url_field": "monitor",
+      "required_capability": "markdown",
+      "file_discovery_goal": "not_required"
+    }
+  ],
+  "targets": [
+    {
+      "site_key": "soa",
+      "display_name": "SOA",
+      "urls": {
+        "homepage": "https://www.soa.org/",
+        "monitor": "https://www.soa.org/",
+        "document": "https://www.soa.org/publications/publications-landing/",
+        "tree_seed": null
+      },
+      "allowed_origins": [
+        "https://www.soa.org"
+      ],
+      "evidence_thresholds": {
+        "monitor_min_words": 150,
+        "document_min_words": 150,
+        "document_min_links": 1
+      },
+      "site_skill_case": "soa",
+      "site_skill_digest": "sha256:889175f428f227000aeacfae1ebfda14704a9d469088c02b4a8745bfb732caf2",
+      "tree_include_paths": [],
+      "tool_facts": {
+        "tool_id": "acquisition.web_http",
+        "version": "1.0.0",
+        "category": "acquisition",
+        "capabilities": [
+          "http_get"
+        ]
+      }
+    },
+    {
+      "site_key": "cas",
+      "display_name": "CAS",
+      "urls": {
+        "homepage": "https://www.casact.org/",
+        "monitor": "https://www.casact.org/",
+        "document": "https://www.casact.org/about/governance/annual-reports",
+        "tree_seed": null
+      },
+      "allowed_origins": [
+        "https://www.casact.org"
+      ],
+      "evidence_thresholds": {
+        "monitor_min_words": 150,
+        "document_min_words": 50,
+        "document_min_links": 5
+      },
+      "site_skill_case": "cas",
+      "site_skill_digest": "sha256:95cd0d9bd086990398e5caba2a0c76010cea2618b91d1568e7852451980a10ee",
+      "tree_include_paths": [],
+      "tool_facts": {
+        "tool_id": "acquisition.web_http",
+        "version": "1.0.0",
+        "category": "acquisition",
+        "capabilities": [
+          "http_get"
+        ]
+      }
+    },
+    {
+      "site_key": "iaa",
+      "display_name": "IAA",
+      "urls": {
+        "homepage": "https://actuaries.org/",
+        "monitor": "https://actuaries.org/",
+        "document": "https://actuaries.org/annual-reports/",
+        "tree_seed": null
+      },
+      "allowed_origins": [
+        "https://actuaries.org"
+      ],
+      "evidence_thresholds": {
+        "monitor_min_words": 150,
+        "document_min_words": 80,
+        "document_min_links": 5
+      },
+      "site_skill_case": "iaa",
+      "site_skill_digest": "sha256:bae6b907301530149a7392e1a3ed4b59a472dbf776bb740cb67ea549769023fe",
+      "tree_include_paths": [],
+      "tool_facts": {
+        "tool_id": "acquisition.web_http",
+        "version": "1.0.0",
+        "category": "acquisition",
+        "capabilities": [
+          "http_get"
+        ]
+      }
+    },
+    {
+      "site_key": "ipcc",
+      "display_name": "Intergovernmental Panel on Climate Change",
+      "urls": {
+        "homepage": "https://www.ipcc.ch/",
+        "monitor": "https://www.ipcc.ch/",
+        "document": null,
+        "tree_seed": null
+      },
+      "allowed_origins": [
+        "https://www.ipcc.ch"
+      ],
+      "evidence_thresholds": {
+        "monitor_min_words": 300,
+        "document_min_words": null,
+        "document_min_links": null
+      },
+      "site_skill_case": "ipcc",
+      "site_skill_digest": "sha256:65886846062d93ebe8e4d9edef63c1c65fc37774749d731db086ed3a408b97be",
+      "tree_include_paths": [],
+      "tool_facts": {
+        "tool_id": "acquisition.web_http",
+        "version": "1.0.0",
+        "category": "acquisition",
+        "capabilities": [
+          "http_get"
+        ],
+        "recipe_id": "catalog-http"
+      }
+    }
+  ]
+}
