@@ -10,10 +10,9 @@ concurrency 1 and retry 0. The frozen
 README evidence matrix remains complete. After prerequisites #75, #78, and #83, both
 public batch calls retain their real ordered child target Results, including derived
 Markdown, lineage, Transform Attempts, and goal-aware file evidence without
-creating another Request or network budget. The prior authorized multi-site Live
-run and different fresh independent I/O audit passed, but changing both parity
-runtime-critical files supersedes that evidence. A replacement authorized Live,
-different fresh I/O audit, required CI, and separate production-switch
+creating another Request or network budget. The replacement authorized
+multi-site Live and different fresh independent I/O audit both passed on the
+current frozen runtime files. Required CI and separate production-switch
 authorization remain, so the release decision is still **NO-GO**. This change
 does not execute a production switch.
 
@@ -223,16 +222,15 @@ the eligible-HTML rule executes the default HTML-to-Markdown Transform; and
 §19 MCP, eligibility-intersection, and interface-shape rows execute their real
 public contracts rather than relying on source scans or one negative example.
 
-Live wrote outside the checkout to the fixed sibling audit root. Its unique
+The superseded prior Live wrote outside the checkout to its fixed sibling audit root. Its unique
 staging directory contained the real batch SQLite/blob store, per-site canonical
 SiteStates, and content-free evidence, then received a size/SHA manifest and was
 atomically renamed. The emitted locator includes the exact final path, run ID,
 manifest SHA, and retention rule. A different fresh auditor reopened SQLite in
 read-only immutable mode and returned `AUDIT PASS` after 1,944 atomic checks.
-That prior evidence is now superseded by the two parity-file byte changes.
-Replacement Live run(s) may repeat on failure until one passes; a different fresh
-audit of the passing bundle, required CI, and separate production authorization
-remain, so release is not recommended yet.
+That evidence remains superseded by the two parity-file byte changes. The
+replacement Live and different fresh audit now pass; required CI and separate
+production authorization remain, so release is not recommended yet.
 
 #### Superseded prior authorized Live and independent audit
 
@@ -278,8 +276,76 @@ status guard, and all four runtime-critical hashes.
 These results remain factual historical evidence for the prior runtime
 candidate, but they do not satisfy the current Live or audit gate. Replacement
 runtime candidate `9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d` is now frozen;
-authorized Live run(s) may repeat on failure until one passes, followed by a
-different fresh audit of that passing bundle.
+the active passing evidence follows.
+
+#### Passing replacement authorized Live and independent audit
+
+The four runtime-critical files were frozen at commit
+`9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d` and remained byte-identical in the
+actual clean Live candidate HEAD
+`2191f5fcff822d4c5ebe77915d9573feab4b3c06`. A fresh, ordinary Python 3.14.3
+installation ran exactly one Live command:
+
+```text
+python -m pytest -q -m live tests/live/test_phase_20_new_system_delivery_live.py
+```
+
+Only `WEB_LISTENING_RUN_LIVE=1` and authorization window
+`issue-72-replacement-authorized-2026-09-02-attempt-1` were set. No URL, bundle
+path, or budget entered through the environment. The command returned exit 0:
+`1 passed, 7 deselected in 44.07s`. The earlier archive-setup pause executed zero
+Live commands, so this was the first and only actual replacement run.
+
+Run ID is `phase-20-20260902T170332Z-49cc6fa73646477da8a2087006aacfe4`.
+Its completed bundle is
+`C:\Users\ferry\AppData\Local\Temp\.web-listening-audit-bundles\issue-72\phase-20-20260902T170332Z-49cc6fa73646477da8a2087006aacfe4`.
+The 7,315-byte manifest declares 37 payloads, has no partial bundle, and has
+SHA-256 `B2507E0496772E5FA0567B2042D0154002F5CDA3745BDF6BA7042BFEA998C982`.
+
+SOA, CAS, IAA, and IPCC were all `PASS`, with zero blocked or skipped sites.
+HTML, Markdown lineage, and initial-plus-refresh PDF reauthorization were all
+true. CAS and IAA each proved the same canonical PDF in FIRST and REFRESH, a new
+refresh Observation, and same-content Artifact/SHA/Blob reuse. All four sites
+strictly round-tripped SiteState and SiteSkill, and REFRESH used that continuation.
+
+FIRST used request/run identity
+`phase-20-20260902T170332Z-49cc6fa73646477da8a2087006aacfe4-first`, Request SHA
+`42991abe5a968c1246aa475ba49b489c788b9091a444d63cefdd7ecdef829523`,
+and physical totals `20 requests / 22,427,819 bytes / 25.586025 seconds`.
+REFRESH used the corresponding `...-refresh` identity, Request SHA
+`b2f53ee4f54b2fae75838c687ef566f05815651522e7170ef57fe3ff19adec99`,
+and `24 / 22,290,341 / 17.842095`. Both Request/Result round trips,
+reconciliations, and per-site within-budget gates passed. Each site and phase
+started from zero with limits `12 / 52,428,800 / 60 / concurrency 1 / retry 0`.
+
+Per-site physical FIRST versus REFRESH usage was:
+
+| Site | FIRST requests / bytes / seconds | REFRESH requests / bytes / seconds |
+|---|---:|---:|
+| SOA | `6 / 640,856 / 1.839617` | `4 / 330,722 / 0.878385` |
+| CAS | `4 / 13,651,098 / 16.894410` | `4 / 13,651,098 / 7.832989` |
+| IAA | `4 / 7,926,360 / 2.730784` | `4 / 7,926,360 / 0.987195` |
+| IPCC | `6 / 209,505 / 4.121214` | `12 / 382,161 / 8.143526` |
+
+Combined totals `44 requests / 44,718,160 bytes / 43.428120 seconds` are
+audit-only with `budget_gate=false`.
+
+The different fresh auditor reopened the retained bundle read-only and returned
+`AUDIT PASS` with zero findings. Bundle/manifest checking completed 49 checks and
+closed 37 of 37 payloads. SQLite/CAS contributed 136 checks in read-only,
+immutable, query-only mode with `quick_check` passing and zero foreign-key
+violations: 27 Blobs, 27 Artifacts (11 derived and 16 source), 36 Observations,
+and 16 Markdown lineage records were reconciled. The audit covered 55 ordered
+target records, 36 Artifact evidence rows, 38 Attempts, 35 redacted Errors, and
+16 lineage records across 1,105 Request/Result/record checks.
+
+Persistence contributed 217 checks across four strict SiteState/SiteSkill
+continuations with no fallback. Change-set/feed checking contributed 148 checks:
+SOA `0/1/0/0/1/1`, CAS `0/0/2/0/0/0`, IAA `0/0/2/0/0/0`, IPCC
+`3/3/0/0/0/0`, and feed `3/0/0/6`. Identity/budget contributed 123 checks and
+sensitive-data exclusion 4,442. AC-5 reconstructed 191 of 191 rows, 91 commands,
+and 227 referenced nodes with zero missing. The four runtime-critical hashes
+matched; the repository was clean and the bundle remains retained.
 
 ## Files changed
 
@@ -490,7 +556,9 @@ The interpreter has no editable install, so accepted commands use `PYTHONPATH=sr
 | `py -3.14 -m pylint src/web_listening tests` with `PYTHONPATH=src` | PASS; exit 0, `10.00/10` |
 | `git diff --check` | PASS; exit 0; only Git line-ending notices |
 | Superseded prior authorized Live | Historical PASS; exit 0, `1 passed, 7 deselected in 19.77s`; invalidated as an active gate by the two parity-file byte changes |
-| Superseded prior independent I/O audit | Historical `AUDIT PASS`; 1,944 atomic checks and 36/36 manifest payloads closed; replacement audit pending after a passing replacement Live |
+| Superseded prior independent I/O audit | Historical `AUDIT PASS`; 1,944 atomic checks and 36/36 manifest payloads closed |
+| Passing replacement authorized Live on clean HEAD `2191f5fc...` | PASS; exit 0, `1 passed, 7 deselected in 44.07s`; four of four sites and all HTML/Markdown/PDF capabilities passed |
+| Different fresh replacement I/O audit | `AUDIT PASS`; zero findings; 37/37 manifest payloads, 191/191 README rows, 91 commands, 227 node references, and all four runtime-critical hashes closed |
 
 The host's default `python` resolves to Python 3.11, while this repository's
 subprocess runner uses `Path.is_junction` and requires the documented Python 3.14
@@ -536,15 +604,18 @@ remaining rows are retained from the prior #72/#69 candidate:
 
 ## Path, cache, and Git audit
 
-Branch is `codex/issue-72-independent-refresh-budget`. Tested replacement runtime
-candidate `9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d` is based on
+Branch is `codex/issue-72-independent-refresh-budget`. Runtime-critical commit
+`9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d` is based on
 `f43000ab0f170b376b5b19cd84ee3bb2f51f13f6` and contains the exact seven
-authorized Issue paths plus the merged #75, #78, and #83 prerequisites. After
-the candidate commit, the manager verified a clean worktree and independently
-re-enumerated zero cache directories and zero `.pyc` files. This two-document
-evidence-only overlay changes none of the four runtime-critical identities.
+authorized Issue paths plus the merged #75, #78, and #83 prerequisites. Actual
+Live candidate HEAD `2191f5fcff822d4c5ebe77915d9573feab4b3c06` retained those
+runtime bytes. Before Live, the manager verified a clean worktree and zero cache
+directories or `.pyc` files. This three-document post-Live evidence overlay
+changes none of the four runtime-critical identities and does not guess its
+future commit SHA.
 
-Current replacement-pre-Live runtime-critical identities are:
+Runtime-critical identities used by the passing replacement Live and rechecked
+by the different fresh audit are:
 
 | Path | Bytes | SHA-256 |
 |---|---:|---|
@@ -553,15 +624,12 @@ Current replacement-pre-Live runtime-critical identities are:
 | `tests/live/test_phase_20_new_system_delivery_live.py` | 70124 | `C3184E9AE248EADDC7C45D60D88F51C6C9E73ECE97C326F5DB9AE383D800090B` |
 | `tests/live/phase_20_new_system_delivery_targets.json` | 4512 | `571F6DEDA8A7D121415495DF62A058793DCC7E157A10A99D5D76E3B6CEE604A6` |
 
-These two parity identities differ from the prior Live candidate, so that Live
-and audit are superseded. They are frozen in replacement candidate
-`9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d`; run authorized replacement Live
-attempts until one passes and have a different fresh auditor inspect its bundle.
+These identities differ from the superseded prior Live candidate. The passing
+replacement run used them unchanged at HEAD `2191f5fc...`, and the different
+fresh auditor rechecked them without mismatch.
 
 ## Risks and blockers
 
-- A passing authorized replacement Live and different fresh I/O audit remain
-  pending.
 - Required CI has not yet passed on the final candidate.
 - Separate production-switch authority has not authorized a switch. No
   production switch is recommended or executed.
@@ -581,6 +649,7 @@ remote-feedback fix had exactly these five authorized paths:
 
 Commit `9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d` froze those runtime and
 documentation changes; the manager then verified a clean worktree and zero
-caches. This worker's subsequent two-document evidence overlay performs no
-runtime change, production switch, bundle mutation, or Live network call. Prior
-Live/audit facts remain historical; replacement external evidence is pending.
+caches. Clean HEAD `2191f5fcff822d4c5ebe77915d9573feab4b3c06` was the actual
+passing Live candidate. This worker's subsequent three-document evidence overlay
+performs no runtime change, production switch, bundle mutation, or Live network
+call. Prior Live/audit facts remain historical; replacement evidence is active.

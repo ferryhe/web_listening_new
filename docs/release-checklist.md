@@ -83,28 +83,28 @@ GO requires every item. A missing, skipped, failed, or `BLOCKED` item is NO-GO.
   superseded when both parity runtime-critical files changed.
 - [x] After the replacement candidate commit, worktree `__pycache__`,
   pytest/tool caches, and `.pyc` files were independently re-enumerated as zero.
-- [ ] Authorized replacement Live run(s), repeated on failure until one passes,
-  prove all four frozen sites, ordinary HTML, derived Markdown, and a
+- [x] The authorized replacement Live passed on its first actual run and proved
+  all four frozen sites, ordinary HTML, derived Markdown, and a
   discovered/re-authorized PDF or download whose same canonical URL is refetched
   on refresh with a new Observation and valid same-byte reuse or changed-byte
   Artifact/Blob identity.
-- [ ] After the passing replacement Live, a different fresh replacement I/O
-  auditor reconciles the emitted
-  content-free evidence with the real `ArtifactStore`, Result, SiteState, and
-  physical network budget.
+- [x] After the passing replacement Live, a different fresh replacement I/O
+  auditor reconciled the emitted content-free evidence with the real
+  `ArtifactStore`, Result, SiteState, and physical network budget: `AUDIT PASS`,
+  zero findings.
 - [ ] Required CI/checks pass on the final candidate.
 - [ ] A human with separate production authority explicitly authorizes a switch.
 
-Current recommendation: **NO-GO**. Replacement Live and independent I/O audit,
-required CI, and separate production-switch authorization remain.
+Current recommendation: **NO-GO**. Required CI and separate production-switch
+authorization are the only remaining gates.
 
 ## Candidate identity and path integrity
 
-The active, tested runtime candidate is immutable commit
-`9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d`. After that commit, the manager
-verified a clean worktree and zero cache directories or `.pyc` files. This
-two-document evidence overlay changes none of the four runtime-critical file
-identities recorded in the delivery report.
+The runtime-critical implementation is frozen at immutable commit
+`9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d`; the actual passing Live candidate
+was clean HEAD `2191f5fcff822d4c5ebe77915d9573feab4b3c06`. Cache directories and
+`.pyc` files were zero. This three-document post-Live evidence overlay changes
+none of the four runtime-critical identities recorded in the delivery report.
 
 The superseded prior candidate and Live preparation recorded:
 
@@ -132,11 +132,11 @@ The superseded prior candidate and Live preparation recorded:
    runtime-critical files invalidates Live evidence and requires a fresh
    authorized rerun.
 
-The two parity-file byte changes supersede that prior candidate's Live and audit
-evidence. Replacement candidate `9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d`
-and its runtime-critical hashes are now frozen; complete the authorized
-replacement Live and different fresh audit before checking those gates. The
-historical evidence below remains factual but is not active release evidence.
+The two parity-file byte changes superseded that prior candidate's Live and audit
+evidence. Runtime commit `9469b1c7c4e4c3b4c0cc3f0766fe4455c6c1ad6d`
+and Live candidate `2191f5fcff822d4c5ebe77915d9573feab4b3c06` are frozen;
+the authorized replacement Live and different fresh audit below now satisfy
+those gates. The earlier evidence remains factual historical evidence only.
 
 ## Exact commands
 
@@ -212,9 +212,44 @@ FIRST `20 requests / 22,428,878 bytes`, REFRESH
 `24 requests / 22,290,427 bytes`, and combined
 `44 requests / 44,719,305 bytes / 19.133537 seconds`.
 
-## Required replacement Live evidence
+## Passing replacement Live evidence
 
-Retain one redacted JSON packet containing:
+The actual Live candidate was clean HEAD
+`2191f5fcff822d4c5ebe77915d9573feab4b3c06`, with the four runtime-critical
+files unchanged from runtime commit `9469b1c7...`. A fresh Python 3.14.3
+installation ran exactly once:
+
+```powershell
+python -m pytest -q -m live tests/live/test_phase_20_new_system_delivery_live.py
+```
+
+Only `WEB_LISTENING_RUN_LIVE=1` and authorization window
+`issue-72-replacement-authorized-2026-09-02-attempt-1` were set; no URL, bundle
+path, or budget was injected. Exit was 0 with
+`1 passed, 7 deselected in 44.07s`. SOA, CAS, IAA, and IPCC were all `PASS`, with
+zero blocked or skipped sites. HTML, Markdown lineage, and PDF initial/refresh
+reauthorization were true. CAS and IAA each produced a new refresh Observation
+while reusing the same-content Artifact, SHA, and Blob. All four SiteState and
+SiteSkill round trips were strict.
+
+Run ID is `phase-20-20260902T170332Z-49cc6fa73646477da8a2087006aacfe4`.
+The retained bundle is
+`C:\Users\ferry\AppData\Local\Temp\.web-listening-audit-bundles\issue-72\phase-20-20260902T170332Z-49cc6fa73646477da8a2087006aacfe4`.
+Its 7,315-byte manifest declares 37 payloads, has no partial bundle, and has
+SHA-256 `B2507E0496772E5FA0567B2042D0154002F5CDA3745BDF6BA7042BFEA998C982`.
+
+FIRST and REFRESH used different strict Request/Result identities and passed
+reconciliation and every per-site budget gate. FIRST used request/run identity
+`phase-20-20260902T170332Z-49cc6fa73646477da8a2087006aacfe4-first`, Request
+SHA `42991abe5a968c1246aa475ba49b489c788b9091a444d63cefdd7ecdef829523`,
+and physical totals `20 requests / 22,427,819 bytes / 25.586025 seconds`.
+REFRESH used the corresponding `...-refresh` identity, Request SHA
+`b2f53ee4f54b2fae75838c687ef566f05815651522e7170ef57fe3ff19adec99`,
+and `24 / 22,290,341 / 17.842095`. Every site and phase started from zero with
+limits `12 / 52,428,800 / 60 / concurrency 1 / retry 0`. Combined totals
+`44 / 44,718,160 / 43.428120` are audit-only with `budget_gate=false`.
+
+The retained redacted JSON packet contains:
 
 - fixed snapshot identity and the ordered site keys;
 - per-site production file goal and FIRST/REFRESH file-discovery status;
@@ -249,7 +284,21 @@ contains each real ArtifactStore SQLite/blob repository, canonical persisted
 SiteState files, the content-free packet, and a self-checking file manifest. It
 does not accept a bundle path or target URL from the environment.
 
-## Required replacement independent I/O audit
+## Passing replacement independent I/O audit
+
+The different fresh, read-only auditor returned `AUDIT PASS` with zero findings.
+It completed 49 bundle/manifest checks and closed 37 of 37 declared payloads;
+136 SQLite/CAS checks reconciled 27 Blobs, 27 Artifacts, 36 Observations, and 16
+Markdown lineage records. Request/Result checking covered 1,105 assertions
+across 55 ordered target records, 36 Artifact evidence rows, 38 Attempts, 35
+redacted Errors, and 16 lineage records. Persistence contributed 217 checks across four
+strict SiteState/SiteSkill continuations with no fallback. Change-set/feed
+checking contributed 148 checks, identity/budget 123, and sensitive-data
+exclusion 4,442. AC-5 reconstructed all 191 rows, 91 commands, and 227 referenced
+nodes with zero missing. The four runtime hashes matched and the repository was
+clean; the passing bundle remains retained.
+
+The prior audit remains historical:
 
 The superseded prior different fresh auditor independently reconstructed the 191 frozen README
 clauses and checked every stable ID, test node, exact command, evidence field,
@@ -270,9 +319,8 @@ reloads that were the sole continuation authority. The six change sets, update
 feed, 191-row README matrix, `2fed958e...` baseline, `f43000ab...` status guard,
 and all four runtime-critical hashes also closed without mismatch.
 
-These prior counts are retained only as historical evidence. A replacement
-auditor must repeat the same content-free reconciliation against the replacement
-Live bundle before this gate is checked.
+Those prior counts are retained only as historical evidence. The different fresh
+replacement audit above is the active evidence and satisfies this gate.
 
 ## Evidence retention
 
@@ -280,10 +328,10 @@ Retain the immutable candidate identity, exact environment and commands, exit
 codes/counts, per-file runtime-critical hashes/sizes, redacted Live JSON, the
 complete audit bundle, physical budget evidence, independent audit verdict,
 required CI results, and production authorization/switch/rollback timestamps.
-The prior SQLite/blob/State bundle remained intact through its different fresh
-I/O auditor's completed verdict. Retain it as historical evidence; the active
-gate requires a new bundle and verdict. Never print page bodies, raw sensitive queries,
-credentials, or authorization headers, and remove tool caches separately.
+The prior SQLite/blob/State bundle remains historical evidence. The replacement
+bundle remains retained after its different fresh auditor's completed PASS.
+Never print page bodies, raw sensitive queries, credentials, or authorization
+headers, and remove tool caches separately.
 
 ## Reversible release advice
 

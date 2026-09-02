@@ -1,6 +1,6 @@
 # Web Listening Modular Redesign
 
-> Status: Proposed target design; Issue #72 shallow-CI-safe offline evidence complete; replacement authorized Live and independent I/O audit, required CI, and separate production-switch authorization pending
+> Status: Proposed target design; Issue #72 shallow-CI-safe offline, replacement authorized Live, and different fresh I/O audit evidence complete; required CI and separate production-switch authorization pending
 > Audience: Product owners, client developers, tool integrators, and maintainers  
 > Important: This document describes the intended future design, not functionality already enabled in the current repository.
 
