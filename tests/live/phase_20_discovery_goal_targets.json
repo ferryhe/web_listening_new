@@ -1,0 +1,44 @@
+{
+  "schema_version": "phase-20-discovery-goal-targets.v1",
+  "source_catalog_path": "tests/live/catalog/dev_test_sites.json",
+  "source_catalog_sha256": "B13747A4516810BED5AB5FF164EFC3FD9F5F1C91B51FF3DCE5708A23724A0E6E",
+  "source_catalog_sha256_basis": "base Git blob raw bytes (LF); checkout CRLF is canonicalized to LF before verification",
+  "limits_per_site_per_phase": {
+    "max_requests": 12,
+    "max_response_bytes": 52428800,
+    "timeout_seconds": 60,
+    "max_tool_attempts_per_target": 4,
+    "concurrency": 1,
+    "retry": 0
+  },
+  "targets": [
+    {
+      "site_key": "cas",
+      "monitor_url": "https://www.casact.org/",
+      "document_url": "https://www.casact.org/about/governance/annual-reports",
+      "allowed_origins": ["https://www.casact.org"],
+      "historical_expectation": "dev_fixture",
+      "file_discovery_goal": "required",
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/dev_test_sites.json",
+        "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+        "old_site_key": "cas"
+      }
+    },
+    {
+      "site_key": "iaa",
+      "monitor_url": "https://actuaries.org/",
+      "document_url": "https://actuaries.org/annual-reports/",
+      "allowed_origins": ["https://actuaries.org"],
+      "historical_expectation": "dev_fixture",
+      "file_discovery_goal": "not_required",
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/dev_test_sites.json",
+        "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+        "old_site_key": "iaa"
+      }
+    }
+  ]
+}

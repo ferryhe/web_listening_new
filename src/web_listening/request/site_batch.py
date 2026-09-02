@@ -1,6 +1,6 @@
 """Strict Request contract for one serial multi-site batch."""
 
-# pylint: disable=duplicate-code,unidiomatic-typecheck
+# pylint: disable=duplicate-code,too-many-branches,unidiomatic-typecheck
 
 from __future__ import annotations
 
@@ -14,12 +14,22 @@ from urllib.parse import urlsplit
 
 from web_listening.artifact.model import ArtifactStoreError
 from web_listening.artifact.site_state import SiteState
-from web_listening.request.model import Request, RequestValidationError, Scope
+from web_listening.request.model import (
+    ContentType,
+    Request,
+    RequestValidationError,
+    Scope,
+)
+from web_listening.request.scope import scope_from_mapping, validate_scope
 from web_listening.request.site_refresh import (
     SiteRefreshRequest,
     validate_site_refresh_request,
 )
-from web_listening.request.validate import request_from_mapping, validate_request
+from web_listening.request.validate import (
+    compile_access_policy,
+    request_from_mapping,
+    validate_request,
+)
 from web_listening.site_skill.model import SiteSkill, SiteSkillError
 from web_listening.site_skill.validate import (
     site_skill_from_mapping,
@@ -28,9 +38,10 @@ from web_listening.site_skill.validate import (
 )
 
 SITE_BATCH_REQUEST_SCHEMA_VERSION = "web-listening-site-batch-request.v1"
-_FIELDS = frozenset({"schema_version", "phase", "request", "refresh_contexts"})
+_FIELDS = frozenset({"schema_version", "phase", "request", "refresh_contexts", "sites"})
 _REQUEST_FIELDS = frozenset({"scope", "site_skill", "explore_all_tools", "budgets"})
 _CONTEXT_FIELDS = frozenset({"site_skill", "previous_state"})
+_SITE_FIELDS = frozenset({"scope", "file_discovery_goal"})
 
 
 class SiteBatchPhase(str, Enum):
@@ -38,6 +49,13 @@ class SiteBatchPhase(str, Enum):
 
     FIRST = "first"
     REFRESH = "refresh"
+
+
+class FileDiscoveryGoal(str, Enum):
+    """Whether one site must acquire a real discovered file candidate."""
+
+    REQUIRED = "required"
+    NOT_REQUIRED = "not_required"
 
 
 def _error(code: str) -> RequestValidationError:
@@ -62,6 +80,60 @@ def site_batch_child_scope(parent: Scope, seed: str) -> Scope:
         parent.include_paths,
         parent.content_types,
     )
+
+
+def _scope_mapping(scope: Scope) -> dict[str, object]:
+    return {
+        "seeds": list(scope.seeds),
+        "allowed_origins": list(scope.allowed_origins),
+        "include_paths": list(scope.include_paths),
+        "content_types": [item.value for item in scope.content_types],
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class SiteBatchSite:
+    """One ordered child authority and its file-discovery goal."""
+
+    scope: Scope
+    file_discovery_goal: FileDiscoveryGoal | str
+
+    def __post_init__(self) -> None:
+        scope = validate_scope(self.scope)
+        try:
+            goal = FileDiscoveryGoal(self.file_discovery_goal)
+        except (TypeError, ValueError) as exc:
+            raise _error("site_batch_request.file_discovery_goal_invalid") from exc
+        if goal is FileDiscoveryGoal.REQUIRED and ContentType.FILE not in (
+            scope.content_types
+        ):
+            raise _error("site_batch_request.file_scope_required")
+        object.__setattr__(self, "scope", scope)
+        object.__setattr__(self, "file_discovery_goal", goal)
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the exact JSON-compatible per-site declaration."""
+        return {
+            "scope": _scope_mapping(self.scope),
+            "file_discovery_goal": self.file_discovery_goal.value,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> SiteBatchSite:
+        """Parse one strict per-site declaration."""
+        if not isinstance(value, Mapping) or not all(
+            isinstance(key, str) for key in value
+        ):
+            raise _error("site_batch_request.site_invalid")
+        keys = set(value)
+        if keys - _SITE_FIELDS:
+            raise _error("site_batch_request.site_unknown_field")
+        if _SITE_FIELDS - keys:
+            raise _error("site_batch_request.site_missing")
+        return cls(
+            scope_from_mapping(value["scope"]),
+            value["file_discovery_goal"],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +194,7 @@ class SiteBatchRequest:
     request: Request
     refresh_contexts: tuple[SiteRefreshContext, ...]
     schema_version: str = SITE_BATCH_REQUEST_SCHEMA_VERSION
+    sites: tuple[SiteBatchSite, ...] = ()
 
     def __post_init__(self) -> None:
         if self.schema_version != SITE_BATCH_REQUEST_SCHEMA_VERSION:
@@ -144,6 +217,33 @@ class SiteBatchRequest:
             raise _error("site_batch_request.multiple_sites_required")
         if len(site_keys) != len(set(site_keys)):
             raise _error("site_batch_request.site_duplicate")
+        sites = self.sites
+        if type(sites) is tuple and not sites:
+            sites = tuple(
+                SiteBatchSite(
+                    site_batch_child_scope(request.scope, seed),
+                    FileDiscoveryGoal.NOT_REQUIRED,
+                )
+                for seed in request.scope.seeds
+            )
+        if (
+            type(sites) is not tuple
+            or len(sites) != len(site_keys)
+            or not all(type(item) is SiteBatchSite for item in sites)
+        ):
+            raise _error("site_batch_request.sites_invalid")
+        for seed, site in zip(request.scope.seeds, sites, strict=True):
+            if site.scope.seeds != (seed,):
+                raise _error("site_batch_request.site_order_mismatch")
+            compile_access_policy(
+                Request(
+                    site_batch_child_scope(request.scope, seed),
+                    None,
+                    request.explore_all_tools,
+                    request.budgets,
+                ),
+                scope=site.scope,
+            )
         if phase is SiteBatchPhase.FIRST:
             if self.refresh_contexts:
                 raise _error("site_batch_request.refresh_context_forbidden")
@@ -155,14 +255,10 @@ class SiteBatchRequest:
             )
             if context_keys != site_keys:
                 raise _error("site_batch_request.site_order_mismatch")
-            for seed, context in zip(
-                request.scope.seeds,
-                self.refresh_contexts,
-                strict=True,
-            ):
+            for site, context in zip(sites, self.refresh_contexts, strict=True):
                 validate_site_refresh_request(
                     SiteRefreshRequest(
-                        site_batch_child_scope(request.scope, seed),
+                        site.scope,
                         context.site_skill,
                         context.previous_state,
                         request.explore_all_tools,
@@ -171,6 +267,7 @@ class SiteBatchRequest:
                 )
         object.__setattr__(self, "phase", phase)
         object.__setattr__(self, "request", request)
+        object.__setattr__(self, "sites", sites)
 
     @property
     def site_keys(self) -> tuple[str, ...]:
@@ -191,6 +288,7 @@ class SiteBatchRequest:
             "phase": self.phase.value,
             "request": _request_mapping(self.request),
             "refresh_contexts": [item.to_dict() for item in self.refresh_contexts],
+            "sites": [item.to_dict() for item in self.sites],
         }
 
     def canonical_json_bytes(self) -> bytes:
@@ -243,6 +341,7 @@ def validate_site_batch_request(value: SiteBatchRequest) -> SiteBatchRequest:
         value.request,
         value.refresh_contexts,
         value.schema_version,
+        value.sites,
     )
 
 
@@ -253,7 +352,7 @@ def site_batch_request_from_mapping(value: object) -> SiteBatchRequest:
     keys = set(value)
     if keys - _FIELDS:
         raise _error("site_batch_request.unknown_field")
-    if _FIELDS - keys:
+    if (_FIELDS - keys) - {"sites"}:
         raise _error("site_batch_request.missing")
     request_payload = value["request"]
     if (
@@ -264,11 +363,15 @@ def site_batch_request_from_mapping(value: object) -> SiteBatchRequest:
     contexts = value["refresh_contexts"]
     if not isinstance(contexts, list):
         raise _error("site_batch_request.context_invalid")
+    sites = value.get("sites") if "sites" in value else []
+    if not isinstance(sites, list) or "sites" in value and not sites:
+        raise _error("site_batch_request.sites_invalid")
     return SiteBatchRequest(
         value["phase"],
         request_from_mapping(request_payload),
         tuple(SiteRefreshContext.from_dict(item) for item in contexts),
         value["schema_version"],
+        tuple(SiteBatchSite.from_dict(item) for item in sites),
     )
 
 
@@ -283,8 +386,10 @@ def site_batch_request_from_json(payload: str) -> SiteBatchRequest:
 
 __all__ = [
     "SITE_BATCH_REQUEST_SCHEMA_VERSION",
+    "FileDiscoveryGoal",
     "SiteBatchPhase",
     "SiteBatchRequest",
+    "SiteBatchSite",
     "SiteRefreshContext",
     "site_batch_request_from_json",
     "site_batch_request_from_mapping",

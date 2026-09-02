@@ -17,9 +17,12 @@ from web_listening.request.model import (
     Scope,
 )
 from web_listening.request.site_batch import (
+    FileDiscoveryGoal,
     SiteBatchPhase,
     SiteBatchRequest,
+    SiteBatchSite,
     SiteRefreshContext,
+    site_batch_child_scope,
     site_batch_request_from_json,
     site_batch_request_from_mapping,
 )
@@ -114,9 +117,29 @@ def _contexts(*, first_complete: bool = True) -> tuple[SiteRefreshContext, ...]:
     )
 
 
+def _sites() -> tuple[SiteBatchSite, ...]:
+    parent = _request()
+    return tuple(
+        SiteBatchSite(
+            site_batch_child_scope(parent.scope, seed),
+            (
+                FileDiscoveryGoal.REQUIRED
+                if index == 0
+                else FileDiscoveryGoal.NOT_REQUIRED
+            ),
+        )
+        for index, seed in enumerate(parent.scope.seeds)
+    )
+
+
 def test_first_and_refresh_are_distinct_strict_round_trippable_requests() -> None:
-    first = SiteBatchRequest(SiteBatchPhase.FIRST, _request(), ())
-    refresh = SiteBatchRequest(SiteBatchPhase.REFRESH, _request(), _contexts())
+    first = SiteBatchRequest(SiteBatchPhase.FIRST, _request(), (), sites=_sites())
+    refresh = SiteBatchRequest(
+        SiteBatchPhase.REFRESH,
+        _request(),
+        _contexts(),
+        sites=_sites(),
+    )
 
     assert site_batch_request_from_mapping(first.to_dict()) == first
     assert site_batch_request_from_json(first.canonical_json_bytes().decode()) == first
@@ -125,6 +148,170 @@ def test_first_and_refresh_are_distinct_strict_round_trippable_requests() -> Non
     assert refresh.site_keys == first.site_keys
     assert first.request_sha256 != refresh.request_sha256
     assert first.request.budgets == refresh.request.budgets == LIMITS
+    assert first.sites == refresh.sites == _sites()
+    assert [item["file_discovery_goal"] for item in first.to_dict()["sites"]] == [
+        "required",
+        "not_required",
+        "not_required",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("phase", "contexts"),
+    (
+        (SiteBatchPhase.FIRST, ()),
+        (SiteBatchPhase.REFRESH, _contexts()),
+    ),
+)
+def test_legacy_v1_request_without_sites_defaults_to_not_required(
+    phase: SiteBatchPhase,
+    contexts: tuple[SiteRefreshContext, ...],
+) -> None:
+    payload = SiteBatchRequest(
+        phase,
+        _request(),
+        contexts,
+        sites=_sites(),
+    ).to_dict()
+    payload.pop("sites")
+
+    request = site_batch_request_from_mapping(payload)
+
+    assert [site.file_discovery_goal for site in request.sites] == [
+        FileDiscoveryGoal.NOT_REQUIRED,
+        FileDiscoveryGoal.NOT_REQUIRED,
+        FileDiscoveryGoal.NOT_REQUIRED,
+    ]
+    assert [site.scope for site in request.sites] == [
+        site_batch_child_scope(request.request.scope, seed)
+        for seed in request.request.scope.seeds
+    ]
+    assert "sites" in request.to_dict()
+    assert site_batch_request_from_mapping(request.to_dict()) == request
+
+
+def test_explicit_empty_sites_is_not_legacy_missing() -> None:
+    payload = SiteBatchRequest(
+        SiteBatchPhase.FIRST,
+        _request(),
+        (),
+        sites=_sites(),
+    ).to_dict()
+    payload["sites"] = []
+
+    with pytest.raises(
+        RequestValidationError,
+        match="^site_batch_request.sites_invalid$",
+    ):
+        site_batch_request_from_mapping(payload)
+
+
+@pytest.mark.parametrize("invalid_sites", ([], None, False))
+def test_direct_request_rejects_non_tuple_empty_sites(invalid_sites: object) -> None:
+    with pytest.raises(
+        RequestValidationError,
+        match="^site_batch_request.sites_invalid$",
+    ):
+        SiteBatchRequest(
+            SiteBatchPhase.FIRST,
+            _request(),
+            (),
+            sites=invalid_sites,  # type: ignore[arg-type]
+        )
+
+
+def test_direct_request_defaults_only_exact_empty_tuple_sites() -> None:
+    omitted = SiteBatchRequest(SiteBatchPhase.FIRST, _request(), ())
+    exact_empty = SiteBatchRequest(
+        SiteBatchPhase.FIRST,
+        _request(),
+        (),
+        sites=(),
+    )
+    explicit = SiteBatchRequest(
+        SiteBatchPhase.FIRST,
+        _request(),
+        (),
+        sites=_sites(),
+    )
+
+    assert omitted == exact_empty
+    assert all(
+        site.file_discovery_goal is FileDiscoveryGoal.NOT_REQUIRED
+        for site in omitted.sites
+    )
+    assert explicit.sites == _sites()
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("schema_version", "phase", "request", "refresh_contexts"),
+)
+def test_legacy_compatibility_does_not_relax_other_required_fields(field: str) -> None:
+    payload = SiteBatchRequest(
+        SiteBatchPhase.FIRST,
+        _request(),
+        (),
+        sites=_sites(),
+    ).to_dict()
+    payload.pop("sites")
+    payload.pop(field)
+
+    with pytest.raises(RequestValidationError, match="^site_batch_request.missing$"):
+        site_batch_request_from_mapping(payload)
+
+
+def test_site_declarations_reject_unknown_goal_expansion_and_missing_file_scope() -> (
+    None
+):
+    parent = _request()
+    payload = SiteBatchRequest(
+        SiteBatchPhase.FIRST,
+        parent,
+        (),
+        sites=_sites(),
+    ).to_dict()
+    payload["sites"][0]["hidden"] = True
+    with pytest.raises(
+        RequestValidationError, match="^site_batch_request.site_unknown_field$"
+    ):
+        site_batch_request_from_mapping(payload)
+
+    payload = SiteBatchRequest(
+        SiteBatchPhase.FIRST,
+        parent,
+        (),
+        sites=_sites(),
+    ).to_dict()
+    payload["sites"][0]["file_discovery_goal"] = "optional"
+    with pytest.raises(
+        RequestValidationError,
+        match="^site_batch_request.file_discovery_goal_invalid$",
+    ):
+        site_batch_request_from_mapping(payload)
+
+    with pytest.raises(
+        RequestValidationError, match="^site_batch_request.file_scope_required$"
+    ):
+        SiteBatchSite(
+            replace(
+                site_batch_child_scope(parent.scope, SEEDS[0]),
+                content_types=(ContentType.HTML,),
+            ),
+            FileDiscoveryGoal.REQUIRED,
+        )
+
+    expanded = replace(
+        _sites()[0].scope,
+        allowed_origins=parent.scope.allowed_origins,
+    )
+    with pytest.raises(RequestValidationError, match="^policy.scope_expansion$"):
+        SiteBatchRequest(
+            SiteBatchPhase.FIRST,
+            parent,
+            (),
+            sites=(SiteBatchSite(expanded, FileDiscoveryGoal.REQUIRED), *_sites()[1:]),
+        )
 
 
 def test_refresh_accepts_persisted_incomplete_state_with_usable_pages() -> None:
