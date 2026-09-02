@@ -39,6 +39,18 @@ _PHASES = frozenset({"first", "refresh"})
 _STOP_REASONS = frozenset(
     {"source_exhausted", "partial", "rejected", "cancelled", "failed"}
 )
+_POLICY_REJECTION_CODES = frozenset(
+    {
+        "gateway.dns_not_public",
+        "gateway.robots",
+        "gateway.https_downgrade",
+        "gateway.peer_not_public",
+        "gateway.tls_certificate_invalid",
+        "eligibility.unqualified",
+        "eligibility.policy_noncompliant",
+        "runtime.site_identity_mismatch",
+    }
+)
 SiteResult: TypeAlias = SiteExploreResult | SiteRefreshResult
 
 
@@ -48,6 +60,14 @@ class SiteBatchMode(str, Enum):
     REPLAYED = "replayed"
     RECOVERED = "recovered"
     FAILED = "failed"
+
+
+class FileDiscoveryStatus(str, Enum):
+    """Factual outcome of one site's declared file-discovery goal."""
+
+    SATISFIED = "satisfied"
+    NOT_FOUND = "not_found"
+    NOT_REQUESTED = "not_requested"
 
 
 def validate_site_batch_run_id(value: object) -> str:
@@ -88,6 +108,7 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
     usage: Usage
     errors: tuple[SafeError, ...]
     schema_version: str = SITE_BATCH_RESULT_SCHEMA_VERSION
+    file_discovery_statuses: tuple[FileDiscoveryStatus | str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.schema_version != SITE_BATCH_RESULT_SCHEMA_VERSION:
@@ -107,7 +128,8 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
             raise ResultValidationError("site_batch.request_sha256_invalid")
         self._validate_sites(phase)
         modes = self._validate_modes(phase)
-        self._validate_continuations(phase, modes)
+        file_statuses = self._validate_file_discovery()
+        self._validate_continuations(phase, modes, file_statuses)
         if not isinstance(self.usage, Usage) or self.usage != _usage(self.site_results):
             raise ResultValidationError("site_batch.usage_mismatch")
         if self.stop_reason not in _STOP_REASONS:
@@ -121,11 +143,16 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
         )
         if self.errors != expected_errors:
             raise ResultValidationError("site_batch.errors_mismatch")
-        expected_status, expected_stop = _completion(self.site_keys, self.site_results)
+        expected_status, expected_stop = derive_site_batch_completion(
+            self.site_keys,
+            self.site_results,
+            file_statuses,
+        )
         if status is not expected_status or self.stop_reason != expected_stop:
             raise ResultValidationError("site_batch.status_invalid")
         object.__setattr__(self, "phase", phase)
         object.__setattr__(self, "site_modes", modes)
+        object.__setattr__(self, "file_discovery_statuses", file_statuses)
         object.__setattr__(self, "status", status)
 
     def _validate_sites(self, phase: str) -> None:
@@ -187,7 +214,10 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
         return modes
 
     def _validate_continuations(
-        self, phase: str, modes: tuple[SiteBatchMode, ...]
+        self,
+        phase: str,
+        modes: tuple[SiteBatchMode, ...],
+        file_statuses: tuple[FileDiscoveryStatus, ...],
     ) -> None:
         derived_usable = tuple(
             self.site_keys[index]
@@ -202,10 +232,10 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
             _context_site_key(context) for context in self.next_refresh_contexts
         )
         expected_context_keys: list[str] = []
-        for index, (result, mode) in enumerate(
-            zip(self.site_results, modes, strict=True)
+        for index, (result, mode, file_status) in enumerate(
+            zip(self.site_results, modes, file_statuses, strict=True)
         ):
-            if _continuation_expected(phase, result, mode):
+            if _continuation_expected(phase, result, mode, file_status):
                 expected_context_keys.append(self.site_keys[index])
         if context_keys != tuple(expected_context_keys):
             raise ResultValidationError("site_batch.next_context_mismatch")
@@ -220,6 +250,29 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
             if context is not None:
                 _validate_context(phase, result, mode, context)
 
+    def _validate_file_discovery(self) -> tuple[FileDiscoveryStatus, ...]:
+        statuses = self.file_discovery_statuses
+        if type(statuses) is tuple and not statuses:
+            statuses = (FileDiscoveryStatus.NOT_REQUESTED,) * len(self.site_results)
+        if type(statuses) is not tuple or len(statuses) != len(self.site_results):
+            raise ResultValidationError("site_batch.file_discovery_status_invalid")
+        try:
+            parsed = tuple(FileDiscoveryStatus(item) for item in statuses)
+        except (TypeError, ValueError) as exc:
+            raise ResultValidationError(
+                "site_batch.file_discovery_status_invalid"
+            ) from exc
+        for result, status in zip(self.site_results, parsed, strict=True):
+            found = file_discovery_satisfied(result)
+            if (
+                status is FileDiscoveryStatus.SATISFIED
+                and not found
+                or status is FileDiscoveryStatus.NOT_FOUND
+                and found
+            ):
+                raise ResultValidationError("site_batch.file_discovery_status_mismatch")
+        return parsed
+
     @classmethod
     def from_dict(
         cls,
@@ -232,6 +285,14 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
     ) -> SiteBatchResult:
         """Parse one exact versioned batch Result without performing I/O."""
         payload = require_mapping(value)
+        if "file_discovery_statuses" not in payload:
+            payload = dict(payload)
+            legacy_results = payload.get("site_results")
+            payload["file_discovery_statuses"] = (
+                [FileDiscoveryStatus.NOT_REQUESTED.value for _item in legacy_results]
+                if isinstance(legacy_results, list)
+                else []
+            )
         require_exact_fields(
             payload,
             {
@@ -242,6 +303,7 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
                 "site_keys",
                 "site_results",
                 "site_modes",
+                "file_discovery_statuses",
                 "usable_site_keys",
                 "next_refresh_contexts",
                 "status",
@@ -250,6 +312,7 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
                 "errors",
             },
         )
+        file_statuses = payload["file_discovery_statuses"]
         for field in (
             "site_keys",
             "site_results",
@@ -260,10 +323,14 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
         ):
             if not isinstance(payload[field], list):
                 raise ResultValidationError("schema.invalid")
+        if not isinstance(file_statuses, list):
+            raise ResultValidationError("schema.invalid")
         phase = payload["phase"]
         if not isinstance(phase, str) or phase not in _PHASES:
             raise ResultValidationError("site_batch.phase_invalid")
         result_payloads = payload["site_results"]
+        if len(file_statuses) != len(result_payloads):
+            raise ResultValidationError("site_batch.file_discovery_status_invalid")
         if site_skill_evidence is None:
             site_skill_evidence = (None,) * len(result_payloads)
         if type(site_skill_evidence) is not tuple or len(site_skill_evidence) != len(
@@ -302,6 +369,7 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
             Usage.from_dict(payload["usage"]),
             tuple(SafeError.from_dict(item) for item in payload["errors"]),
             payload["schema_version"],
+            tuple(file_statuses),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -314,6 +382,9 @@ class SiteBatchResult:  # pylint: disable=too-many-instance-attributes
             "site_keys": list(self.site_keys),
             "site_results": [item.to_dict() for item in self.site_results],
             "site_modes": [item.value for item in self.site_modes],
+            "file_discovery_statuses": [
+                item.value for item in self.file_discovery_statuses
+            ],
             "usable_site_keys": list(self.usable_site_keys),
             "next_refresh_contexts": [
                 _context_mapping(item) for item in self.next_refresh_contexts
@@ -365,9 +436,12 @@ def _cancelled(result: SiteResult) -> bool:
     )
 
 
-def _completion(
-    site_keys: tuple[str, ...], results: tuple[SiteResult, ...]
+def derive_site_batch_completion(
+    site_keys: tuple[str, ...],
+    results: tuple[SiteResult, ...],
+    file_statuses: tuple[FileDiscoveryStatus, ...],
 ) -> tuple[ResultStatus, str]:
+    """Derive the one canonical aggregate status and stop reason."""
     cancelled = tuple(
         index for index, result in enumerate(results) if _cancelled(result)
     )
@@ -378,7 +452,10 @@ def _completion(
     if len(results) != len(site_keys):
         raise ResultValidationError("site_batch.site_results_missing")
     statuses = {result.status for result in results}
-    if statuses == {ResultStatus.COMPLETED}:
+    if (
+        statuses == {ResultStatus.COMPLETED}
+        and FileDiscoveryStatus.NOT_FOUND not in file_statuses
+    ):
         return ResultStatus.COMPLETED, "source_exhausted"
     if statuses == {ResultStatus.REJECTED}:
         return ResultStatus.REJECTED, "rejected"
@@ -405,14 +482,59 @@ def _mode_for_result(
     return SiteBatchMode.REPLAYED
 
 
-def _continuation_expected(phase: str, result: SiteResult, mode: SiteBatchMode) -> bool:
+def _continuation_expected(
+    phase: str,
+    result: SiteResult,
+    mode: SiteBatchMode,
+    file_status: FileDiscoveryStatus,
+) -> bool:
     if not _state(result).pages or result.stop_reason in {"rejected", "cancelled"}:
+        return False
+    if file_status is FileDiscoveryStatus.NOT_FOUND:
         return False
     if phase == "first":
         assert isinstance(result, SiteExploreResult)
         return result.site_skill_candidate is not None
     assert isinstance(result, SiteRefreshResult)
     return result.site_skill_update is not None or mode is SiteBatchMode.REPLAYED
+
+
+def file_discovery_satisfied(result: SiteResult) -> bool:
+    """Return whether one child has state-bound file evidence without rejection."""
+    if result.stop_reason in {"rejected", "cancelled"} or _has_policy_rejection(result):
+        return False
+    state = _state(result)
+    for target in result.target_results[1:]:
+        if re.search(r"-candidate-[1-9]\d*\Z", target.manifest.run_id) is None:
+            continue
+        source = next(
+            (artifact for artifact in target.artifacts if artifact.role == "source"),
+            None,
+        )
+        if (
+            source is not None
+            and source.mime_type not in {"application/xhtml+xml", "text/html"}
+            and any(
+                page.canonical_url == source.source_url
+                and page.observation_id == source.observation_id
+                and page.artifact_id == source.artifact_id
+                and page.content_digest == f"sha256:{source.sha256}"
+                for page in state.pages
+            )
+        ):
+            return True
+    return False
+
+
+def _has_policy_rejection(result: SiteResult) -> bool:
+    codes = {error.code for error in result.errors} | {
+        attempt.error.code for attempt in result.attempts if attempt.error is not None
+    }
+    return result.status is ResultStatus.REJECTED or any(
+        code in _POLICY_REJECTION_CODES
+        or code.startswith(("scope.", "robots.", "security.", "policy."))
+        for code in codes
+    )
 
 
 def _validate_context(
@@ -492,8 +614,11 @@ def _parse_refresh(
 
 __all__ = [
     "SITE_BATCH_RESULT_SCHEMA_VERSION",
+    "FileDiscoveryStatus",
     "SiteBatchMode",
     "SiteBatchResult",
+    "derive_site_batch_completion",
+    "file_discovery_satisfied",
     "site_batch_child_run_id",
     "validate_site_batch_run_id",
 ]

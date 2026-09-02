@@ -100,6 +100,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
     *,
     run_id: str,
     clock: Callable[[], str],
+    require_file: bool = False,
 ) -> SiteRefreshResult:
     """Replay one validated recipe under a single shared budget ledger."""
     request = validate_site_refresh_request(request)
@@ -236,6 +237,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             attempts=attempts,
             errors=errors,
             sources=tuple(successful_sources),
+            require_file=require_file,
         )
 
     started_at = clock()
@@ -325,6 +327,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             attempts=attempts,
             errors=errors,
             sources=tuple(successful_sources),
+            require_file=require_file,
         )
 
     assert isinstance(discovery, DiscoveryOutput)
@@ -361,6 +364,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             attempts=attempts,
             errors=errors,
             sources=tuple(successful_sources),
+            require_file=require_file,
         )
     attempts = _merge_attempts(
         attempts,
@@ -379,12 +383,20 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
     )
     policy = compile_access_policy(Request(skill.scope, None, False, skill.budgets))
     observed_urls = {source.source_url}
+    discovered_candidates = (
+        tuple(dict.fromkeys(discovery.candidates))
+        if require_file and "html_file_links" in manifest.capabilities
+        else tuple(sorted(set(discovery.candidates)))
+    )
     candidates = tuple(
         candidate
-        for candidate in sorted(set(discovery.candidates))
+        for candidate in discovered_candidates
         if candidate not in observed_urls
-        and policy.decide_url(candidate).allowed
-        and (urlsplit(candidate).hostname or "invalid") == skill.site_key
+        and (
+            require_file
+            or policy.decide_url(candidate).allowed
+            and (urlsplit(candidate).hostname or "invalid") == skill.site_key
+        )
     )
     complete = discovery.coverage is DiscoveryCoverage.COMPLETE
     stop_reason = "source_exhausted" if complete else "discovery_failed"
@@ -395,7 +407,27 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
                 "Discovery coverage was incomplete.",
             ),
         )
-    for index, candidate_url in enumerate(candidates):
+    required_file_satisfied = False
+    candidate_numbers = {
+        url: index for index, url in enumerate(sorted(candidates), start=1)
+    }
+    for candidate_url in candidates:
+        parsed_candidate = urlsplit(candidate_url)
+        if (
+            require_file
+            and (parsed_candidate.hostname or "invalid") != skill.site_key
+            and policy.decide_url(candidate_url).allowed
+        ):
+            errors += (
+                SafeError(
+                    "runtime.site_identity_mismatch",
+                    "Candidate belongs to a different site identity.",
+                ),
+            )
+            complete = False
+            stop_reason = "rejected"
+            site_skill_update = None
+            break
         remaining = _remaining_budgets(limits, attempts, candidate_url)
         if remaining is None:
             complete = False
@@ -406,7 +438,7 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             governed_request,
             acquisition_registry,  # type: ignore[arg-type]
             artifact_store,
-            run_id=f"{run_id}-candidate-{index + 1}",
+            run_id=f"{run_id}-candidate-{candidate_numbers[candidate_url]}",
             clock=clock,
             target_url=candidate_url,
             budget_limits=remaining,
@@ -433,6 +465,12 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             )
             if update is not None:
                 site_skill_update = update
+            if require_file and target_source.mime_type not in {
+                "application/xhtml+xml",
+                "text/html",
+            }:
+                required_file_satisfied = True
+                break
             continue
         failed = _failed_target_attempts(target_result, candidate_url)
         if failed:
@@ -445,11 +483,15 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             if terminal == "rejected":
                 site_skill_update = None
             break
-    if _shared_budget_exhausted(limits, attempts):
+    if not required_file_satisfied and _shared_budget_exhausted(limits, attempts):
         complete = False
         stop_reason = "budget_exhausted"
         if "budget.exhausted" not in {error.code for error in errors}:
             errors += (SafeError("budget.exhausted", "Refresh budget was exhausted."),)
+    target_results[1:] = sorted(
+        target_results[1:],
+        key=lambda result: result.manifest.requested_url,
+    )
     return _result(
         request,
         generated_at=generated_at,
@@ -495,6 +537,7 @@ def _recover(  # pylint: disable=too-many-arguments
     attempts: tuple[Attempt, ...],
     errors: tuple[SafeError, ...],
     sources: tuple[ArtifactEvidence, ...],
+    require_file: bool,
 ) -> SiteRefreshResult:
     recovery_seed_url = request.site_skill.scope.seeds[0]
     recovery_scope = replace(
@@ -546,6 +589,7 @@ def _recover(  # pylint: disable=too-many-arguments
             artifact_store,
             run_id=f"{run_id}-recovery",
             clock=clock,
+            require_file=require_file,
         )
     recovery_attempts = recovery_registry.audited_attempts(recovery.attempts)
     target_results += recovery.target_results
@@ -733,6 +777,7 @@ def _recover(  # pylint: disable=too-many-arguments
         else {
             "budget_exhausted": "budget_exhausted",
             "cancelled": "cancelled",
+            "rejected": "rejected",
         }.get(recovery.stop_reason, "recovery_incomplete")
     )
     current_state = SiteState(

@@ -15,7 +15,7 @@ from web_listening.artifact.site_state import SiteState, SiteStatePage
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import Budgets, Request
 from web_listening.request.scope import canonicalize_url
-from web_listening.request.validate import validate_request
+from web_listening.request.validate import compile_access_policy, validate_request
 from web_listening.result.attempts import Attempt
 from web_listening.result.errors import ResultValidationError, SafeError
 from web_listening.result.manifest import ArtifactEvidence, Usage
@@ -54,6 +54,17 @@ from web_listening.tool_registry.protocols.transform import (
 from web_listening.tool_registry.registry import Registry
 
 _MAX_CANDIDATES = 2
+_REJECTION_CODES = frozenset(
+    {
+        "gateway.dns_not_public",
+        "gateway.robots",
+        "gateway.https_downgrade",
+        "gateway.peer_not_public",
+        "gateway.tls_certificate_invalid",
+        "eligibility.unqualified",
+        "eligibility.policy_noncompliant",
+    }
+)
 _BUDGET_TERMINAL_CODES = frozenset(
     {
         "budget.requests",
@@ -89,9 +100,11 @@ def run_site_explore(  # pylint: disable=too-many-arguments
     *,
     run_id: str,
     clock: Callable[[], str],
+    require_file: bool = False,
 ) -> SiteExploreResult:
     """Explore one seed under shared Request budgets and return strict evidence."""
     request = validate_request(request)
+    policy = compile_access_policy(request)
     generated_at = clock()
     if request.site_skill is not None or len(request.scope.seeds) != 1:
         return _empty_failure(
@@ -173,7 +186,9 @@ def run_site_explore(  # pylint: disable=too-many-arguments
         sorted(
             {
                 manifest.tool_id: manifest
-                for capability in _discovery_capabilities(seed_source.mime_type)
+                for capability in _discovery_capabilities(
+                    seed_source.mime_type, require_file=require_file
+                )
                 for manifest in registry.eligible(
                     EligibilityRequirements(
                         category=ToolCategory.DISCOVERY,
@@ -182,7 +197,10 @@ def run_site_explore(  # pylint: disable=too-many-arguments
                     )
                 )
             }.values(),
-            key=_manifest_key,
+            key=lambda manifest: (
+                0 if require_file and "html_file_links" in manifest.capabilities else 1,
+                _manifest_key(manifest),
+            ),
         )
     )
     discovery_evidence: list[DiscoveryEvidence] = []
@@ -192,8 +210,18 @@ def run_site_explore(  # pylint: disable=too-many-arguments
     budget_exhausted = False
     target_attempt_budget_exhausted = False
     cancelled = False
+    file_satisfied = False
+    policy_rejected = False
     discovery_all_processed = True
+    goal_aware_discovery_succeeded = False
     for index, manifest in enumerate(manifests):
+        if (
+            require_file
+            and goal_aware_discovery_succeeded
+            and "html_links" in manifest.capabilities
+            and "html_file_links" not in manifest.capabilities
+        ):
+            continue
         if not _discovery_budget_available(
             request.budgets,
             results,
@@ -279,7 +307,7 @@ def run_site_explore(  # pylint: disable=too-many-arguments
         assert isinstance(output, DiscoveryOutput)
         assert output.discovered_from is not None
         assert isinstance(output.coverage, DiscoveryCoverage)
-        pairs = tuple(sorted(set(zip(output.candidates, output.discovered_from))))
+        pairs = tuple(dict.fromkeys(zip(output.candidates, output.discovered_from)))
         representable_pairs: list[tuple[str, str]] = []
         representation_error: SafeError | None = None
         for candidate_url, discovered_from in pairs:
@@ -336,8 +364,9 @@ def run_site_explore(  # pylint: disable=too-many-arguments
             continue
         if representation_error is not None:
             discovery_terminal_errors.append(representation_error)
-        candidates = tuple(candidate_url for candidate_url, _source in pairs)
-        sources = tuple(source_url for _candidate, source_url in pairs)
+        evidence_pairs = tuple(sorted(representable_pairs))
+        candidates = tuple(candidate_url for candidate_url, _source in evidence_pairs)
+        sources = tuple(source_url for _candidate, source_url in evidence_pairs)
         discovery_evidence.append(
             DiscoveryEvidence(
                 output.tool_id,
@@ -363,6 +392,8 @@ def run_site_explore(  # pylint: disable=too-many-arguments
                 runtime_ms=runtime_ms,
             )
         )
+        if require_file and "html_file_links" in manifest.capabilities:
+            goal_aware_discovery_succeeded = True
         if _shared_budget_exhausted(request.budgets, results, discovery_attempts):
             budget_exhausted = True
             discovery_all_processed = False
@@ -383,7 +414,32 @@ def run_site_explore(  # pylint: disable=too-many-arguments
     discovery_failed = not manifests or any(
         item.outcome == "failed" for item in discovery_evidence
     )
-    available_candidates = tuple(sorted(discovered.items()))
+    goal_aware_ids = {
+        manifest.tool_id
+        for manifest in manifests
+        if "html_file_links" in manifest.capabilities
+    }
+    goal_aware_succeeded = require_file and any(
+        item.outcome == "succeeded" and item.tool_id in goal_aware_ids
+        for item in discovery_evidence
+    )
+    if require_file and not goal_aware_succeeded:
+        discovery_failed = not any(
+            item.outcome == "succeeded"
+            and item.coverage == DiscoveryCoverage.COMPLETE.value
+            and item.tool_id not in goal_aware_ids
+            for item in discovery_evidence
+        )
+    discovered_items = (
+        tuple(discovered.items())
+        if goal_aware_succeeded
+        else tuple(sorted(discovered.items()))
+    )
+    available_candidates = tuple(
+        (url, recipe)
+        for url, recipe in discovered_items
+        if not goal_aware_succeeded or "html_file_links" in recipe[1].capabilities
+    )
     extra_errors = list(discovery_terminal_errors)
     if budget_exhausted or target_attempt_budget_exhausted:
         extra_errors.append(
@@ -407,8 +463,17 @@ def run_site_explore(  # pylint: disable=too-many-arguments
     processed_candidates = 0
     acquired_candidates = 0
     selected_candidates: list[tuple[str, tuple[str, ToolManifest]]] = []
-    for index, candidate in enumerate(available_candidates):
-        if acquired_candidates >= _MAX_CANDIDATES:
+    candidate_numbers = {
+        url: index
+        for index, (url, _recipe) in enumerate(
+            sorted(available_candidates),
+            start=1,
+        )
+    }
+    for candidate in available_candidates:
+        if (not require_file and acquired_candidates >= _MAX_CANDIDATES) or (
+            require_file and file_satisfied
+        ):
             break
         if budget_exhausted or cancelled:
             break
@@ -416,9 +481,11 @@ def run_site_explore(  # pylint: disable=too-many-arguments
         selected_candidates.append(candidate)
         parsed_candidate = urlsplit(candidate_url)
         candidate_origin = f"{parsed_candidate.scheme}://{parsed_candidate.netloc}"
-        if (
-            parsed_candidate.hostname or "invalid"
-        ) != site_key and candidate_origin in request.scope.allowed_origins:
+        if (parsed_candidate.hostname or "invalid") != site_key and (
+            policy.decide_url(candidate_url).allowed
+            if require_file
+            else candidate_origin in request.scope.allowed_origins
+        ):
             extra_errors.append(
                 SafeError(
                     "runtime.site_identity_mismatch",
@@ -426,6 +493,10 @@ def run_site_explore(  # pylint: disable=too-many-arguments
                 )
             )
             processed_candidates += 1
+            if require_file:
+                acquired_all = False
+                policy_rejected = True
+                break
             continue
         remaining = _remaining_budgets(
             request.budgets,
@@ -458,7 +529,7 @@ def run_site_explore(  # pylint: disable=too-many-arguments
             candidate_request,
             acquisition_registry,  # type: ignore[arg-type]
             artifact_store,
-            run_id=f"{run_id}-candidate-{index + 1}",
+            run_id=f"{run_id}-candidate-{candidate_numbers[candidate_url]}",
             clock=clock,
             target_url=candidate_url,
         )
@@ -466,6 +537,26 @@ def run_site_explore(  # pylint: disable=too-many-arguments
         processed_candidates += 1
         if _entered_acquisition(candidate_result, candidate_url):
             acquired_candidates += 1
+        candidate_source = _source_artifact(candidate_result)
+        if candidate_source is not None and candidate_source.mime_type not in {
+            "application/xhtml+xml",
+            "text/html",
+        }:
+            file_satisfied = True
+        if require_file and (
+            (
+                _has_policy_rejection(candidate_result)
+                and not _has_budget_terminal(candidate_result)
+            )
+            or (
+                candidate_source is not None
+                and (urlsplit(candidate_source.source_url).hostname or "invalid")
+                != site_key
+            )
+        ):
+            acquired_all = False
+            policy_rejected = True
+            break
         if _has_budget_terminal(candidate_result):
             acquired_all = False
             extra_errors.append(
@@ -480,7 +571,11 @@ def run_site_explore(  # pylint: disable=too-many-arguments
             acquired_all = False
             break
 
-    selected = tuple(selected_candidates)
+    results[1:] = sorted(
+        results[1:],
+        key=lambda result: result.manifest.requested_url,
+    )
+    selected = tuple(sorted(selected_candidates))
     candidate_results = results[1:]
     successful_candidate_results: list[Result] = []
     for result in candidate_results:
@@ -529,6 +624,9 @@ def run_site_explore(  # pylint: disable=too-many-arguments
     if candidate is not None:
         status = ResultStatus.COMPLETED
         stop_reason = "source_exhausted"
+    elif policy_rejected:
+        status = ResultStatus.REJECTED
+        stop_reason = "rejected"
     elif cancelled:
         status = ResultStatus.PARTIAL
         stop_reason = "cancelled"
@@ -906,6 +1004,14 @@ def _has_budget_terminal(result: Result) -> bool:
     return any(error.code in _BUDGET_TERMINAL_CODES for error in result.errors)
 
 
+def _has_policy_rejection(result: Result) -> bool:
+    return result.status is ResultStatus.REJECTED or any(
+        error.code in _REJECTION_CODES
+        or error.code.startswith(("scope.", "robots.", "security.", "policy."))
+        for error in result.errors
+    )
+
+
 def _has_shared_budget_terminal(result: Result) -> bool:
     return any(error.code in _SHARED_BUDGET_TERMINAL_CODES for error in result.errors)
 
@@ -979,9 +1085,11 @@ def _candidate_source_key(value: tuple[str, ToolManifest]) -> tuple[object, ...]
     return (_manifest_key(value[1]), value[0])
 
 
-def _discovery_capabilities(mime_type: str) -> tuple[str, ...]:
+def _discovery_capabilities(
+    mime_type: str, *, require_file: bool = False
+) -> tuple[str, ...]:
     if mime_type in {"application/xhtml+xml", "text/html"}:
-        return ("html_links",)
+        return ("html_file_links", "html_links") if require_file else ("html_links",)
     if mime_type in {"application/atom+xml", "application/rss+xml"}:
         return ("rss",)
     if mime_type in {"application/sitemap+xml", "text/xml", "application/xml"}:

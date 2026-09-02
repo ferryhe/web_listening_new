@@ -24,7 +24,9 @@ from web_listening.site_skill.repository import SiteSkillRepository
 from web_listening.site_skill.update import SiteSkillCandidate
 from web_listening.site_skill.validate import site_skill_from_mapping
 from web_listening.tool_registry.discovery.builtins.html_links import (
+    HTML_FILE_LINKS_MANIFEST,
     HTML_LINKS_MANIFEST,
+    HtmlFileLinksDiscoveryTool,
     HtmlLinksDiscoveryTool,
 )
 from web_listening.tool_registry.manifest import (
@@ -1041,6 +1043,534 @@ def test_runtime_caps_actual_candidate_acquisitions_at_two(tmp_path: Path) -> No
     assert result.exploration_complete is True
     assert acquisition.targets == ["https://example.test/", *candidate_urls[:2]]
     assert result.discovery[0].candidates == candidate_urls
+    store.close()
+
+
+def test_required_file_goal_runs_past_two_html_candidates_under_same_budget(
+    tmp_path: Path,
+) -> None:
+    root = "https://example.test/"
+    candidates = tuple(
+        f"{root}{name}" for name in ("a.xhtml", "a.html", "b.html", "z-report.pdf")
+    )
+    acquisition = _Acquisition(
+        {
+            root: b"<a href='/a.xhtml'>xhtml</a><a href='/a.html'>a</a>"
+            b"<a href='/b.html'>b</a>"
+            b"<a href='/z-report.pdf'>report</a>",
+            candidates[0]: b"<main>xhtml page</main>",
+            candidates[1]: b"page a",
+            candidates[2]: b"page b",
+            candidates[3]: b"%PDF-1.7 governed evidence",
+        },
+        mime_types={
+            root: "text/html",
+            candidates[0]: "application/xhtml+xml",
+            candidates[1]: "text/html",
+            candidates[2]: "text/html",
+            candidates[3]: "application/pdf",
+        },
+    )
+    registry = Registry()
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "artifacts")
+    request = replace(
+        _request(max_requests=5),
+        scope=replace(
+            _request().scope,
+            content_types=(ContentType.HTML, ContentType.FILE),
+        ),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="required-file",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert acquisition.targets == [root, *sorted(candidates)]
+    xhtml_target = next(
+        target
+        for target in result.target_results
+        if target.manifest.requested_url == candidates[0]
+    )
+    assert xhtml_target.manifest.mime_type == "application/xhtml+xml"
+    assert result.target_results[-1].manifest.mime_type == "application/pdf"
+    assert result.usage.requests == 5
+    store.close()
+
+
+def test_required_file_goal_reaches_pdf_beyond_ordinary_discovery_bound(
+    tmp_path: Path,
+) -> None:
+    root = "https://example.test/"
+    pdf_url = f"{root}z-report.pdf"
+    body = (
+        "".join(f"<a href=p{index:03}>" for index in range(249))
+        + "<a href=z-report.pdf>"
+    ).encode()
+    acquisition = _Acquisition(
+        {root: body, pdf_url: b"%PDF-1.7 governed evidence"},
+        mime_types={root: "text/html", pdf_url: "application/pdf"},
+    )
+    registry = Registry()
+    registry.register(HTML_FILE_LINKS_MANIFEST, HtmlFileLinksDiscoveryTool())
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "goal-aware-artifacts")
+    request = replace(
+        _request(max_requests=3),
+        scope=replace(
+            _request().scope,
+            content_types=(ContentType.HTML, ContentType.FILE),
+        ),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="goal-aware",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert acquisition.targets == [root, pdf_url]
+    assert result.target_results[-1].manifest.mime_type == "application/pdf"
+    assert result.site_skill_candidate is not None
+    skill = site_skill_from_mapping(result.site_skill_candidate.to_dict())
+    assert skill.discovery is not None
+    assert skill.discovery.tool.tool_id == HTML_FILE_LINKS_MANIFEST.tool_id
+    assert [item.tool_id for item in result.discovery] == [
+        HTML_FILE_LINKS_MANIFEST.tool_id
+    ]
+    store.close()
+
+
+def test_required_file_goal_falls_back_when_file_discovery_has_no_file_hint(
+    tmp_path: Path,
+) -> None:
+    root = "https://example.test/"
+    page = f"{root}page"
+    acquisition = _Acquisition({root: b"<a href='/page'>page</a>", page: b"page"})
+    registry = Registry()
+    registry.register(HTML_FILE_LINKS_MANIFEST, HtmlFileLinksDiscoveryTool())
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "goal-aware-fallback")
+    request = replace(
+        _request(max_requests=2),
+        scope=replace(
+            _request().scope,
+            content_types=(ContentType.HTML, ContentType.FILE),
+        ),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="goal-aware-fallback",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert acquisition.targets == [root, page]
+    assert [item.outcome for item in result.discovery] == ["succeeded"]
+    assert result.site_skill_candidate is not None
+    skill = site_skill_from_mapping(result.site_skill_candidate.to_dict())
+    assert skill.discovery is not None
+    assert skill.discovery.tool.tool_id == HTML_FILE_LINKS_MANIFEST.tool_id
+    store.close()
+
+
+def test_required_file_goal_continues_after_pdf_hint_returns_html(
+    tmp_path: Path,
+) -> None:
+    root = "https://example.test/"
+    false_pdf = f"{root}a.pdf"
+    download = f"{root}b"
+    acquisition = _Acquisition(
+        {
+            root: b"<a href='/a.pdf'>false</a><a href='/b' download>real</a>",
+            false_pdf: b"<main>not a file</main>",
+            download: b"%PDF-1.7 governed evidence",
+        },
+        mime_types={
+            root: "text/html",
+            false_pdf: "text/html",
+            download: "application/pdf",
+        },
+    )
+    registry = Registry()
+    registry.register(HTML_FILE_LINKS_MANIFEST, HtmlFileLinksDiscoveryTool())
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "goal-aware-false-positive")
+    request = replace(
+        _request(max_requests=3),
+        scope=replace(
+            _request().scope,
+            content_types=(ContentType.HTML, ContentType.FILE),
+        ),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="goal-aware-false-positive",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert acquisition.targets == [root, false_pdf, download]
+    assert result.target_results[-1].manifest.mime_type == "application/pdf"
+    store.close()
+
+
+def test_required_file_goal_adopts_complete_fallback_after_goal_failure(
+    tmp_path: Path,
+) -> None:
+    root = "https://example.test/"
+    file_url = f"{root}report.pdf"
+    acquisition = _Acquisition(
+        {
+            root: b"<a href='/report.pdf'>report</a>",
+            file_url: b"%PDF-1.7 governed evidence",
+        },
+        mime_types={root: "text/html", file_url: "application/pdf"},
+    )
+    registry = Registry()
+    registry.register(
+        HTML_FILE_LINKS_MANIFEST,
+        _FailingDiscovery(HTML_FILE_LINKS_MANIFEST, "registry.tool_exception"),
+    )
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "goal-aware-ordinary-fallback")
+    request = replace(
+        _request(max_requests=2),
+        scope=replace(
+            _request().scope,
+            content_types=(ContentType.HTML, ContentType.FILE),
+        ),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="goal-aware-ordinary-fallback",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert result.exploration_complete is True
+    assert acquisition.targets == [root, file_url]
+    assert [item.outcome for item in result.discovery] == ["failed", "succeeded"]
+    failed = next(item for item in result.discovery if item.outcome == "failed")
+    assert failed.error is not None
+    assert failed.error.code == "registry.tool_exception"
+    failed_attempt = next(
+        item
+        for item in result.attempts
+        if item.tool_id == HTML_FILE_LINKS_MANIFEST.tool_id
+    )
+    assert failed_attempt.outcome == "failed"
+    assert failed_attempt.error == failed.error
+    assert "registry.tool_exception" in {error.code for error in result.errors}
+    assert result.site_skill_candidate is not None
+    skill = site_skill_from_mapping(result.site_skill_candidate.to_dict())
+    assert skill.discovery is not None
+    assert skill.discovery.tool.tool_id == HTML_LINKS_MANIFEST.tool_id
+    assert (
+        site_explore_runtime.site_explore_result_from_mapping(
+            result.to_dict()
+        ).to_dict()
+        == result.to_dict()
+    )
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("false_path", "hint_markup"),
+    (
+        ("z.pdf", "<a href='/z.pdf'>false</a>"),
+        ("a", "<a href='/a' download>false</a>"),
+    ),
+)
+def test_required_file_goal_continues_from_false_hint_to_unhinted_file(
+    tmp_path: Path,
+    false_path: str,
+    hint_markup: str,
+) -> None:
+    root = "https://example.test/"
+    false_hint = f"{root}{false_path}"
+    unhinted_file = f"{root}b"
+    acquisition = _Acquisition(
+        {
+            root: f"{hint_markup}<a href='/b'>real</a>".encode(),
+            false_hint: b"<main>not a file</main>",
+            unhinted_file: b"%PDF-1.7 governed evidence",
+        },
+        mime_types={
+            root: "text/html",
+            false_hint: "text/html",
+            unhinted_file: "application/pdf",
+        },
+    )
+    registry = Registry()
+    registry.register(HTML_FILE_LINKS_MANIFEST, HtmlFileLinksDiscoveryTool())
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "goal-aware-unhinted-file")
+    request = replace(
+        _request(max_requests=3),
+        scope=replace(
+            _request().scope,
+            content_types=(ContentType.HTML, ContentType.FILE),
+        ),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="goal-aware-unhinted-file",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert acquisition.targets == [root, false_hint, unhinted_file]
+    file_result = next(
+        item
+        for item in result.target_results
+        if item.manifest.requested_url == unhinted_file
+    )
+    assert file_result.manifest.mime_type == "application/pdf"
+    assert unhinted_file in {page.canonical_url for page in result.site_state.pages}
+    store.close()
+
+
+def test_required_file_goal_stops_at_budget_before_late_file(tmp_path: Path) -> None:
+    root = "https://example.test/"
+    candidates = tuple(f"{root}{name}" for name in ("a.html", "b.html", "z-report.pdf"))
+    acquisition = _Acquisition(
+        {
+            root: b"<a href='/a.html'>a</a><a href='/b.html'>b</a>"
+            b"<a href='/z-report.pdf'>report</a>",
+            candidates[0]: b"page a",
+            candidates[1]: b"page b",
+            candidates[2]: b"%PDF-1.7 governed evidence",
+        },
+        mime_types={
+            root: "text/html",
+            candidates[0]: "text/html",
+            candidates[1]: "text/html",
+            candidates[2]: "application/pdf",
+        },
+    )
+    registry = Registry()
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "artifacts")
+    request = replace(
+        _request(max_requests=3),
+        scope=replace(
+            _request().scope,
+            content_types=(ContentType.HTML, ContentType.FILE),
+        ),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="required-file-budget",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.stop_reason == "budget_exhausted"
+    assert acquisition.targets == [root, *candidates[:2]]
+    assert result.usage.requests == 3
+    assert "budget.exhausted" in {error.code for error in result.errors}
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        "scope.content_type_not_allowed",
+        "gateway.robots",
+        "gateway.https_downgrade",
+    ),
+)
+def test_required_file_goal_stops_on_candidate_policy_rejection(
+    tmp_path: Path,
+    code: str,
+) -> None:
+    root = "https://example.test/"
+    blocked = f"{root}a-blocked"
+    file_url = f"{root}z-report.pdf"
+    acquisition = _ScriptedAcquisition(
+        {
+            root: b"<a href='/a-blocked'>blocked</a>"
+            b"<a href='/z-report.pdf'>report</a>",
+            blocked: AcquisitionFailure(
+                ACQUISITION_MANIFEST.tool_id,
+                ACQUISITION_MANIFEST.version,
+                code,
+                requests=1,
+            ),
+            file_url: b"unreachable file",
+        }
+    )
+    registry = Registry()
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / code.replace(".", "-"))
+    request = replace(
+        _request(max_requests=4),
+        scope=replace(
+            _request().scope,
+            content_types=(ContentType.HTML, ContentType.FILE),
+        ),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="required-file-rejected",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.REJECTED
+    assert result.stop_reason == "rejected"
+    assert acquisition.targets == [root, blocked]
+    assert result.attempts[-1].error is not None
+    assert result.attempts[-1].error.code == code
+    assert code in {error.code for error in result.errors}
+    assert all(
+        target.manifest.requested_url != file_url for target in result.target_results
+    )
+    store.close()
+
+
+def test_required_file_goal_stops_on_pre_acquisition_scope_rejection(
+    tmp_path: Path,
+) -> None:
+    root = "https://example.test/"
+    blocked = "https://aaa.test/a-blocked"
+    file_url = f"{root}z-report.pdf"
+    acquisition = _Acquisition(
+        {
+            root: f"<a href='{blocked}'>blocked</a>".encode()
+            + b"<a href='/z-report.pdf'>report</a>",
+            file_url: b"%PDF-1.7 unreachable",
+        }
+    )
+    registry = Registry()
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "scope-rejected")
+    request = replace(
+        _request(max_requests=4),
+        scope=replace(
+            _request().scope,
+            content_types=(ContentType.HTML, ContentType.FILE),
+        ),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="required-file-scope-rejected",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.REJECTED
+    assert result.stop_reason == "rejected"
+    assert acquisition.targets == [root]
+    rejected = result.target_results[-1]
+    assert rejected.manifest.requested_url == blocked
+    assert rejected.attempts == ()
+    assert rejected.errors[0].code == "scope.origin_not_allowed"
+    assert result.usage.requests == 1
+    assert all(
+        target.manifest.requested_url != file_url for target in result.target_results
+    )
+    store.close()
+
+
+def test_required_file_goal_applies_full_scope_before_site_identity(
+    tmp_path: Path,
+) -> None:
+    root = "https://example.test/"
+    blocked = "https://aaa.test/blocked"
+    file_url = f"{root}allowed/z-report.pdf"
+    acquisition = _Acquisition(
+        {
+            root: f"<a href='{blocked}'>blocked</a>".encode()
+            + b"<a href='/allowed/z-report.pdf'>report</a>",
+            file_url: b"%PDF-1.7 must remain unreachable",
+        }
+    )
+    registry = Registry()
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "path-rejected-before-identity")
+    request = replace(
+        _request(max_requests=4),
+        scope=Scope(
+            (root,),
+            ("https://aaa.test", "https://example.test"),
+            ("/", "/allowed/**"),
+            (ContentType.HTML, ContentType.FILE),
+        ),
+    )
+
+    result = run_site_explore(
+        request,
+        registry,
+        store,
+        run_id="required-file-path-rejected",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.REJECTED
+    assert result.stop_reason == "rejected"
+    assert acquisition.targets == [root]
+    assert [item.manifest.requested_url for item in result.target_results] == [
+        root,
+        blocked,
+    ]
+    rejected = result.target_results[-1]
+    assert rejected.attempts == ()
+    assert [error.code for error in rejected.errors] == ["scope.path_not_included"]
+    assert "runtime.site_identity_mismatch" not in {
+        error.code for error in result.errors
+    }
+    assert all(
+        target.manifest.requested_url != file_url for target in result.target_results
+    )
     store.close()
 
 

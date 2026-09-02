@@ -24,7 +24,9 @@ from web_listening.tool_registry.acquisition.builtins.web_http import (
     WebHttpAcquisitionTool,
 )
 from web_listening.tool_registry.discovery.builtins.html_links import (
+    HTML_FILE_LINKS_MANIFEST,
     HTML_LINKS_MANIFEST,
+    HtmlFileLinksDiscoveryTool,
     HtmlLinksDiscoveryTool,
 )
 from web_listening.tool_registry.discovery.builtins.rss import (
@@ -76,6 +78,8 @@ class RuntimeService:
             resources.append(tool)
             registry = Registry()
             registry.register(WEB_HTTP_MANIFEST, tool)
+            file_discovery = HtmlFileLinksDiscoveryTool()
+            registry.register(HTML_FILE_LINKS_MANIFEST, file_discovery)
             discovery = HtmlLinksDiscoveryTool()
             registry.register(HTML_LINKS_MANIFEST, discovery)
             registry.register(RSS_MANIFEST, RssDiscoveryTool())

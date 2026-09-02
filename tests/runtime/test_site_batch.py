@@ -1,6 +1,7 @@
 """Availability-first serial multi-site Runtime tests."""
 
 # pylint: disable=duplicate-code,missing-function-docstring,too-few-public-methods
+# pylint: disable=too-many-lines
 # pylint: disable=too-many-locals,too-many-statements
 
 from __future__ import annotations
@@ -17,14 +18,17 @@ from web_listening.artifact.site_state import SiteStatePage
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import Budgets, ContentType, Request, Scope
 from web_listening.request.site_batch import (
+    FileDiscoveryGoal,
     SiteBatchPhase,
     SiteBatchRequest,
+    SiteBatchSite,
     site_batch_child_scope,
     site_batch_request_from_mapping,
 )
 from web_listening.request.site_refresh import SiteRefreshRequest
+from web_listening.result.errors import ResultValidationError
 from web_listening.result.model import ResultStatus
-from web_listening.result.site_batch import SiteBatchMode
+from web_listening.result.site_batch import FileDiscoveryStatus, SiteBatchMode
 from web_listening.runtime.site_batch import (
     run_site_batch,
     site_batch_result_from_mapping,
@@ -236,6 +240,748 @@ def test_first_batch_is_stable_and_resets_each_site_budget(tmp_path: Path) -> No
             "first-batch-site-2-seed",
             "first-batch-site-3-seed",
         ]
+    finally:
+        store.close()
+
+
+def test_required_file_goal_reaches_file_after_two_early_html_candidates(
+    tmp_path: Path,
+) -> None:
+    parent = _parent(count=2, limits=Budgets(12, 52_428_800, 60, 4))
+    file_url = "https://one.test/z-report.pdf"
+    xhtml_url = "https://one.test/a.xhtml"
+    candidates = {
+        SEEDS[0]: (
+            xhtml_url,
+            "https://one.test/a.html",
+            "https://one.test/b.html",
+            file_url,
+        ),
+        SEEDS[1]: ("https://two.test/a.html",),
+    }
+    acquisition = _Acquisition(
+        {
+            SEEDS[0]: b"<main>one seed</main>",
+            xhtml_url: b"<main>xhtml candidate</main>",
+            "https://one.test/a.html": b"<main>page a</main>",
+            "https://one.test/b.html": b"<main>page b</main>",
+            file_url: b"%PDF-1.7 governed file evidence",
+            SEEDS[1]: b"<main>two seed</main>",
+            "https://two.test/a.html": b"<main>page a</main>",
+        },
+        mime_types={
+            xhtml_url: "application/xhtml+xml",
+            file_url: "application/pdf",
+        },
+    )
+    sites = tuple(
+        SiteBatchSite(
+            site_batch_child_scope(parent.scope, seed),
+            (
+                FileDiscoveryGoal.REQUIRED
+                if index == 0
+                else FileDiscoveryGoal.NOT_REQUIRED
+            ),
+        )
+        for index, seed in enumerate(parent.scope.seeds)
+    )
+    store = ArtifactStore(tmp_path / "required-file")
+    try:
+        result = run_site_batch(
+            SiteBatchRequest(SiteBatchPhase.FIRST, parent, (), sites=sites),
+            _registry(
+                acquisition,
+                discovery_manifest=RECOVERY_MANIFEST,
+                discovery=_StaticDiscovery(candidates, "complete"),
+            ),
+            store,
+            run_id="required-file",
+            clock=lambda: NOW,
+        )
+
+        first = result.site_results[0]
+        assert [target.manifest.requested_url for target in first.target_results] == [
+            SEEDS[0],
+            *sorted(candidates[SEEDS[0]]),
+        ]
+        xhtml_target = next(
+            target
+            for target in first.target_results
+            if target.manifest.requested_url == xhtml_url
+        )
+        assert xhtml_target.manifest.mime_type == "application/xhtml+xml"
+        assert first.target_results[-1].manifest.mime_type == "application/pdf"
+        pdf_source = next(
+            artifact
+            for artifact in first.target_results[-1].artifacts
+            if artifact.role == "source"
+        )
+        pdf_page = next(
+            page for page in first.site_state.pages if page.canonical_url == file_url
+        )
+        assert (
+            pdf_page.canonical_url,
+            pdf_page.observation_id,
+            pdf_page.artifact_id,
+            pdf_page.content_digest,
+        ) == (
+            pdf_source.source_url,
+            pdf_source.observation_id,
+            pdf_source.artifact_id,
+            f"sha256:{pdf_source.sha256}",
+        )
+        assert result.file_discovery_statuses == (
+            FileDiscoveryStatus.SATISFIED,
+            FileDiscoveryStatus.NOT_REQUESTED,
+        )
+        assert (
+            tuple(
+                context.site_skill.site_key for context in result.next_refresh_contexts
+            )
+            == result.site_keys
+        )
+        assert site_batch_result_from_mapping(result.to_dict()) == result
+
+        refresh_acquisition = _Acquisition(
+            dict(acquisition.bodies),
+            mime_types={
+                xhtml_url: "application/xhtml+xml",
+                file_url: "application/pdf",
+            },
+        )
+        refresh_request = SiteBatchRequest(
+            SiteBatchPhase.REFRESH,
+            parent,
+            result.next_refresh_contexts,
+            sites=sites,
+        )
+        refresh = run_site_batch(
+            refresh_request,
+            _registry(
+                refresh_acquisition,
+                discovery_manifest=HTML_LINKS_MANIFEST,
+                discovery=_StaticDiscovery(
+                    candidates,
+                    "complete",
+                    HTML_LINKS_MANIFEST,
+                ),
+            ),
+            store,
+            run_id="required-file-refresh",
+            clock=lambda: NOW,
+        )
+
+        assert refresh.file_discovery_statuses == result.file_discovery_statuses
+        assert refresh_acquisition.targets[:6] == [
+            SEEDS[0],
+            SEEDS[0],
+            *sorted(candidates[SEEDS[0]]),
+        ]
+        assert refresh.site_results[0].target_results[-1].manifest.requested_url == (
+            file_url
+        )
+        assert refresh.site_results[0].target_results[-1].manifest.run_id == (
+            "required-file-refresh-site-1-recovery-candidate-4"
+        )
+        assert result.request_sha256 != refresh.request_sha256
+        assert (
+            refresh_acquisition.budgets[refresh_acquisition.targets.index(SEEDS[1])]
+            == parent.budgets
+        )
+        assert tuple(
+            context.site_skill.scope for context in refresh.next_refresh_contexts
+        ) == tuple(site.scope for site in sites)
+        assert site_batch_result_from_mapping(refresh.to_dict()) == refresh
+
+        for batch, state_field, code in (
+            (result, "site_state", "site_batch.file_discovery_status_mismatch"),
+            (refresh, "current_state", "site_refresh.evidence_mismatch"),
+        ):
+            forged = batch.to_dict()
+            child = forged["site_results"][0]
+            child[state_field]["pages"] = [
+                page
+                for page in child[state_field]["pages"]
+                if page["canonical_url"] != file_url
+            ]
+            context = forged["next_refresh_contexts"][0]
+            context["previous_state"]["pages"] = [
+                page
+                for page in context["previous_state"]["pages"]
+                if page["canonical_url"] != file_url
+            ]
+            with pytest.raises(
+                ResultValidationError,
+                match=f"^{code}$",
+            ):
+                site_batch_result_from_mapping(forged)
+    finally:
+        store.close()
+
+
+def test_required_file_goal_accepts_partial_candidate_after_tool_switch(
+    tmp_path: Path,
+) -> None:
+    parent = _parent(count=2, limits=Budgets(12, 52_428_800, 60, 4))
+    file_url = "https://one.test/report.pdf"
+    blocked_url = "https://one.test/z-blocked"
+    other_url = "https://two.test/a.html"
+    candidates = {
+        SEEDS[0]: (blocked_url, file_url),
+        SEEDS[1]: (other_url,),
+    }
+    bodies = {
+        SEEDS[0]: b"<main>one seed</main>",
+        file_url: b"%PDF-1.7 alternate file evidence",
+        blocked_url: b"must not be acquired",
+        SEEDS[1]: b"<main>two seed</main>",
+        other_url: b"<main>two candidate</main>",
+    }
+    alternate_manifest = replace(
+        WEB_HTTP_MANIFEST,
+        tool_id="acquisition.alternate",
+    )
+    preferred = _Acquisition(
+        {
+            url: AcquisitionFailure(
+                WEB_HTTP_MANIFEST.tool_id,
+                WEB_HTTP_MANIFEST.version,
+                "gateway.timeout",
+                requests=1,
+            )
+            for url in bodies
+        }
+    )
+    alternate = _Acquisition(
+        bodies,
+        mime_types={file_url: "application/pdf"},
+        manifest=alternate_manifest,
+    )
+    first_registry = _registry(
+        preferred,
+        discovery_manifest=RECOVERY_MANIFEST,
+        discovery=_StaticDiscovery(candidates, "complete"),
+    )
+    first_registry.register(alternate_manifest, alternate)
+    sites = tuple(
+        SiteBatchSite(
+            site_batch_child_scope(parent.scope, seed),
+            (
+                FileDiscoveryGoal.REQUIRED
+                if index == 0
+                else FileDiscoveryGoal.NOT_REQUIRED
+            ),
+        )
+        for index, seed in enumerate(parent.scope.seeds)
+    )
+    store = ArtifactStore(tmp_path / "partial-file-switch")
+    try:
+        first = run_site_batch(
+            SiteBatchRequest(SiteBatchPhase.FIRST, parent, (), sites=sites),
+            first_registry,
+            store,
+            run_id="partial-file-switch-first",
+            clock=lambda: NOW,
+        )
+
+        assert first.status is ResultStatus.COMPLETED
+        assert first.file_discovery_statuses == (
+            FileDiscoveryStatus.SATISFIED,
+            FileDiscoveryStatus.NOT_REQUESTED,
+        )
+        assert (
+            tuple(
+                context.site_skill.site_key for context in first.next_refresh_contexts
+            )
+            == first.site_keys
+        )
+        assert all(
+            context.site_skill.tool.tool_id == alternate_manifest.tool_id
+            for context in first.next_refresh_contexts
+        )
+        assert blocked_url not in preferred.targets
+        assert blocked_url not in alternate.targets
+
+        third_manifest = replace(
+            WEB_HTTP_MANIFEST,
+            tool_id="acquisition.third",
+        )
+        saved_preferred = _Acquisition(
+            {
+                url: (
+                    AcquisitionFailure(
+                        alternate_manifest.tool_id,
+                        alternate_manifest.version,
+                        "gateway.robots",
+                        requests=1,
+                    )
+                    if url == blocked_url
+                    else AcquisitionFailure(
+                        alternate_manifest.tool_id,
+                        alternate_manifest.version,
+                        "gateway.timeout",
+                        requests=1,
+                    )
+                )
+                for url in bodies
+            },
+            manifest=alternate_manifest,
+        )
+        third = _Acquisition(
+            bodies,
+            mime_types={file_url: "application/pdf"},
+            manifest=third_manifest,
+        )
+        refresh_registry = Registry()
+        refresh_registry.register(
+            RECOVERY_MANIFEST,
+            _StaticDiscovery(candidates, "complete"),
+        )
+        refresh_registry.register(alternate_manifest, saved_preferred)
+        refresh_registry.register(third_manifest, third)
+        refresh = run_site_batch(
+            SiteBatchRequest(
+                SiteBatchPhase.REFRESH,
+                parent,
+                first.next_refresh_contexts,
+                sites=sites,
+            ),
+            refresh_registry,
+            store,
+            run_id="partial-file-switch-refresh",
+            clock=lambda: NOW,
+        )
+
+        assert refresh.status is ResultStatus.COMPLETED
+        assert refresh.file_discovery_statuses == first.file_discovery_statuses
+        assert (
+            tuple(
+                context.site_skill.site_key for context in refresh.next_refresh_contexts
+            )
+            == refresh.site_keys
+        )
+        assert all(
+            context.site_skill.tool.tool_id == third_manifest.tool_id
+            for context in refresh.next_refresh_contexts
+        )
+        assert blocked_url not in saved_preferred.targets
+        assert blocked_url not in third.targets
+        assert first.request_sha256 != refresh.request_sha256
+
+        for batch, failed_tool, succeeded_tool in (
+            (first, WEB_HTTP_MANIFEST.tool_id, alternate_manifest.tool_id),
+            (refresh, alternate_manifest.tool_id, third_manifest.tool_id),
+        ):
+            child = batch.site_results[0]
+            target = next(
+                item
+                for item in child.target_results
+                if item.manifest.requested_url == file_url
+            )
+            assert target.status is ResultStatus.PARTIAL
+            assert [attempt.tool_id for attempt in target.attempts] == [
+                failed_tool,
+                succeeded_tool,
+            ]
+            assert [attempt.outcome for attempt in target.attempts] == [
+                "failed",
+                "succeeded",
+            ]
+            assert target.attempts[0].error is not None
+            assert target.attempts[0].error.code == "gateway.timeout"
+            assert target.attempts[1].error is None
+            assert [error.code for error in target.errors] == ["gateway.timeout"]
+            assert target.usage.requests == sum(
+                attempt.requests for attempt in target.attempts
+            )
+            assert target.usage.tool_attempts == len(target.attempts)
+            source = next(
+                artifact for artifact in target.artifacts if artifact.role == "source"
+            )
+            state = (
+                child.site_state
+                if batch.phase == SiteBatchPhase.FIRST.value
+                else child.current_state
+            )
+            page = next(item for item in state.pages if item.canonical_url == file_url)
+            assert (
+                page.canonical_url,
+                page.observation_id,
+                page.artifact_id,
+                page.content_digest,
+            ) == (
+                source.source_url,
+                source.observation_id,
+                source.artifact_id,
+                f"sha256:{source.sha256}",
+            )
+            context = next(
+                item
+                for item in batch.next_refresh_contexts
+                if item.site_skill.site_key == "one.test"
+            )
+            assert any(
+                item.canonical_url == file_url
+                and item.observation_id == source.observation_id
+                and item.artifact_id == source.artifact_id
+                and item.content_digest == f"sha256:{source.sha256}"
+                for item in context.previous_state.pages
+            )
+            assert "gateway.timeout" in {error.code for error in batch.errors}
+            assert batch.usage.requests == sum(
+                item.usage.requests for item in batch.site_results
+            )
+            sibling_target = next(
+                item
+                for item in batch.site_results[1].target_results
+                if item.manifest.requested_url == other_url
+            )
+            assert sibling_target.status is ResultStatus.PARTIAL
+            assert [attempt.tool_id for attempt in sibling_target.attempts] == [
+                failed_tool,
+                succeeded_tool,
+            ]
+            assert [attempt.outcome for attempt in sibling_target.attempts] == [
+                "failed",
+                "succeeded",
+            ]
+            assert site_batch_result_from_mapping(batch.to_dict()) == batch
+    finally:
+        store.close()
+
+
+def test_required_file_goal_reports_not_found_after_candidate_exhaustion(
+    tmp_path: Path,
+) -> None:
+    parent = _parent(count=2, limits=Budgets(6, 52_428_800, 60, 4))
+    candidates = {
+        SEEDS[0]: (
+            "https://one.test/a.html",
+            "https://one.test/b.html",
+        ),
+        SEEDS[1]: ("https://two.test/a.html",),
+    }
+    acquisition = _Acquisition(
+        {
+            SEEDS[0]: b"<main>one seed</main>",
+            candidates[SEEDS[0]][0]: b"<main>page a</main>",
+            candidates[SEEDS[0]][1]: b"<main>page b</main>",
+            SEEDS[1]: b"<main>two seed</main>",
+            candidates[SEEDS[1]][0]: b"<main>page a</main>",
+        }
+    )
+    sites = (
+        SiteBatchSite(
+            site_batch_child_scope(parent.scope, SEEDS[0]),
+            FileDiscoveryGoal.REQUIRED,
+        ),
+        SiteBatchSite(
+            site_batch_child_scope(parent.scope, SEEDS[1]),
+            FileDiscoveryGoal.NOT_REQUIRED,
+        ),
+    )
+    store = ArtifactStore(tmp_path / "required-file-missing")
+    try:
+        result = run_site_batch(
+            SiteBatchRequest(SiteBatchPhase.FIRST, parent, (), sites=sites),
+            _registry(
+                acquisition,
+                discovery_manifest=RECOVERY_MANIFEST,
+                discovery=_StaticDiscovery(candidates, "complete"),
+            ),
+            store,
+            run_id="required-file-missing",
+            clock=lambda: NOW,
+        )
+
+        assert result.status is ResultStatus.PARTIAL
+        assert result.file_discovery_statuses == (
+            FileDiscoveryStatus.NOT_FOUND,
+            FileDiscoveryStatus.NOT_REQUESTED,
+        )
+        assert [
+            target.manifest.requested_url
+            for target in result.site_results[0].target_results
+        ] == [SEEDS[0], *candidates[SEEDS[0]]]
+        assert [
+            context.site_skill.site_key for context in result.next_refresh_contexts
+        ] == ["two.test"]
+    finally:
+        store.close()
+
+
+def test_required_file_goal_budget_is_independent_for_later_site(
+    tmp_path: Path,
+) -> None:
+    limits = Budgets(3, 52_428_800, 60, 4)
+    parent = _parent(count=2, limits=limits)
+    file_url = "https://one.test/z-report.pdf"
+    candidates = {
+        SEEDS[0]: (
+            "https://one.test/a.html",
+            "https://one.test/b.html",
+            file_url,
+        ),
+        SEEDS[1]: ("https://two.test/a.html",),
+    }
+    acquisition = _Acquisition(
+        {
+            SEEDS[0]: b"<main>one seed</main>",
+            candidates[SEEDS[0]][0]: b"<main>page a</main>",
+            candidates[SEEDS[0]][1]: b"<main>page b</main>",
+            file_url: b"%PDF-1.7 unreachable",
+            SEEDS[1]: b"<main>two seed</main>",
+            candidates[SEEDS[1]][0]: b"<main>page a</main>",
+        },
+        mime_types={file_url: "application/pdf"},
+    )
+    sites = (
+        SiteBatchSite(
+            site_batch_child_scope(parent.scope, SEEDS[0]),
+            FileDiscoveryGoal.REQUIRED,
+        ),
+        SiteBatchSite(
+            site_batch_child_scope(parent.scope, SEEDS[1]),
+            FileDiscoveryGoal.NOT_REQUIRED,
+        ),
+    )
+    store = ArtifactStore(tmp_path / "required-file-budget")
+    try:
+        result = run_site_batch(
+            SiteBatchRequest(SiteBatchPhase.FIRST, parent, (), sites=sites),
+            _registry(
+                acquisition,
+                discovery_manifest=RECOVERY_MANIFEST,
+                discovery=_StaticDiscovery(candidates, "complete"),
+            ),
+            store,
+            run_id="required-file-budget",
+            clock=lambda: NOW,
+        )
+
+        assert result.file_discovery_statuses == (
+            FileDiscoveryStatus.NOT_FOUND,
+            FileDiscoveryStatus.NOT_REQUESTED,
+        )
+        assert result.site_results[0].stop_reason == "budget_exhausted"
+        assert file_url not in acquisition.targets
+        second_seed_index = acquisition.targets.index(SEEDS[1])
+        assert acquisition.budgets[second_seed_index] == limits
+        assert result.site_results[1].status is ResultStatus.COMPLETED
+        assert [
+            context.site_skill.site_key for context in result.next_refresh_contexts
+        ] == ["two.test"]
+    finally:
+        store.close()
+
+
+def test_required_file_goal_policy_rejection_is_not_found_without_context(
+    tmp_path: Path,
+) -> None:
+    parent = _parent(count=2, limits=Budgets(8, 52_428_800, 60, 4))
+    blocked = "https://one.test/a-blocked"
+    file_url = "https://one.test/z-report.pdf"
+    candidates = {
+        SEEDS[0]: (blocked, file_url),
+        SEEDS[1]: ("https://two.test/a.html",),
+    }
+    rejection = AcquisitionFailure(
+        WEB_HTTP_MANIFEST.tool_id,
+        WEB_HTTP_MANIFEST.version,
+        "gateway.robots",
+        requests=1,
+    )
+    acquisition = _Acquisition(
+        {
+            SEEDS[0]: b"<main>one seed</main>",
+            blocked: rejection,
+            file_url: b"%PDF-1.7 unreachable",
+            SEEDS[1]: b"<main>two seed</main>",
+            candidates[SEEDS[1]][0]: b"<main>page a</main>",
+        },
+        mime_types={file_url: "application/pdf"},
+    )
+    sites = (
+        SiteBatchSite(
+            site_batch_child_scope(parent.scope, SEEDS[0]),
+            FileDiscoveryGoal.REQUIRED,
+        ),
+        SiteBatchSite(
+            site_batch_child_scope(parent.scope, SEEDS[1]),
+            FileDiscoveryGoal.NOT_REQUIRED,
+        ),
+    )
+    store = ArtifactStore(tmp_path / "required-file-rejected")
+    try:
+        result = run_site_batch(
+            SiteBatchRequest(SiteBatchPhase.FIRST, parent, (), sites=sites),
+            _registry(
+                acquisition,
+                discovery_manifest=RECOVERY_MANIFEST,
+                discovery=_StaticDiscovery(candidates, "complete"),
+            ),
+            store,
+            run_id="required-file-rejected",
+            clock=lambda: NOW,
+        )
+
+        first = result.site_results[0]
+        assert first.status is ResultStatus.REJECTED
+        assert first.stop_reason == "rejected"
+        assert result.file_discovery_statuses[0] is FileDiscoveryStatus.NOT_FOUND
+        assert file_url not in acquisition.targets
+        assert first.attempts[-1].error is not None
+        assert first.attempts[-1].error.code == "gateway.robots"
+        assert "gateway.robots" in {error.code for error in result.errors}
+        assert [
+            context.site_skill.site_key for context in result.next_refresh_contexts
+        ] == ["two.test"]
+    finally:
+        store.close()
+
+
+def test_forged_satisfied_status_rejects_earlier_policy_evidence(
+    tmp_path: Path,
+) -> None:
+    parent = _parent(count=2, limits=Budgets(12, 52_428_800, 60, 4))
+    blocked = "https://one.test/a-blocked"
+    file_url = "https://one.test/z-report.pdf"
+    candidates = {
+        SEEDS[0]: (blocked, file_url),
+        SEEDS[1]: ("https://two.test/a.html",),
+    }
+    acquisition = _Acquisition(
+        {
+            SEEDS[0]: b"<main>one seed</main>",
+            blocked: AcquisitionFailure(
+                WEB_HTTP_MANIFEST.tool_id,
+                WEB_HTTP_MANIFEST.version,
+                "gateway.robots",
+                requests=1,
+            ),
+            file_url: b"%PDF-1.7 governed file evidence",
+            SEEDS[1]: b"<main>two seed</main>",
+            candidates[SEEDS[1]][0]: b"<main>page a</main>",
+        },
+        mime_types={file_url: "application/pdf"},
+    )
+    sites = tuple(
+        SiteBatchSite(
+            site_batch_child_scope(parent.scope, seed),
+            FileDiscoveryGoal.NOT_REQUIRED,
+        )
+        for seed in parent.scope.seeds
+    )
+    store = ArtifactStore(tmp_path / "forged-policy-satisfied")
+    try:
+        result = run_site_batch(
+            SiteBatchRequest(SiteBatchPhase.FIRST, parent, (), sites=sites),
+            _registry(
+                acquisition,
+                discovery_manifest=RECOVERY_MANIFEST,
+                discovery=_StaticDiscovery(candidates, "complete"),
+            ),
+            store,
+            run_id="forged-policy-satisfied",
+            clock=lambda: NOW,
+        )
+
+        first = result.site_results[0]
+        assert first.status is ResultStatus.COMPLETED
+        assert "gateway.robots" in {error.code for error in first.errors}
+        blocked_attempt = next(
+            attempt for attempt in first.attempts if attempt.requested_url == blocked
+        )
+        assert blocked_attempt.error is not None
+        assert blocked_attempt.error.code == "gateway.robots"
+        assert first.target_results[-1].manifest.requested_url == file_url
+        assert first.target_results[-1].status is ResultStatus.COMPLETED
+        assert any(page.canonical_url == file_url for page in first.site_state.pages)
+        assert result.next_refresh_contexts[0].previous_state == first.site_state
+        forged = result.to_dict()
+        forged["file_discovery_statuses"][0] = "satisfied"
+
+        with pytest.raises(
+            ResultValidationError,
+            match="^site_batch.file_discovery_status_mismatch$",
+        ):
+            site_batch_result_from_mapping(forged)
+    finally:
+        store.close()
+
+
+def test_all_required_policy_rejections_return_one_strict_audited_result(
+    tmp_path: Path,
+) -> None:
+    parent = _parent(count=2, limits=Budgets(8, 52_428_800, 60, 4))
+    candidates = {
+        seed: (f"{seed}a-blocked", f"{seed}z-report.pdf") for seed in parent.scope.seeds
+    }
+    bodies: dict[str, bytes | AcquisitionFailure | type[CancelledError]] = {}
+    for seed in parent.scope.seeds:
+        bodies[seed] = b"<main>seed</main>"
+        bodies[candidates[seed][0]] = AcquisitionFailure(
+            WEB_HTTP_MANIFEST.tool_id,
+            WEB_HTTP_MANIFEST.version,
+            "gateway.robots",
+            requests=1,
+        )
+        bodies[candidates[seed][1]] = b"%PDF-1.7 unreachable"
+    acquisition = _Acquisition(
+        bodies,
+        mime_types={
+            candidates[seed][1]: "application/pdf" for seed in parent.scope.seeds
+        },
+    )
+    sites = tuple(
+        SiteBatchSite(
+            site_batch_child_scope(parent.scope, seed),
+            FileDiscoveryGoal.REQUIRED,
+        )
+        for seed in parent.scope.seeds
+    )
+    store = ArtifactStore(tmp_path / "all-required-rejected")
+    try:
+        result = run_site_batch(
+            SiteBatchRequest(SiteBatchPhase.FIRST, parent, (), sites=sites),
+            _registry(
+                acquisition,
+                discovery_manifest=RECOVERY_MANIFEST,
+                discovery=_StaticDiscovery(candidates, "complete"),
+            ),
+            store,
+            run_id="all-required-rejected",
+            clock=lambda: NOW,
+        )
+
+        assert result.status is ResultStatus.REJECTED
+        assert result.stop_reason == "rejected"
+        assert result.file_discovery_statuses == (
+            FileDiscoveryStatus.NOT_FOUND,
+            FileDiscoveryStatus.NOT_FOUND,
+        )
+        assert not result.next_refresh_contexts
+        assert [child.status for child in result.site_results] == [
+            ResultStatus.REJECTED,
+            ResultStatus.REJECTED,
+        ]
+        assert [
+            attempt.error.code
+            for child in result.site_results
+            for attempt in child.attempts
+            if attempt.error is not None
+        ] == ["gateway.robots", "gateway.robots"]
+        assert [error.code for error in result.errors] == [
+            "gateway.robots",
+            "gateway.robots",
+        ]
+        assert result.usage.requests == sum(
+            child.usage.requests for child in result.site_results
+        )
+        assert all(
+            candidate[1] not in acquisition.targets for candidate in candidates.values()
+        )
+        assert site_batch_result_from_mapping(result.to_dict()) == result
     finally:
         store.close()
 

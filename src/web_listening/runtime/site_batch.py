@@ -12,19 +12,21 @@ from web_listening.artifact.site_state import SiteState
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import Request, RequestValidationError
 from web_listening.request.site_batch import (
+    FileDiscoveryGoal,
     SiteBatchPhase,
     SiteBatchRequest,
     SiteRefreshContext,
-    site_batch_child_scope,
     validate_site_batch_request,
 )
 from web_listening.request.site_refresh import SiteRefreshRequest
 from web_listening.result.errors import ResultValidationError
 from web_listening.result.manifest import Usage
-from web_listening.result.model import ResultStatus
 from web_listening.result.site_batch import (
+    FileDiscoveryStatus,
     SiteBatchMode,
     SiteBatchResult,
+    derive_site_batch_completion,
+    file_discovery_satisfied,
     site_batch_child_run_id,
     validate_site_batch_run_id,
 )
@@ -56,9 +58,12 @@ def run_site_batch(  # pylint: disable=too-many-arguments
     results: list[SiteResult] = []
     modes: list[SiteBatchMode] = []
     contexts: list[SiteRefreshContext] = []
-    for index, seed in enumerate(parent.scope.seeds, start=1):
+    file_statuses: list[FileDiscoveryStatus] = []
+    for index, _seed in enumerate(parent.scope.seeds, start=1):
         child_run_id = site_batch_child_run_id(run_id, index)
-        child_scope = site_batch_child_scope(parent.scope, seed)
+        site = request.sites[index - 1]
+        child_scope = site.scope
+        require_file = site.file_discovery_goal is FileDiscoveryGoal.REQUIRED
         input_context = (
             None
             if request.phase is SiteBatchPhase.FIRST
@@ -77,6 +82,7 @@ def run_site_batch(  # pylint: disable=too-many-arguments
                 artifact_store,
                 run_id=child_run_id,
                 clock=clock,
+                require_file=require_file,
             )
         else:
             assert input_context is not None
@@ -92,11 +98,20 @@ def run_site_batch(  # pylint: disable=too-many-arguments
                 artifact_store,
                 run_id=child_run_id,
                 clock=clock,
+                require_file=require_file,
             )
         results.append(result)
+        file_status = _file_status(result, site.file_discovery_goal)
+        file_statuses.append(file_status)
         mode = _mode(request.phase, result, child_run_id)
         modes.append(mode)
-        context = _next_context(request.phase, result, mode, input_context)
+        context = _next_context(
+            request.phase,
+            result,
+            mode,
+            input_context,
+            file_status,
+        )
         if context is not None:
             contexts.append(context)
         if _cancelled(result):
@@ -107,6 +122,7 @@ def run_site_batch(  # pylint: disable=too-many-arguments
         tuple(results),
         tuple(modes),
         tuple(contexts),
+        tuple(file_statuses),
     )
 
 
@@ -200,9 +216,14 @@ def _next_context(
     result: SiteResult,
     mode: SiteBatchMode,
     input_context: SiteRefreshContext | None,
+    file_status: FileDiscoveryStatus,
 ) -> SiteRefreshContext | None:
     state = _state(result)
-    if not state.pages or result.stop_reason in {"rejected", "cancelled"}:
+    if (
+        not state.pages
+        or result.stop_reason in {"rejected", "cancelled"}
+        or file_status is FileDiscoveryStatus.NOT_FOUND
+    ):
         return None
     if phase is SiteBatchPhase.FIRST:
         assert isinstance(result, SiteExploreResult)
@@ -236,29 +257,19 @@ def _cancelled(result: SiteResult) -> bool:
     )
 
 
-def _batch_result(
+def _batch_result(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     request: SiteBatchRequest,
     run_id: str,
     results: tuple[SiteResult, ...],
     modes: tuple[SiteBatchMode, ...],
     contexts: tuple[SiteRefreshContext, ...],
+    file_statuses: tuple[FileDiscoveryStatus, ...],
 ) -> SiteBatchResult:
-    statuses = {result.status for result in results}
-    if any(_cancelled(result) for result in results):
-        status = ResultStatus.PARTIAL
-        stop_reason = "cancelled"
-    elif statuses == {ResultStatus.COMPLETED}:
-        status = ResultStatus.COMPLETED
-        stop_reason = "source_exhausted"
-    elif statuses == {ResultStatus.REJECTED}:
-        status = ResultStatus.REJECTED
-        stop_reason = "rejected"
-    elif statuses == {ResultStatus.FAILED}:
-        status = ResultStatus.FAILED
-        stop_reason = "failed"
-    else:
-        status = ResultStatus.PARTIAL
-        stop_reason = "partial"
+    status, stop_reason = derive_site_batch_completion(
+        request.site_keys,
+        results,
+        file_statuses,
+    )
     return SiteBatchResult(
         request.phase.value,
         run_id,
@@ -276,6 +287,20 @@ def _batch_result(
         stop_reason,
         _usage(results),
         tuple(error for result in results for error in result.errors),
+        file_discovery_statuses=file_statuses,
+    )
+
+
+def _file_status(
+    result: SiteResult,
+    goal: FileDiscoveryGoal,
+) -> FileDiscoveryStatus:
+    if goal is FileDiscoveryGoal.NOT_REQUIRED:
+        return FileDiscoveryStatus.NOT_REQUESTED
+    return (
+        FileDiscoveryStatus.SATISFIED
+        if file_discovery_satisfied(result)
+        else FileDiscoveryStatus.NOT_FOUND
     )
 
 

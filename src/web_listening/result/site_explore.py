@@ -454,18 +454,27 @@ class SiteExploreResult:  # pylint: disable=too-many-instance-attributes
             self.errors,
         )
         if self.status is ResultStatus.COMPLETED:
-            successful_discovery_keys = {
-                (item.tool_id, item.tool_version, item.source_url)
-                for item in self.discovery
-                if item.outcome == "succeeded"
-            }
+            adopted_discovery = (
+                ()
+                if candidate is None
+                else tuple(
+                    item
+                    for item in self.discovery
+                    if (item.tool_id, item.tool_version, item.source_url)
+                    == candidate.discovery_key
+                )
+            )
             if (
                 not self.exploration_complete
                 or candidate is None
                 or not candidate_success
-                or candidate.discovery_key not in successful_discovery_keys
+                or len(adopted_discovery) != 1
+                or adopted_discovery[0].outcome != "succeeded"
                 or self.stop_reason != "source_exhausted"
-                or any(item.outcome != "succeeded" for item in self.discovery)
+                or (
+                    any(item.outcome != "succeeded" for item in self.discovery)
+                    and adopted_discovery[0].coverage != "complete"
+                )
             ):
                 raise ResultValidationError("site_explore.completed_invalid")
         else:

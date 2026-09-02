@@ -39,8 +39,11 @@ from web_listening.site_skill.model import (
     ToolReference,
 )
 from web_listening.site_skill.update import create_candidate
+from web_listening.site_skill.validate import site_skill_from_mapping
 from web_listening.tool_registry.discovery.builtins.html_links import (
+    HTML_FILE_LINKS_MANIFEST,
     HTML_LINKS_MANIFEST,
+    HtmlFileLinksDiscoveryTool,
     HtmlLinksDiscoveryTool,
 )
 from web_listening.tool_registry.discovery.builtins.rss import RSS_MANIFEST
@@ -61,6 +64,7 @@ from web_listening.tool_registry.protocols.acquisition import (
 )
 from web_listening.tool_registry.protocols.discovery import (
     DiscoveryCoverage,
+    DiscoveryFailure,
     DiscoveryOutput,
 )
 from web_listening.tool_registry.protocols.transform import TransformInput
@@ -164,6 +168,19 @@ class _StaticDiscoverySpy:
             self.candidates,
             (tool_input.source_url,) * len(self.candidates),
             self.coverage,
+        )
+
+
+@dataclass
+class _FailingDiscovery:
+    manifest: ToolManifest
+    code: str = "registry.tool_exception"
+
+    def discover(self, _tool_input) -> DiscoveryFailure:
+        return DiscoveryFailure(
+            self.manifest.tool_id,
+            self.manifest.version,
+            self.code,
         )
 
 
@@ -1795,6 +1812,713 @@ def test_missing_recipe_uses_phase_18b_recovery_and_returns_inactive_candidate(
         "refresh-recovery-seed",
         "refresh-recovery-candidate-1",
     ]
+    store.close()
+
+
+def test_required_file_goal_is_preserved_through_refresh_recovery(
+    tmp_path: Path,
+) -> None:
+    candidates = tuple(
+        f"https://example.test/{name}" for name in ("a.html", "b.html", "z-report.pdf")
+    )
+    root = b"<main>recovery seed</main>"
+    current = {
+        ROOT: root,
+        candidates[0]: b"page a",
+        candidates[1]: b"page b",
+        candidates[2]: b"%PDF-1.7 governed evidence",
+    }
+    old_manifest = replace(HTML_LINKS_MANIFEST, tool_id="discovery.old")
+    limits = Budgets(12, 52_428_800, 60, 4)
+    scope = replace(
+        _scope(),
+        content_types=(ContentType.HTML, ContentType.FILE),
+    )
+    skill = _skill(
+        limits,
+        discovery_manifest=old_manifest,
+        scope=scope,
+    )
+    acquisition = _Acquisition(
+        current,
+        mime_types_by_url={candidates[2]: "application/pdf"},
+    )
+    recovery_discovery = _StaticDiscoverySpy(candidates, HTML_LINKS_MANIFEST)
+    registry, store = _runtime(tmp_path, acquisition, recovery_discovery)
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="required-refresh",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert result.refresh_complete is True
+    assert result.site_skill_update is not None
+    assert result.site_skill_update.reason == "discovery_recipe_changed"
+    assert acquisition.targets == [ROOT, ROOT, *candidates]
+    assert [item.manifest.run_id for item in result.target_results] == [
+        "required-refresh-source",
+        "required-refresh-recovery-seed",
+        "required-refresh-recovery-candidate-1",
+        "required-refresh-recovery-candidate-2",
+        "required-refresh-recovery-candidate-3",
+    ]
+    file_result = result.target_results[-1]
+    assert file_result.manifest.requested_url == candidates[2]
+    assert file_result.manifest.mime_type == "application/pdf"
+    assert result.current_state.pages[-1].canonical_url == candidates[2]
+    assert result.current_state.site_skill_digest == (
+        result.site_skill_update.candidate.digest
+    )
+    assert all(item.scope == scope for item in recovery_discovery.inputs)
+    store.close()
+
+
+def test_required_file_goal_recovery_stops_at_shared_budget(tmp_path: Path) -> None:
+    candidates = tuple(
+        f"https://example.test/{name}" for name in ("a.html", "b.html", "z-report.pdf")
+    )
+    root = b"<main>recovery seed</main>"
+    old_manifest = replace(HTML_LINKS_MANIFEST, tool_id="discovery.old")
+    limits = Budgets(4, 52_428_800, 60, 4)
+    scope = replace(
+        _scope(),
+        content_types=(ContentType.HTML, ContentType.FILE),
+    )
+    skill = _skill(limits, discovery_manifest=old_manifest, scope=scope)
+    acquisition = _Acquisition(
+        {
+            ROOT: root,
+            candidates[0]: b"page a",
+            candidates[1]: b"page b",
+            candidates[2]: b"%PDF-1.7 unreachable",
+        },
+        mime_types_by_url={candidates[2]: "application/pdf"},
+    )
+    recovery_discovery = _StaticDiscoverySpy(candidates, HTML_LINKS_MANIFEST)
+    registry, store = _runtime(tmp_path, acquisition, recovery_discovery)
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="required-refresh-budget",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.stop_reason == "budget_exhausted"
+    assert result.refresh_complete is False
+    assert acquisition.targets == [ROOT, ROOT, *candidates[:2]]
+    assert result.usage.requests == limits.max_requests
+    assert result.site_skill_update is None
+    assert "budget.exhausted" in {error.code for error in result.errors}
+    assert all(
+        target.manifest.requested_url != candidates[2]
+        for target in result.target_results
+    )
+    store.close()
+
+
+def test_required_file_goal_recovery_stops_on_policy_rejection(
+    tmp_path: Path,
+) -> None:
+    blocked = "https://example.test/a-blocked"
+    file_url = "https://example.test/z-report.pdf"
+    root = b"<main>recovery seed</main>"
+    old_manifest = replace(HTML_LINKS_MANIFEST, tool_id="discovery.old")
+    limits = Budgets(12, 52_428_800, 60, 4)
+    scope = replace(
+        _scope(),
+        content_types=(ContentType.HTML, ContentType.FILE),
+    )
+    skill = _skill(limits, discovery_manifest=old_manifest, scope=scope)
+    acquisition = _Acquisition(
+        {
+            ROOT: root,
+            blocked: AcquisitionFailure(
+                ACQUISITION_MANIFEST.tool_id,
+                ACQUISITION_MANIFEST.version,
+                "gateway.robots",
+                requests=1,
+            ),
+            file_url: b"%PDF-1.7 unreachable",
+        },
+        mime_types_by_url={file_url: "application/pdf"},
+    )
+    recovery_discovery = _StaticDiscoverySpy(
+        (blocked, file_url),
+        HTML_LINKS_MANIFEST,
+    )
+    registry, store = _runtime(tmp_path, acquisition, recovery_discovery)
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="required-refresh-rejected",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.stop_reason == "rejected"
+    assert result.refresh_complete is False
+    assert acquisition.targets == [ROOT, ROOT, blocked]
+    assert result.site_skill_update is None
+    assert "gateway.robots" in {error.code for error in result.errors}
+    assert result.attempts[-1].error is not None
+    assert result.attempts[-1].error.code == "gateway.robots"
+    assert all(
+        target.manifest.requested_url != file_url for target in result.target_results
+    )
+    store.close()
+
+
+def test_required_file_goal_recovery_preserves_pre_acquisition_scope_rejection(
+    tmp_path: Path,
+) -> None:
+    blocked_url = "https://aaa.test/a-blocked"
+    file_url = "https://example.test/z-report.pdf"
+    root = b"<main>recovery seed</main>"
+    old_manifest = replace(HTML_LINKS_MANIFEST, tool_id="discovery.old")
+    limits = Budgets(8, 52_428_800, 60, 4)
+    scope = replace(
+        _scope(),
+        content_types=(ContentType.HTML, ContentType.FILE),
+    )
+    skill = _skill(
+        limits,
+        discovery_manifest=old_manifest,
+        scope=scope,
+        success_mime_types=("application/pdf", "text/html"),
+    )
+    acquisition = _Acquisition(
+        {
+            ROOT: root,
+            file_url: b"%PDF-1.7 must remain unreachable",
+        },
+        mime_types_by_url={file_url: "application/pdf"},
+    )
+    recovery_discovery = _StaticDiscoverySpy(
+        (blocked_url, file_url),
+        HTML_LINKS_MANIFEST,
+    )
+    registry, store = _runtime(tmp_path, acquisition, recovery_discovery)
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="required-refresh-scope-recovery",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.refresh_complete is False
+    assert result.stop_reason == "rejected"
+    assert acquisition.targets == [ROOT, ROOT]
+    assert [item.manifest.requested_url for item in result.target_results] == [
+        ROOT,
+        ROOT,
+        blocked_url,
+    ]
+    rejected = result.target_results[-1]
+    assert rejected.status is ResultStatus.REJECTED
+    assert rejected.attempts == ()
+    assert [error.code for error in rejected.errors] == ["scope.origin_not_allowed"]
+    assert [error.code for error in result.errors] == [
+        "runtime.discovery_recipe_unavailable",
+        "scope.origin_not_allowed",
+    ]
+    assert all(
+        target.manifest.requested_url != file_url for target in result.target_results
+    )
+    assert [page.canonical_url for page in result.current_state.pages] == [ROOT]
+    assert result.current_state.site_skill_digest is None
+    assert result.site_skill_update is None
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("limits", "later_outcome"),
+    (
+        (
+            Budgets(4, 52_428_800, 60, 4),
+            AcquisitionFailure(
+                ACQUISITION_MANIFEST.tool_id,
+                ACQUISITION_MANIFEST.version,
+                "gateway.robots",
+                requests=1,
+            ),
+        ),
+        (Budgets(2, 52_428_800, 60, 4), b"must not be acquired"),
+    ),
+)
+def test_required_file_goal_direct_recipe_stops_after_file_candidate(
+    tmp_path: Path,
+    limits: Budgets,
+    later_outcome: bytes | AcquisitionFailure,
+) -> None:
+    file_url = "https://example.test/a-report.pdf"
+    later_url = "https://example.test/z-later"
+    root = b"<main>saved discovery recipe</main>"
+    scope = replace(
+        _scope(),
+        content_types=(ContentType.HTML, ContentType.FILE),
+    )
+    skill = _skill(
+        limits,
+        scope=scope,
+        success_mime_types=("application/pdf", "text/html"),
+    )
+    acquisition = _Acquisition(
+        {
+            ROOT: root,
+            file_url: b"%PDF-1.7 reauthorized evidence",
+            later_url: later_outcome,
+        },
+        mime_types_by_url={file_url: "application/pdf"},
+    )
+    discovery = _StaticDiscoverySpy(
+        (later_url, file_url),
+        HTML_LINKS_MANIFEST,
+    )
+    registry, store = _runtime(tmp_path, acquisition, discovery)
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="required-refresh-direct",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert result.refresh_complete is True
+    assert result.stop_reason == "source_exhausted"
+    assert acquisition.targets == [ROOT, file_url]
+    assert [item.manifest.requested_url for item in result.target_results] == [
+        ROOT,
+        file_url,
+    ]
+    source = next(
+        artifact
+        for artifact in result.target_results[-1].artifacts
+        if artifact.role == "source"
+    )
+    page = next(
+        item for item in result.current_state.pages if item.canonical_url == file_url
+    )
+    assert (
+        page.canonical_url,
+        page.observation_id,
+        page.artifact_id,
+        page.content_digest,
+    ) == (
+        source.source_url,
+        source.observation_id,
+        source.artifact_id,
+        f"sha256:{source.sha256}",
+    )
+    assert "gateway.robots" not in {error.code for error in result.errors}
+    assert "budget.exhausted" not in {error.code for error in result.errors}
+    if limits.max_requests == 2:
+        assert result.usage.requests == limits.max_requests
+    store.close()
+
+
+def test_required_file_goal_direct_recipe_replays_goal_aware_discovery(
+    tmp_path: Path,
+) -> None:
+    ordinary = tuple(f"{ROOT}p{index:03}" for index in range(249))
+    file_url = f"{ROOT}z-report.pdf"
+    root = (
+        "".join(f"<a href=p{index:03}>" for index in range(249))
+        + "<a href=z-report.pdf>"
+    ).encode()
+    limits = Budgets(3, 52_428_800, 60, 4)
+    scope = replace(
+        _scope(),
+        content_types=(ContentType.HTML, ContentType.FILE),
+    )
+    skill = _skill(
+        limits,
+        discovery_manifest=HTML_FILE_LINKS_MANIFEST,
+        scope=scope,
+        success_mime_types=("application/pdf", "text/html"),
+    )
+    acquisition = _Acquisition(
+        {ROOT: root, file_url: b"%PDF-1.7 reauthorized evidence"},
+        mime_types_by_url={file_url: "application/pdf"},
+    )
+    registry = Registry()
+    registry.register(HTML_FILE_LINKS_MANIFEST, HtmlFileLinksDiscoveryTool())
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "goal-aware-direct-refresh")
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="goal-aware-direct-refresh",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.refresh_complete is False
+    assert result.stop_reason == "discovery_failed"
+    assert "runtime.discovery_coverage_incomplete" in {
+        error.code for error in result.errors
+    }
+    assert acquisition.targets == [ROOT, file_url]
+    assert all(url not in acquisition.targets for url in ordinary)
+    assert skill.discovery is not None
+    assert skill.discovery.tool.tool_id == HTML_FILE_LINKS_MANIFEST.tool_id
+    assert result.current_state.pages[-1].canonical_url == file_url
+    store.close()
+
+
+@pytest.mark.parametrize("recovery", (False, True))
+def test_required_file_goal_refresh_continues_from_false_hint_to_unhinted_file(  # pylint: disable=too-many-locals
+    tmp_path: Path,
+    recovery: bool,
+) -> None:
+    false_pdf = f"{ROOT}a.pdf"
+    unhinted_file = f"{ROOT}b"
+    root = b"<a href='a.pdf'>false</a><a href='b'>real</a>"
+    limits = Budgets(4 if recovery else 3, 52_428_800, 60, 4)
+    scope = replace(
+        _scope(),
+        content_types=(ContentType.HTML, ContentType.FILE),
+    )
+    discovery_manifest = (
+        replace(HTML_LINKS_MANIFEST, tool_id="discovery.old")
+        if recovery
+        else HTML_FILE_LINKS_MANIFEST
+    )
+    skill = _skill(
+        limits,
+        discovery_manifest=discovery_manifest,
+        scope=scope,
+        success_mime_types=("application/pdf", "text/html"),
+    )
+    acquisition = _Acquisition(
+        {
+            ROOT: root,
+            false_pdf: b"<main>not a file</main>",
+            unhinted_file: b"%PDF-1.7 governed evidence",
+        },
+        mime_types_by_url={
+            false_pdf: "text/html",
+            unhinted_file: "application/pdf",
+        },
+    )
+    registry = Registry()
+    registry.register(HTML_FILE_LINKS_MANIFEST, HtmlFileLinksDiscoveryTool())
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / f"goal-aware-unhinted-refresh-{recovery}")
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id=f"goal-aware-unhinted-refresh-{recovery}",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert result.refresh_complete is True
+    assert acquisition.targets == [
+        ROOT,
+        *((ROOT,) if recovery else ()),
+        false_pdf,
+        unhinted_file,
+    ]
+    target = result.target_results[-1]
+    source = next(item for item in target.artifacts if item.role == "source")
+    page = next(
+        item
+        for item in result.current_state.pages
+        if item.canonical_url == unhinted_file
+    )
+    assert target.manifest.mime_type == "application/pdf"
+    assert (
+        page.observation_id,
+        page.artifact_id,
+        page.content_digest,
+    ) == (
+        source.observation_id,
+        source.artifact_id,
+        f"sha256:{source.sha256}",
+    )
+    store.close()
+
+
+def test_required_file_goal_recovery_saves_goal_aware_recipe(
+    tmp_path: Path,
+) -> None:
+    file_url = f"{ROOT}z-report.pdf"
+    root = b"<a href=z-report.pdf>"
+    old_manifest = replace(HTML_LINKS_MANIFEST, tool_id="discovery.old")
+    limits = Budgets(4, 52_428_800, 60, 4)
+    scope = replace(
+        _scope(),
+        content_types=(ContentType.HTML, ContentType.FILE),
+    )
+    skill = _skill(limits, discovery_manifest=old_manifest, scope=scope)
+    acquisition = _Acquisition(
+        {ROOT: root, file_url: b"%PDF-1.7 recovered evidence"},
+        mime_types_by_url={file_url: "application/pdf"},
+    )
+    registry = Registry()
+    registry.register(HTML_FILE_LINKS_MANIFEST, HtmlFileLinksDiscoveryTool())
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "goal-aware-recovery")
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="goal-aware-recovery",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert result.refresh_complete is True
+    assert acquisition.targets == [ROOT, ROOT, file_url]
+    assert HTML_LINKS_MANIFEST.tool_id not in {
+        attempt.tool_id for attempt in result.attempts
+    }
+    assert result.usage.tool_attempts == 5
+    assert result.site_skill_update is not None
+    candidate = site_skill_from_mapping(result.site_skill_update.candidate.to_dict())
+    assert candidate.discovery is not None
+    assert candidate.discovery.tool.tool_id == HTML_FILE_LINKS_MANIFEST.tool_id
+    assert result.current_state.pages[-1].canonical_url == file_url
+    store.close()
+
+
+def test_required_file_goal_recovery_adopts_complete_fallback_recipe(
+    tmp_path: Path,
+) -> None:
+    file_url = f"{ROOT}report.pdf"
+    root = b"<a href=report.pdf>report</a>"
+    limits = Budgets(6, 52_428_800, 60, 6)
+    scope = replace(
+        _scope(),
+        content_types=(ContentType.HTML, ContentType.FILE),
+    )
+    skill = _skill(
+        limits,
+        discovery_manifest=replace(HTML_LINKS_MANIFEST, tool_id="discovery.old"),
+        scope=scope,
+    )
+    acquisition = _Acquisition(
+        {ROOT: root, file_url: b"%PDF-1.7 recovered evidence"},
+        mime_types_by_url={file_url: "application/pdf"},
+    )
+    registry = Registry()
+    registry.register(
+        HTML_FILE_LINKS_MANIFEST,
+        _FailingDiscovery(HTML_FILE_LINKS_MANIFEST),
+    )
+    registry.register(HTML_LINKS_MANIFEST, HtmlLinksDiscoveryTool())
+    registry.register(ACQUISITION_MANIFEST, acquisition)
+    store = ArtifactStore(tmp_path / "goal-aware-fallback-recovery")
+
+    recovered = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="goal-aware-fallback-recovery",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert recovered.status is ResultStatus.COMPLETED
+    assert recovered.refresh_complete is True
+    assert acquisition.targets == [ROOT, ROOT, file_url]
+    assert recovered.site_skill_update is not None
+    assert "registry.tool_exception" in {error.code for error in recovered.errors}
+    failed_attempt = next(
+        item
+        for item in recovered.attempts
+        if item.tool_id == HTML_FILE_LINKS_MANIFEST.tool_id
+    )
+    assert failed_attempt.outcome == "failed"
+    candidate = site_skill_from_mapping(recovered.site_skill_update.candidate.to_dict())
+    assert candidate.discovery is not None
+    assert candidate.discovery.tool.tool_id == HTML_LINKS_MANIFEST.tool_id
+
+    direct = run_site_refresh(
+        _request(candidate, recovered.current_state),
+        registry,
+        store,
+        run_id="goal-aware-fallback-direct",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert direct.status is ResultStatus.COMPLETED
+    assert direct.refresh_complete is True
+    assert acquisition.targets == [ROOT, ROOT, file_url, ROOT, file_url]
+    assert HTML_FILE_LINKS_MANIFEST.tool_id not in {
+        item.tool_id for item in direct.attempts
+    }
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("blocked_url", "scope", "error_code", "target_recorded"),
+    (
+        (
+            "https://aaa.test/a-blocked",
+            Scope(
+                (ROOT,),
+                ("https://example.test",),
+                ("/**",),
+                (ContentType.HTML, ContentType.FILE),
+            ),
+            "scope.origin_not_allowed",
+            True,
+        ),
+        (
+            "https://alias.test/a-blocked",
+            Scope(
+                (ROOT,),
+                ("https://alias.test", "https://example.test"),
+                ("/**",),
+                (ContentType.HTML, ContentType.FILE),
+            ),
+            "runtime.site_identity_mismatch",
+            False,
+        ),
+        (
+            "https://alias.test/blocked",
+            Scope(
+                (ROOT,),
+                ("https://alias.test", "https://example.test"),
+                ("/", "/allowed/**"),
+                (ContentType.HTML, ContentType.FILE),
+            ),
+            "scope.path_not_included",
+            True,
+        ),
+    ),
+)
+def test_required_file_goal_direct_recipe_audits_first_governance_rejection(
+    tmp_path: Path,
+    blocked_url: str,
+    scope: Scope,
+    error_code: str,
+    target_recorded: bool,
+) -> None:
+    file_url = "https://example.test/allowed/z-report.pdf"
+    root = b"<main>saved discovery recipe</main>"
+    limits = Budgets(6, 52_428_800, 60, 4)
+    skill = _skill(
+        limits,
+        scope=scope,
+        success_mime_types=("application/pdf", "text/html"),
+    )
+    acquisition = _Acquisition(
+        {
+            ROOT: root,
+            blocked_url: b"wrong-site page",
+            file_url: b"%PDF-1.7 must remain unreachable",
+        },
+        mime_types_by_url={file_url: "application/pdf"},
+    )
+    discovery = _StaticDiscoverySpy(
+        (blocked_url, blocked_url, file_url),
+        HTML_LINKS_MANIFEST,
+    )
+    registry, store = _runtime(tmp_path, acquisition, discovery)
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="required-refresh-governance",
+        clock=lambda: NOW,
+        require_file=True,
+    )
+
+    assert result.status is ResultStatus.PARTIAL
+    assert result.refresh_complete is False
+    assert result.stop_reason == "rejected"
+    assert [item.manifest.requested_url for item in result.target_results] == (
+        [ROOT, blocked_url] if target_recorded else [ROOT]
+    )
+    assert acquisition.targets == [ROOT]
+    assert [page.canonical_url for page in result.current_state.pages] == [ROOT]
+    assert result.site_skill_update is None
+    assert error_code in {error.code for error in result.errors}
+    if error_code.startswith("scope."):
+        assert "runtime.site_identity_mismatch" not in {
+            error.code for error in result.errors
+        }
+    assert all(
+        target.manifest.requested_url != file_url for target in result.target_results
+    )
+    if target_recorded:
+        assert result.target_results[-1].status is ResultStatus.REJECTED
+        assert result.target_results[-1].attempts == ()
+    else:
+        assert all(attempt.requested_url == ROOT for attempt in result.attempts)
+    store.close()
+
+
+def test_ordinary_direct_recipe_keeps_scope_and_site_prefilter(tmp_path: Path) -> None:
+    outside_url = "https://aaa.test/a-outside"
+    alias_url = "https://alias.test/a-alias"
+    in_scope_url = "https://example.test/z-page"
+    root = b"<main>saved discovery recipe</main>"
+    limits = Budgets(4, 65_536, 30, 4)
+    scope = Scope(
+        (ROOT,),
+        ("https://alias.test", "https://example.test"),
+        ("/**",),
+        (ContentType.HTML,),
+    )
+    skill = _skill(limits, scope=scope)
+    acquisition = _Acquisition({ROOT: root, in_scope_url: b"current page"})
+    discovery = _StaticDiscoverySpy(
+        (outside_url, alias_url, in_scope_url),
+        HTML_LINKS_MANIFEST,
+    )
+    registry, store = _runtime(tmp_path, acquisition, discovery)
+
+    result = run_site_refresh(
+        _request(skill, _previous(skill, {ROOT: root})),
+        registry,
+        store,
+        run_id="ordinary-refresh-prefilter",
+        clock=lambda: NOW,
+    )
+
+    assert result.status is ResultStatus.COMPLETED
+    assert result.refresh_complete is True
+    assert acquisition.targets == [ROOT, in_scope_url]
+    assert [item.manifest.requested_url for item in result.target_results] == [
+        ROOT,
+        in_scope_url,
+    ]
+    assert result.errors == ()
     store.close()
 
 
