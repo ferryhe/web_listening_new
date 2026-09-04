@@ -53,7 +53,13 @@ def test_quality_tool_configuration_is_minimal_and_consistent() -> None:
     dev_dependencies = PROJECT_CONFIG["project"]["optional-dependencies"]["dev"]
     dependency_names = {item.split(">=", maxsplit=1)[0] for item in dev_dependencies}
 
-    assert dependency_names == {"black", "isort", "pylint", "pytest"}
+    assert dependency_names == {
+        "black",
+        "isort",
+        "jsonschema[format]",
+        "pylint",
+        "pytest",
+    }
     assert PROJECT_CONFIG["tool"]["isort"]["profile"] == "black"
     assert PROJECT_CONFIG["tool"]["black"]["target-version"] == ["py312"]
     assert PROJECT_CONFIG["tool"]["pytest"]["ini_options"]["markers"] == [

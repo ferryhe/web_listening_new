@@ -38,6 +38,7 @@ from web_listening.request.site_refresh import (
     SiteRefreshRequest,
 )
 from web_listening.result.errors import SafeError
+from web_listening.result.handoff import AcquisitionHandoff
 from web_listening.result.manifest import SiteSkillEvidence, Usage
 from web_listening.result.model import Result
 from web_listening.result.site_explore import SiteExploreResult
@@ -272,6 +273,7 @@ class FakeRuntime:
         self.explore_error: Exception | None = None
         self.refresh_error: Exception | None = None
         self.get_error: Exception | None = None
+        self.handoff_error: Exception | None = None
         self.read_error: Exception | None = None
         self.requests: list[Request | SiteRefreshRequest] = []
         self.run_thread_ids: list[int] = []
@@ -292,6 +294,13 @@ class FakeRuntime:
         if self.get_error is not None:
             raise self.get_error
         return self.get_job_result
+
+    def get_handoff(self, job_id: str) -> AcquisitionHandoff:
+        self.job_ids.append(job_id)
+        if self.handoff_error is not None:
+            raise self.handoff_error
+        path = RESULT_FIXTURES / "acquisition-handoff-completed.v1.json"
+        return AcquisitionHandoff.from_json(path.read_bytes())
 
     def explore_site(self, request: Request) -> SiteExploreResult:
         self.explore_thread_ids.append(get_ident())
@@ -323,7 +332,7 @@ def _client(runtime: FakeRuntime) -> TestClient:
     return TestClient(rest.create_app(lambda: runtime))
 
 
-def test_app_exposes_exactly_the_five_readme_routes_and_disables_docs(
+def test_app_exposes_exactly_the_six_readme_routes_and_disables_docs(
     runtime: FakeRuntime,
 ) -> None:
     app = rest.create_app(lambda: runtime)
@@ -332,6 +341,7 @@ def test_app_exposes_exactly_the_five_readme_routes_and_disables_docs(
     assert observed == {
         ("/v1/acquisitions", ("POST",)),
         ("/v1/jobs/{run_id}", ("GET",)),
+        ("/v1/jobs/{job_id}/handoff", ("GET",)),
         ("/v1/artifacts/{artifact_id}", ("GET",)),
         ("/v1/site-explorations", ("POST",)),
         ("/v1/site-refreshes", ("POST",)),
@@ -340,6 +350,16 @@ def test_app_exposes_exactly_the_five_readme_routes_and_disables_docs(
     assert client.get("/docs").status_code == 404
     assert client.get("/redoc").status_code == 404
     assert client.get("/openapi.json").status_code == 404
+
+
+def test_get_handoff_calls_only_runtime_and_returns_contract(
+    runtime: FakeRuntime,
+) -> None:
+    response = _client(runtime).get("/v1/jobs/run-completed-001/handoff")
+
+    assert response.status_code == 200
+    assert response.json()["schema_version"] == "acquisition-handoff.v1"
+    assert runtime.job_ids == ["run-completed-001"]
 
 
 def test_acquire_maps_a_strict_request_to_runtime_and_returns_exact_result_schema(

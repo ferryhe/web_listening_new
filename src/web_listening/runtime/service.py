@@ -13,8 +13,10 @@ from web_listening.artifact.model import StoredArtifact
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import Request, RequestValidationError
 from web_listening.request.site_refresh import SiteRefreshRequest
+from web_listening.result.handoff import AcquisitionHandoff
 from web_listening.result.site_explore import SiteExploreResult
 from web_listening.result.site_refresh import SiteRefreshResult
+from web_listening.runtime.handoff import project_handoff
 from web_listening.runtime.jobs import Job, JobRepository, JobStatus
 from web_listening.runtime.site_explore import run_site_explore
 from web_listening.runtime.site_refresh import run_site_refresh
@@ -163,6 +165,11 @@ class RuntimeService:
         """Return one Job without adding Runtime-owned interpretation."""
         self._ensure_open()
         return self._jobs.get(job_id)
+
+    def get_handoff(self, job_id: str) -> AcquisitionHandoff:
+        """Return a read-only deterministic projection of one terminal Job."""
+        self._ensure_open()
+        return project_handoff(self._jobs.get(job_id), self._artifact_store)
 
     def explore_site(self, request: Request) -> SiteExploreResult:
         """Run deterministic exploration through the shared Runtime workflow."""
