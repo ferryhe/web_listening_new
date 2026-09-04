@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TypeAlias
 
+from web_listening.mime import is_html_mime_type
 from web_listening.result.errors import (
     ResultValidationError,
     SafeError,
@@ -513,7 +514,7 @@ def file_discovery_satisfied(result: SiteResult) -> bool:
         )
         if (
             source is not None
-            and source.mime_type not in {"application/xhtml+xml", "text/html"}
+            and not is_html_mime_type(source.mime_type)
             and any(
                 page.canonical_url == source.source_url
                 and page.observation_id == source.observation_id

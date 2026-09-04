@@ -26,7 +26,13 @@ from web_listening.artifact.model import (
 from web_listening.artifact.observation import ObservationProposal
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.budgets import validate_budgets
-from web_listening.request.model import Budgets, Request, RequestValidationError
+from web_listening.request.model import (
+    Budgets,
+    ContentType,
+    Request,
+    RequestValidationError,
+    classify_mime_type,
+)
 from web_listening.request.scope import canonicalize_url
 from web_listening.request.validate import compile_access_policy, validate_request
 from web_listening.result.attempts import Attempt
@@ -1157,7 +1163,7 @@ def _transform_stored_source(  # pylint: disable=too-many-arguments
     """Invoke at most one eligible generic Transform over stored HTML."""
     if tool_attempts_remaining <= 0 or runtime_ms_remaining <= 0:
         return _TransformResult()
-    if source.artifact.mime_type != "text/html":
+    if classify_mime_type(source.artifact.mime_type) is not ContentType.HTML:
         return _TransformResult()
     manifests = registry.eligible(
         EligibilityRequirements(

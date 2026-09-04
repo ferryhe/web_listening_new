@@ -31,6 +31,7 @@ from web_listening.tool_registry.manifest import (
     ToolDistribution,
     ToolLimits,
     ToolManifest,
+    ToolRegistryError,
 )
 from web_listening.tool_registry.protocols.acquisition import (
     AcquisitionFailure,
@@ -455,6 +456,45 @@ def test_parent_rejects_pdf_bytes_claimed_as_html_for_html_only_request() -> Non
     assert result == AcquisitionFailure(
         "external.fake", "1.0.0", "runner.output_mismatch"
     )
+
+
+@pytest.mark.parametrize(
+    ("content_types", "mime_type", "allowed"),
+    [
+        ((ContentType.HTML,), "text/html", True),
+        ((ContentType.HTML,), "application/xhtml+xml", True),
+        ((ContentType.FILE,), "application/xhtml+xml", False),
+        ((ContentType.FILE,), "application/pdf", True),
+    ],
+)
+def test_parent_classifies_acquisition_output_against_request_scope(
+    content_types: tuple[ContentType, ...], mime_type: str, allowed: bool
+) -> None:
+    output = AcquisitionOutput(
+        "external.fake",
+        "1.0.0",
+        "https://example.test/report",
+        "https://example.test/report",
+        200,
+        mime_type,
+        b"",
+        hashlib.sha256(b"").hexdigest(),
+        (),
+        0,
+    )
+    tool_input = AcquisitionInput(
+        _request(content_types=content_types), "https://example.test/report"
+    )
+
+    if allowed:
+        subprocess_runner._validate_acquisition_policy(  # pylint: disable=protected-access
+            tool_input, output
+        )
+    else:
+        with pytest.raises(ToolRegistryError, match="runner.output_mismatch"):
+            subprocess_runner._validate_acquisition_policy(  # pylint: disable=protected-access
+                tool_input, output
+            )
 
 
 def test_parent_rejects_non_pdf_bytes_claimed_as_pdf() -> None:

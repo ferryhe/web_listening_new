@@ -74,9 +74,15 @@ WRONG_CAPABILITY_MANIFEST = replace(
 class _Acquisition:
     manifest = ACQUISITION_MANIFEST
 
-    def __init__(self, body: bytes = HTML, runtime_ms: int = 7) -> None:
+    def __init__(
+        self,
+        body: bytes = HTML,
+        runtime_ms: int = 7,
+        mime_type: str = "text/html",
+    ) -> None:
         self.body = body
         self.runtime_ms = runtime_ms
+        self.mime_type = mime_type
         self.calls = 0
 
     def acquire(self, tool_input: AcquisitionInput) -> AcquisitionOutput:
@@ -87,7 +93,7 @@ class _Acquisition:
             tool_input.target_url,
             tool_input.target_url,
             200,
-            "text/html",
+            self.mime_type,
             self.body,
             hashlib.sha256(self.body).hexdigest(),
             (),
@@ -197,7 +203,11 @@ class _WrongCapabilityTransform:
         raise AssertionError("wrong-capability Transform was invoked")
 
 
-def _request(max_tool_attempts: int = 2, max_runtime_seconds: int = 30) -> Request:
+def _request(
+    max_tool_attempts: int = 2,
+    max_runtime_seconds: int = 30,
+    success_mime_types: tuple[str, ...] = ("text/html",),
+) -> Request:
     scope = Scope(
         seeds=(URL,),
         allowed_origins=("https://example.test",),
@@ -222,7 +232,7 @@ def _request(max_tool_attempts: int = 2, max_runtime_seconds: int = 30) -> Reque
             ToolCategory.ACQUISITION,
             ACQUISITION_MANIFEST.capabilities,
         ),
-        success_checks=SuccessChecks(("text/html",), 1),
+        success_checks=SuccessChecks(success_mime_types, 1),
         verified_at=NOW,
     ).skill
     return Request(scope, skill, False, budgets)
@@ -321,6 +331,40 @@ def test_success_stores_derived_markdown_lineage_and_tool_attempt(
         assert derived_evidence.source_url == (
             "urn:web-listening:transform:"
             f"{transform_attempt.tool_id}:{transform_attempt.tool_version}"
+        )
+    finally:
+        store.close()
+
+
+def test_xhtml_success_preserves_source_mime_artifact_observation_and_lineage(
+    tmp_path: Path,
+) -> None:
+    acquisition = _Acquisition(mime_type="application/xhtml+xml")
+    registry = Registry()
+    registry.register(acquisition.manifest, acquisition)
+    registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, SimpleHtmlMarkdownTransform())
+    store = ArtifactStore(tmp_path / "xhtml-artifacts")
+    request = _request(success_mime_types=("application/xhtml+xml",))
+    try:
+        result = run_single_target(
+            request,
+            registry,
+            store,
+            run_id="run-xhtml",
+            clock=lambda: NOW,
+        )
+        assert result.artifacts, result
+        source_evidence, derived_evidence = result.artifacts
+        source = store.get_observation(source_evidence.observation_id)
+        derived = store.get_observation(derived_evidence.observation_id)
+        assert source.artifact.mime_type == "application/xhtml+xml"
+        assert source.content == HTML
+        assert source.observation.source_url == URL
+        assert derived.artifact.mime_type == "text/markdown"
+        assert derived.lineage[0].source_artifact_id == source.artifact.artifact_id
+        assert (
+            derived.lineage[0].source_observation_id
+            == source.observation.observation_id
         )
     finally:
         store.close()

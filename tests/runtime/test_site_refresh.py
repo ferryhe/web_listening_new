@@ -535,8 +535,14 @@ def test_site_refresh_target_results_run_existing_transform_for_source_and_candi
         candidate: b"<main><p>Refresh candidate has enough visible words now.</p></main>",
     }
     limits = Budgets(2, 16384, 30, 3)
-    skill = _skill(limits)
-    acquisition = _Acquisition(current)
+    skill = _skill(limits, success_mime_types=("application/xhtml+xml",))
+    acquisition = _Acquisition(
+        current,
+        mime_types_by_url={
+            ROOT: "application/xhtml+xml",
+            candidate: "application/xhtml+xml",
+        },
+    )
     registry, store = _runtime(tmp_path, acquisition, _DiscoverySpy())
     registry.register(
         SIMPLE_HTML_MARKDOWN_MANIFEST,
@@ -562,7 +568,7 @@ def test_site_refresh_target_results_run_existing_transform_for_source_and_candi
     for target_result in result.target_results:
         source, derived = target_result.artifacts
         assert source.role == "source"
-        assert source.mime_type == "text/html"
+        assert source.mime_type == "application/xhtml+xml"
         assert source.lineage == ()
         assert derived.role == "derived"
         assert derived.mime_type == "text/markdown"
