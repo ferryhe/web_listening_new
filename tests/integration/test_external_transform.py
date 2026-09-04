@@ -57,7 +57,7 @@ PUBLIC_IP = "93.184.216.34"
 HTML = b"<html><body><h1>Example</h1><p>Hello external transform.</p></body></html>"
 FAIL_HTML = b"<html><body data-external-transform-fail>keep source</body></html>"
 LIFECYCLE_TEST_SHA256 = (
-    "072de21848375e9b7dbe6dcd82dd43de22d387016724c98dde214b6b7525a939"
+    "27066394b79cf4ea89a34a9f7114dd2e25dc82e8060ed8c9afec52e69673ce20"
 )
 OLD_COMMIT = "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5"
 

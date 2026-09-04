@@ -301,7 +301,8 @@ class SubprocessTransformTool:
     ) -> TransformOutput | TransformFailure:
         """Invoke the standard Transform envelope for exactly one attempt."""
         result = self._runner.invoke(tool_input)
-        assert isinstance(result, (TransformOutput, TransformFailure))
+        if not isinstance(result, (TransformOutput, TransformFailure)):
+            raise ToolRegistryError("runner.output_mismatch")
         return result
 
 

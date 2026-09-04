@@ -206,6 +206,22 @@ def test_transform_adapter_rejects_other_categories() -> None:
     assert caught.value.code == "runner.manifest_invalid"
 
 
+def test_transform_adapter_rejects_an_impossible_runner_result(monkeypatch) -> None:
+    tool = SubprocessTransformTool(
+        _manifest(ToolCategory.TRANSFORM),
+        (sys.executable, str(FAKE_TOOL), "content_success"),
+    )
+    unexpected = _runner(ToolCategory.DISCOVERY, "discovery_success").invoke(
+        DiscoveryInput(_scope())
+    )
+    monkeypatch.setattr(tool._runner, "invoke", lambda _tool_input: unexpected)
+
+    with pytest.raises(ToolRegistryError) as caught:
+        tool.transform(TransformInput(_stored_source()))
+
+    assert caught.value.code == "runner.output_mismatch"
+
+
 def test_external_discovery_v1_cannot_claim_a_coverage_field(monkeypatch) -> None:
     runner = _runner(ToolCategory.DISCOVERY, "discovery_success")
     payload = {

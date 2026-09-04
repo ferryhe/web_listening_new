@@ -214,7 +214,7 @@ def test_active_versions_discovers_usable_transforms_without_known_ids(
     assert tuple(item.manifest.tool_id for item in descriptions) == (
         "external.basic_html_markdown",
     )
-    assert descriptions[0].command[-1].endswith("/tool.py")
+    assert Path(descriptions[0].command[-1]).name == "tool.py"
     assert not lifecycle.active_versions(ToolCategory.DISCOVERY)
 
 
