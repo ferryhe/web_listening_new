@@ -37,8 +37,11 @@ from web_listening.tool_registry.discovery.builtins.sitemap import (
     SITEMAP_MANIFEST,
     SitemapDiscoveryTool,
 )
+from web_listening.tool_registry.lifecycle import ToolLifecycle
+from web_listening.tool_registry.manifest import ToolCategory
 from web_listening.tool_registry.registry import Registry
 from web_listening.tool_registry.runners.in_process import PinnedHttpTransport
+from web_listening.tool_registry.runners.subprocess import SubprocessTransformTool
 from web_listening.tool_registry.transform.builtins.simple_html_markdown import (
     SIMPLE_HTML_MARKDOWN_MANIFEST,
     SimpleHtmlMarkdownTransform,
@@ -84,6 +87,12 @@ class RuntimeService:
             registry.register(HTML_LINKS_MANIFEST, discovery)
             registry.register(RSS_MANIFEST, RssDiscoveryTool())
             registry.register(SITEMAP_MANIFEST, SitemapDiscoveryTool())
+            lifecycle = ToolLifecycle(root)
+            for external in lifecycle.active_versions(ToolCategory.TRANSFORM):
+                registry.register(
+                    external.manifest,
+                    SubprocessTransformTool(external.manifest, external.command),
+                )
             transform = SimpleHtmlMarkdownTransform()
             registry.register(SIMPLE_HTML_MARKDOWN_MANIFEST, transform)
             artifact_store = ArtifactStore(root / "artifacts")

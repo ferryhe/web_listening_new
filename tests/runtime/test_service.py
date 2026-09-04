@@ -44,6 +44,7 @@ from web_listening.tool_registry.acquisition.builtins.web_http import (
     WEB_HTTP_MANIFEST,
     WebHttpAcquisitionTool,
 )
+from web_listening.tool_registry.lifecycle import ToolLifecycle, ToolLifecycleError
 from web_listening.tool_registry.manifest import ToolCategory, ToolManifest
 from web_listening.tool_registry.protocols.acquisition import (
     AcquisitionFailure,
@@ -52,6 +53,11 @@ from web_listening.tool_registry.protocols.acquisition import (
     AcquisitionRedirect,
 )
 from web_listening.tool_registry.registry import Registry
+
+EXTERNAL_TRANSFORM_SOURCE = (
+    Path(__file__).parents[1] / "fixtures/tools/external_transform/1.0.0"
+)
+EXTERNAL_TRANSFORM_ID = "external.basic_html_markdown"
 
 URL = "https://example.test/report"
 ORIGIN = "https://example.test"
@@ -111,7 +117,7 @@ def _resolver(_host: str, _port: int) -> tuple[str, ...]:
     return (PUBLIC_IP,)
 
 
-def _skill(*, scope: Scope | None = None):
+def _skill(*, scope: Scope | None = None, max_tool_attempts: int = 1):
     return create_candidate(
         site_key="example",
         version=1,
@@ -123,7 +129,7 @@ def _skill(*, scope: Scope | None = None):
             include_paths=("/**",),
             content_types=(ContentType.HTML,),
         ),
-        budgets=Budgets(6, 2 * 1024 * 1024, 30, 1),
+        budgets=Budgets(6, 2 * 1024 * 1024, 30, max_tool_attempts),
         tool=ToolReference(
             WEB_HTTP_MANIFEST.tool_id,
             WEB_HTTP_MANIFEST.version,
@@ -135,7 +141,9 @@ def _skill(*, scope: Scope | None = None):
     ).skill
 
 
-def _request(skill, *, explore_all_tools: bool = False) -> Request:
+def _request(
+    skill, *, explore_all_tools: bool = False, max_tool_attempts: int = 1
+) -> Request:
     return Request(
         Scope(
             seeds=(URL,),
@@ -145,7 +153,7 @@ def _request(skill, *, explore_all_tools: bool = False) -> Request:
         ),
         skill,
         explore_all_tools,
-        Budgets(6, 2 * 1024 * 1024, 30, 1),
+        Budgets(6, 2 * 1024 * 1024, 30, max_tool_attempts),
     )
 
 
@@ -230,6 +238,104 @@ def _file_request(url: str, max_bytes: int) -> Request:
         False,
         Budgets(6, max_bytes, 30, 1),
     )
+
+
+def test_open_registers_active_external_transform_before_builtin(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "runtime-data"
+    lifecycle = ToolLifecycle(data_dir)
+    lifecycle.install(EXTERNAL_TRANSFORM_SOURCE)
+    lifecycle.qualify(ToolCategory.TRANSFORM, EXTERNAL_TRANSFORM_ID, "1.0.0")
+    lifecycle.activate(ToolCategory.TRANSFORM, EXTERNAL_TRANSFORM_ID, "1.0.0")
+
+    service = RuntimeService.open(data_dir)
+    try:
+        transforms = service._registry.query(  # pylint: disable=protected-access
+            category=ToolCategory.TRANSFORM
+        )
+    finally:
+        service.close()
+
+    assert tuple(item.tool_id for item in transforms) == (
+        EXTERNAL_TRANSFORM_ID,
+        "transform.simple_html_markdown",
+    )
+
+
+def test_open_default_workflow_executes_active_external_transform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir = tmp_path / "runtime-data"
+    lifecycle = ToolLifecycle(data_dir)
+    lifecycle.install(EXTERNAL_TRANSFORM_SOURCE)
+    lifecycle.qualify(ToolCategory.TRANSFORM, EXTERNAL_TRANSFORM_ID, "1.0.0")
+    lifecycle.activate(ToolCategory.TRANSFORM, EXTERNAL_TRANSFORM_ID, "1.0.0")
+    transport = _Transport(
+        _Response(
+            200,
+            b"<html><body><h1>External</h1></body></html>",
+            Content_Type="text/html",
+        )
+    )
+    monkeypatch.setattr(service_module, "PinnedHttpTransport", lambda: transport)
+    monkeypatch.setattr(
+        service_module,
+        "WebHttpAcquisitionTool",
+        lambda factory: WebHttpAcquisitionTool(factory, resolver=_resolver),
+    )
+
+    service = RuntimeService.open(data_dir)
+    try:
+        job = service.run(
+            _request(
+                None,
+                max_tool_attempts=2,
+            )
+        )
+    finally:
+        service.close()
+
+    assert job.result is not None
+    assert job.result.attempts[-1].tool_id == EXTERNAL_TRANSFORM_ID
+    assert job.result.attempts[-1].tool_version == "1.0.0"
+    assert tuple(item.role for item in job.result.artifacts) == ("source", "derived")
+
+
+def test_open_does_not_load_external_discovery_or_acquisition(tmp_path: Path) -> None:
+    data_dir = tmp_path / "runtime-data"
+    (data_dir / "tools/discovery/external.untrusted").mkdir(parents=True)
+    (data_dir / "tools/acquisition/external.untrusted").mkdir(parents=True)
+
+    service = RuntimeService.open(data_dir)
+    try:
+        identities = tuple(
+            item.tool_id
+            for item in service._registry.query()  # pylint: disable=protected-access
+        )
+    finally:
+        service.close()
+
+    assert "external.untrusted" not in identities
+
+
+@pytest.mark.parametrize("link", ("tools", "tools/transform"))
+def test_open_rejects_dangling_external_transform_tree(
+    tmp_path: Path, link: str
+) -> None:
+    data_dir = tmp_path / "runtime-data"
+    data_dir.mkdir()
+    path = data_dir / link
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.symlink_to(tmp_path / "missing", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    with pytest.raises(ToolLifecycleError) as caught:
+        RuntimeService.open(data_dir)
+
+    assert caught.value.code == "lifecycle.path_invalid"
 
 
 def test_large_pdf_within_request_budget_is_persisted_with_complete_evidence(
@@ -908,7 +1014,6 @@ def test_runtime_source_is_one_ordered_orchestrator_without_new_authority() -> N
         "import httpx",
         "import socket",
         "playwright",
-        "subprocess",
         "fallback",
         "._connection",
         "._commit_checkpoint",

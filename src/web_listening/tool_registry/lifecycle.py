@@ -100,6 +100,14 @@ class ToolVersionState:
 
 
 @dataclass(frozen=True, slots=True)
+class ActiveToolDescription:
+    """Immutable execution description for one usable active version."""
+
+    manifest: ToolManifest
+    command: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _InstalledTool:
     manifest: ToolManifest
     entrypoint: str
@@ -277,6 +285,42 @@ class ToolLifecycle:  # pylint: disable=too-many-public-methods
             return None
         state = self.inspect(category, tool_id, version)
         return state if state.active else None
+
+    def active_versions(
+        self, category: ToolCategory
+    ) -> tuple[ActiveToolDescription, ...]:
+        """Describe every usable active version in stable tool-identity order."""
+        if not isinstance(category, ToolCategory):
+            raise ToolLifecycleError("lifecycle.selector_invalid")
+        category_root = self._root / "tools" / category.value
+        _reject_link_components(category_root, "lifecycle.path_invalid")
+        if not category_root.exists():
+            return ()
+        _require_real_directory(category_root)
+        try:
+            entries = list(category_root.iterdir())
+        except OSError as exc:
+            raise ToolLifecycleError("lifecycle.state_invalid") from exc
+        descriptions = []
+        for entry in sorted(entries, key=lambda item: item.name):
+            if _is_link(entry) or not entry.is_dir():
+                raise ToolLifecycleError("lifecycle.path_invalid")
+            try:
+                tool_id = validate_tool_id(entry.name)
+            except ToolRegistryError as exc:
+                raise ToolLifecycleError("lifecycle.path_invalid") from exc
+            # Validate the complete installed tree even when no version is active.
+            self.list_versions(category, tool_id)
+            version = self._read_active(category, tool_id)
+            if version is None:
+                continue
+            installed = self._read_installed(category, tool_id, version)
+            state = self.inspect(category, tool_id, version)
+            if state.active:
+                descriptions.append(
+                    ActiveToolDescription(state.manifest, _installed_command(installed))
+                )
+        return tuple(descriptions)
 
     def _tool_parent(
         self, category: ToolCategory, tool_id: str, *, create: bool

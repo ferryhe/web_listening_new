@@ -52,6 +52,7 @@ from web_listening.tool_registry.runners import subprocess as subprocess_runner
 from web_listening.tool_registry.runners.subprocess import (
     SubprocessLimits,
     SubprocessRunner,
+    SubprocessTransformTool,
 )
 
 ROOT = Path(__file__).parents[2]
@@ -180,6 +181,45 @@ def test_versioned_round_trip_rebuilds_all_three_protocol_results(
     if isinstance(result, (AcquisitionOutput, TransformOutput)):
         assert result.sha256 == hashlib.sha256(result.body).hexdigest()
         assert 0 <= result.runtime_ms <= 2000
+
+
+def test_transform_adapter_is_the_thin_standard_protocol_view() -> None:
+    manifest = _manifest(ToolCategory.TRANSFORM)
+    tool = SubprocessTransformTool(
+        manifest, (sys.executable, str(FAKE_TOOL), "content_success")
+    )
+
+    result = tool.transform(TransformInput(_stored_source()))
+
+    assert tool.manifest == manifest
+    assert isinstance(result, TransformOutput)
+    assert result.tool_id == manifest.tool_id
+
+
+def test_transform_adapter_rejects_other_categories() -> None:
+    with pytest.raises(ToolRegistryError) as caught:
+        SubprocessTransformTool(
+            _manifest(ToolCategory.DISCOVERY),
+            (sys.executable, str(FAKE_TOOL), "discovery_success"),
+        )
+
+    assert caught.value.code == "runner.manifest_invalid"
+
+
+def test_transform_adapter_rejects_an_impossible_runner_result(monkeypatch) -> None:
+    tool = SubprocessTransformTool(
+        _manifest(ToolCategory.TRANSFORM),
+        (sys.executable, str(FAKE_TOOL), "content_success"),
+    )
+    unexpected = _runner(ToolCategory.DISCOVERY, "discovery_success").invoke(
+        DiscoveryInput(_scope())
+    )
+    monkeypatch.setattr(tool._runner, "invoke", lambda _tool_input: unexpected)
+
+    with pytest.raises(ToolRegistryError) as caught:
+        tool.transform(TransformInput(_stored_source()))
+
+    assert caught.value.code == "runner.output_mismatch"
 
 
 def test_external_discovery_v1_cannot_claim_a_coverage_field(monkeypatch) -> None:
