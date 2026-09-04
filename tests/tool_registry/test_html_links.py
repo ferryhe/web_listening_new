@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from web_listening.request.model import ContentType, Scope
 from web_listening.tool_registry.discovery.builtins.html_links import (
     HtmlFileLinksDiscoveryTool,
@@ -70,6 +72,16 @@ def test_html_links_coverage_uses_unique_candidates_before_slicing() -> None:
     assert isinstance(over, DiscoveryOutput)
     assert over.coverage == "truncated"
     assert len(over.candidates) == 3
+
+
+@pytest.mark.parametrize("mime_type", ["text/html", "application/xhtml+xml"])
+def test_html_links_accept_both_html_media_types(mime_type: str) -> None:
+    result = HtmlLinksDiscoveryTool().discover(
+        _input(b"<a href='/report'>report</a>", mime_type)
+    )
+
+    assert isinstance(result, DiscoveryOutput)
+    assert result.candidates == ("https://example.test/report",)
 
 
 def test_html_links_reject_non_html_without_network_or_store_surface() -> None:

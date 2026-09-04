@@ -120,6 +120,20 @@ def test_simple_html_is_deterministic_and_removes_non_visible_text(
     assert b"Hidden" not in first.body
 
 
+@pytest.mark.parametrize("mime_type", ["text/html", "application/xhtml+xml"])
+def test_simple_html_accepts_both_html_media_types(
+    tmp_path: Path, mime_type: str
+) -> None:
+    store, source = _stored_source(tmp_path, mime_type=mime_type)
+    try:
+        result = SimpleHtmlMarkdownTransform().transform(TransformInput(source))
+    finally:
+        store.close()
+
+    assert isinstance(result, TransformOutput)
+    assert result.source_artifact_id == source.artifact.artifact_id
+
+
 def test_runtime_ms_uses_controlled_monotonic_elapsed_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

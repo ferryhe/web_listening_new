@@ -1077,6 +1077,12 @@ def test_concrete_conflicting_framing_cannot_return_truncated_success() -> None:
     ("content_types", "headers", "code", "normalized_mime"),
     [
         (
+            (ContentType.FILE,),
+            {"Content_Type": "application/xhtml+xml"},
+            "scope.content_type_not_allowed",
+            "application/xhtml+xml",
+        ),
+        (
             (ContentType.HTML,),
             {"Content_Type": "application/pdf; version=1.7"},
             "scope.content_type_not_allowed",
@@ -1126,6 +1132,24 @@ def test_content_scope_and_mime_reject_before_target_body_read(
     assert failure.evidence.content_bytes == 0
     assert failure.evidence.content_sha256 is None
     assert failure.evidence.decisions[-1].code == code
+
+
+@pytest.mark.parametrize("mime_type", ["text/html", "application/xhtml+xml"])
+def test_html_scope_accepts_both_html_media_types(mime_type: str) -> None:
+    target = FakeResponse(200, b"accepted", Content_Type=mime_type)
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [FakeResponse(404)],
+            "https://example.com/public": [target],
+        }
+    )
+
+    result = gateway(transport, request_for(content_types=(ContentType.HTML,))).read(
+        "https://example.com/public"
+    )
+
+    assert result.mime_type == mime_type
+    assert result.body == b"accepted"
 
 
 @pytest.mark.parametrize(

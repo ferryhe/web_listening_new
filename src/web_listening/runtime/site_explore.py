@@ -13,7 +13,12 @@ from urllib.parse import urlsplit
 
 from web_listening.artifact.site_state import SiteState, SiteStatePage
 from web_listening.artifact.store import ArtifactStore
-from web_listening.request.model import Budgets, Request
+from web_listening.request.model import (
+    Budgets,
+    ContentType,
+    Request,
+    classify_mime_type,
+)
 from web_listening.request.scope import canonicalize_url
 from web_listening.request.validate import compile_access_policy, validate_request
 from web_listening.result.attempts import Attempt
@@ -538,10 +543,10 @@ def run_site_explore(  # pylint: disable=too-many-arguments
         if _entered_acquisition(candidate_result, candidate_url):
             acquired_candidates += 1
         candidate_source = _source_artifact(candidate_result)
-        if candidate_source is not None and candidate_source.mime_type not in {
-            "application/xhtml+xml",
-            "text/html",
-        }:
+        if (
+            candidate_source is not None
+            and classify_mime_type(candidate_source.mime_type) is ContentType.FILE
+        ):
             file_satisfied = True
         if require_file and (
             (
@@ -1069,7 +1074,7 @@ def _passes_success_checks(
         source = _source_artifact(result)
         if source is None:
             return False
-        if source.mime_type not in {"application/xhtml+xml", "text/html"}:
+        if classify_mime_type(source.mime_type) is not ContentType.HTML:
             continue
         stored = artifact_store.read_artifact(source.artifact_id)
         if len(stored.content.decode("utf-8", errors="ignore").split()) < 1:
@@ -1088,7 +1093,7 @@ def _candidate_source_key(value: tuple[str, ToolManifest]) -> tuple[object, ...]
 def _discovery_capabilities(
     mime_type: str, *, require_file: bool = False
 ) -> tuple[str, ...]:
-    if mime_type in {"application/xhtml+xml", "text/html"}:
+    if classify_mime_type(mime_type) is ContentType.HTML:
         return ("html_file_links", "html_links") if require_file else ("html_links",)
     if mime_type in {"application/atom+xml", "application/rss+xml"}:
         return ("rss",)

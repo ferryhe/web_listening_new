@@ -11,6 +11,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 from web_listening.artifact.model import ArtifactRole
+from web_listening.request.model import ContentType, classify_mime_type
 from web_listening.tool_registry.manifest import (
     HealthStatus,
     QualificationStatus,
@@ -96,7 +97,7 @@ class SimpleHtmlMarkdownTransform:  # pylint: disable=too-few-public-methods
         source = tool_input.source
         if source.artifact.role is not ArtifactRole.SOURCE:
             return self._failure("transform.source_required")
-        if source.artifact.mime_type != "text/html":
+        if classify_mime_type(source.artifact.mime_type) is not ContentType.HTML:
             return self._failure("transform.ineligible_mime")
         try:
             html = source.content.decode("utf-8")

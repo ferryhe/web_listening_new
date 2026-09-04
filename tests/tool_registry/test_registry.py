@@ -1197,7 +1197,9 @@ def test_invoke_enforces_declared_output_and_runtime_limits(
     [
         ((ContentType.HTML,), "text/plain", False),
         ((ContentType.FILE,), "text/html", False),
+        ((ContentType.FILE,), "application/xhtml+xml", False),
         ((ContentType.HTML,), "text/html", True),
+        ((ContentType.HTML,), "application/xhtml+xml", True),
         ((ContentType.FILE,), "application/pdf", True),
     ],
 )

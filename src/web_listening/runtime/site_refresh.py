@@ -15,7 +15,12 @@ from urllib.parse import urlsplit
 
 from web_listening.artifact.site_state import SiteState, SiteStatePage
 from web_listening.artifact.store import ArtifactStore
-from web_listening.request.model import Budgets, Request
+from web_listening.request.model import (
+    Budgets,
+    ContentType,
+    Request,
+    classify_mime_type,
+)
 from web_listening.request.scope import canonicalize_url
 from web_listening.request.site_refresh import (
     SiteRefreshRequest,
@@ -465,10 +470,10 @@ def run_site_refresh(  # pylint: disable=too-many-arguments
             )
             if update is not None:
                 site_skill_update = update
-            if require_file and target_source.mime_type not in {
-                "application/xhtml+xml",
-                "text/html",
-            }:
+            if (
+                require_file
+                and classify_mime_type(target_source.mime_type) is ContentType.FILE
+            ):
                 required_file_satisfied = True
                 break
             continue

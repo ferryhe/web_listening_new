@@ -2752,7 +2752,7 @@ def test_candidate_checks_preserve_observed_seed_and_candidate_mime_types(
         _request(max_requests=2, max_attempts=3),
         scope=replace(
             _request().scope,
-            content_types=(ContentType.HTML, ContentType.FILE),
+            content_types=(ContentType.HTML,),
         ),
     )
     result = run_site_explore(

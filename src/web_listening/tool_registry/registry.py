@@ -10,7 +10,7 @@ from types import MemberDescriptorType
 from typing import Any
 from urllib.parse import urlsplit
 
-from web_listening.request.model import ContentType
+from web_listening.request.model import classify_mime_type
 from web_listening.request.validate import compile_access_policy
 from web_listening.tool_registry.eligibility import (
     EligibilityDecision,
@@ -462,9 +462,7 @@ def _acquisition_authority_rejection(
         decision = policy.decide_url(url)
         if not decision.allowed:
             return decision.code, decision.code
-    content_type = (
-        ContentType.HTML if output.mime_type == "text/html" else ContentType.FILE
-    )
+    content_type = classify_mime_type(output.mime_type)
     decision = policy.decide_content_type(content_type)
     if not decision.allowed:
         return decision.code, decision.code

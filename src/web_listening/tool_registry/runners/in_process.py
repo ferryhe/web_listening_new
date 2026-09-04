@@ -20,7 +20,11 @@ from typing import Callable, Mapping, NoReturn, Protocol
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
-from web_listening.request.model import ContentType, Request, RequestValidationError
+from web_listening.request.model import (
+    Request,
+    RequestValidationError,
+    classify_mime_type,
+)
 from web_listening.request.scope import canonicalize_url
 from web_listening.request.validate import CompiledAccessPolicy, compile_access_policy
 
@@ -808,9 +812,7 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
             )
             self._raise(mime_error, state)
         assert mime_type is not None
-        content_type = (
-            ContentType.HTML if mime_type == "text/html" else ContentType.FILE
-        )
+        content_type = classify_mime_type(mime_type)
         decision = self._policy.decide_content_type(content_type)
         state.decisions.append(
             DecisionEvidence(

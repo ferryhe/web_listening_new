@@ -19,7 +19,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO
 from urllib.parse import urlsplit
 
-from web_listening.request.model import ContentType
+from web_listening.request.model import classify_mime_type
 from web_listening.request.validate import compile_access_policy
 from web_listening.tool_registry.manifest import (
     ToolCategory,
@@ -688,9 +688,7 @@ def _validate_acquisition_policy(
     )
     if any(not policy.decide_url(url).allowed for url in urls):
         raise ToolRegistryError("runner.output_mismatch")
-    content_type = (
-        ContentType.HTML if output.mime_type == "text/html" else ContentType.FILE
-    )
+    content_type = classify_mime_type(output.mime_type)
     if not policy.decide_content_type(content_type).allowed:
         raise ToolRegistryError("runner.output_mismatch")
     for name, amount in (

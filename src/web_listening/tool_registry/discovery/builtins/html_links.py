@@ -7,6 +7,7 @@ from __future__ import annotations
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
+from web_listening.request.model import ContentType, classify_mime_type
 from web_listening.request.scope import path_is_included
 from web_listening.tool_registry.manifest import (
     HealthStatus,
@@ -26,7 +27,6 @@ from web_listening.tool_registry.protocols.discovery import (
 )
 
 _MAX_CANDIDATES = 100
-_HTML_MIME_TYPES = frozenset({"application/xhtml+xml", "text/html"})
 _LINK_TAGS = frozenset({"a", "area", "link"})
 
 HTML_LINKS_MANIFEST = ToolManifest(
@@ -90,7 +90,7 @@ class HtmlLinksDiscoveryTool:  # pylint: disable=too-few-public-methods
         self, tool_input: DiscoveryInput
     ) -> DiscoveryOutput | DiscoveryFailure:
         """Parse standard HTML link declarations into stable canonical URLs."""
-        if tool_input.source_mime_type not in _HTML_MIME_TYPES:
+        if classify_mime_type(tool_input.source_mime_type) is not ContentType.HTML:
             return self._failure("discovery.mime_unsupported")
         parser = _LinkParser()
         try:
@@ -136,7 +136,7 @@ class HtmlFileLinksDiscoveryTool:  # pylint: disable=too-few-public-methods
         self, tool_input: DiscoveryInput
     ) -> DiscoveryOutput | DiscoveryFailure:
         """Return stable file-hinted candidates, with child-scope matches first."""
-        if tool_input.source_mime_type not in _HTML_MIME_TYPES:
+        if classify_mime_type(tool_input.source_mime_type) is not ContentType.HTML:
             return self._failure("discovery.mime_unsupported")
         parser = _LinkParser()
         try:

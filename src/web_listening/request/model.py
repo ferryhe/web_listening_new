@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from web_listening.mime import is_html_mime_type
+
 
 class RequestValidationError(ValueError):
     """Reject an invalid Request using a stable, non-sensitive reason code."""
@@ -20,6 +22,13 @@ class ContentType(str, Enum):
 
     HTML = "html"
     FILE = "file"
+
+
+def classify_mime_type(mime_type: str) -> ContentType:
+    """Classify one already-valid media type into the public content categories."""
+    if is_html_mime_type(mime_type):
+        return ContentType.HTML
+    return ContentType.FILE
 
 
 @dataclass(frozen=True, slots=True)
