@@ -284,6 +284,27 @@ class SubprocessRunner:
         return None, bytes(stdout.data)
 
 
+class SubprocessTransformTool:
+    """Standard Transform protocol adapter over one subprocess runner."""
+
+    def __init__(self, manifest: ToolManifest, command: tuple[str, ...]) -> None:
+        if (
+            type(manifest) is not ToolManifest
+            or manifest.category is not ToolCategory.TRANSFORM
+        ):
+            raise ToolRegistryError("runner.manifest_invalid")
+        self.manifest = manifest
+        self._runner = SubprocessRunner(manifest, command)
+
+    def transform(
+        self, tool_input: TransformInput
+    ) -> TransformOutput | TransformFailure:
+        """Invoke the standard Transform envelope for exactly one attempt."""
+        result = self._runner.invoke(tool_input)
+        assert isinstance(result, (TransformOutput, TransformFailure))
+        return result
+
+
 def _minimal_environment() -> dict[str, str]:
     environment = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     for name in ("PATH", "SystemRoot", "WINDIR"):

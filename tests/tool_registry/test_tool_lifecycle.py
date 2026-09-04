@@ -20,6 +20,7 @@ from web_listening.tool_registry.manifest import ToolCategory
 ROOT = Path(__file__).parents[2]
 FIXTURES = ROOT / "tests/fixtures/tools/lifecycle"
 TOOL_ID = "external.lifecycle"
+TRANSFORM_SOURCE = ROOT / "tests/fixtures/tools/external_transform/1.0.0"
 
 
 def _source(version: str) -> Path:
@@ -197,6 +198,78 @@ def test_qualification_and_activation_are_distinct_and_restart_safe(
     assert current is not None
     assert current.manifest.version == "1.0.0"
     assert restarted.inspect(ToolCategory.ACQUISITION, TOOL_ID, "1.0.0").active is True
+
+
+def test_active_versions_discovers_usable_transforms_without_known_ids(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data"
+    lifecycle = ToolLifecycle(root)
+    lifecycle.install(TRANSFORM_SOURCE)
+    lifecycle.qualify(ToolCategory.TRANSFORM, "external.basic_html_markdown", "1.0.0")
+    lifecycle.activate(ToolCategory.TRANSFORM, "external.basic_html_markdown", "1.0.0")
+
+    descriptions = ToolLifecycle(root).active_versions(ToolCategory.TRANSFORM)
+
+    assert tuple(item.manifest.tool_id for item in descriptions) == (
+        "external.basic_html_markdown",
+    )
+    assert descriptions[0].command[-1].endswith("/tool.py")
+    assert not lifecycle.active_versions(ToolCategory.DISCOVERY)
+
+
+def test_active_versions_are_stably_sorted_by_tool_identity(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    lifecycle = ToolLifecycle(root)
+    for tool_id in ("external.zeta_transform", "external.alpha_transform"):
+        source = tmp_path / tool_id
+        shutil.copytree(TRANSFORM_SOURCE, source)
+        for name in ("tool.json", "tool.py"):
+            path = source / name
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "external.basic_html_markdown", tool_id
+                ),
+                encoding="utf-8",
+            )
+        lifecycle.install(source)
+        lifecycle.qualify(ToolCategory.TRANSFORM, tool_id, "1.0.0")
+        lifecycle.activate(ToolCategory.TRANSFORM, tool_id, "1.0.0")
+
+    assert tuple(
+        item.manifest.tool_id
+        for item in lifecycle.active_versions(ToolCategory.TRANSFORM)
+    ) == ("external.alpha_transform", "external.zeta_transform")
+
+
+def test_active_versions_fails_closed_on_corrupt_transform_tree(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    lifecycle = ToolLifecycle(root)
+    lifecycle.install(TRANSFORM_SOURCE)
+    installed = root / "tools/transform/external.basic_html_markdown/1.0.0/state.json"
+    installed.write_text("not-json", encoding="utf-8")
+
+    with pytest.raises(ToolLifecycleError) as caught:
+        lifecycle.active_versions(ToolCategory.TRANSFORM)
+
+    assert caught.value.code == "lifecycle.state_invalid"
+
+
+@pytest.mark.parametrize("link", ("tools", "tools/transform"))
+def test_active_versions_rejects_dangling_tree_link(tmp_path: Path, link: str) -> None:
+    root = tmp_path / "data"
+    root.mkdir()
+    path = root / link
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.symlink_to(tmp_path / "missing", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+    with pytest.raises(ToolLifecycleError) as caught:
+        ToolLifecycle(root).active_versions(ToolCategory.TRANSFORM)
+
+    assert caught.value.code == "lifecycle.path_invalid"
 
 
 def test_restart_rejects_a_dangling_active_pointer_link(tmp_path: Path) -> None:

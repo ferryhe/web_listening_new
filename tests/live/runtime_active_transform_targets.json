@@ -1,0 +1,29 @@
+{
+  "schema_version": "issue-88-runtime-active-transform-live.v1",
+  "targets": [
+    {
+      "site_key": "example",
+      "url": "https://example.com/",
+      "allowed_origins": ["https://example.com"],
+      "include_paths": ["/**"],
+      "content_type": "html"
+    }
+  ],
+  "limits": {
+    "max_targets": 1,
+    "max_requests": 6,
+    "max_bytes": 4194304,
+    "max_seconds": 30,
+    "concurrency": 1,
+    "retry": 0
+  },
+  "evidence": [
+    "status",
+    "tool_identity",
+    "attempt_usage",
+    "artifact_identity",
+    "artifact_mime_type",
+    "artifact_size",
+    "lineage_identity"
+  ]
+}
