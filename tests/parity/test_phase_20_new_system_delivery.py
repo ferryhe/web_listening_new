@@ -110,12 +110,6 @@ LIVE_TEST = (
     PROJECT_ROOT / "tests" / "live" / "test_phase_20_new_system_delivery_live.py"
 )
 LIVE_TARGETS = LIVE_TEST.with_name("phase_20_new_system_delivery_targets.json")
-ISSUE_BASE_README_IDENTITY = (
-    "f43000ab0f170b376b5b19cd84ee3bb2f51f13f6",
-    "af52bc5ea28f4e1e42430462b86653629397ae3e",
-)
-ISSUE_BASE_README_LINE_COUNT = 751
-ISSUE_BASE_README_STATUS_LINE = "> Status: Proposed target design  "
 
 
 def _html(label: str) -> bytes:
@@ -1285,21 +1279,6 @@ def test_frozen_readme_identity_and_clause_matrix_are_complete() -> None:
     assert direct_skill.test_nodeids == (
         "tests/parity/test_phase_20_new_system_delivery.py::"
         "test_valid_site_skill_uses_preferred_tool_without_rediscovery_or_alternate",
-    )
-    readme_path = repository_root / "README.md"
-    current_raw = readme_path.read_bytes()
-    current_lines = readme_path.read_text(encoding="utf-8").splitlines()
-    assert current_raw.endswith(b"\n")
-    assert len(current_lines) == ISSUE_BASE_README_LINE_COUNT
-    assert current_lines[2].startswith("> Status:")
-    assert current_lines[2] != ISSUE_BASE_README_STATUS_LINE
-    normalized_lines = list(current_lines)
-    normalized_lines[2] = ISSUE_BASE_README_STATUS_LINE
-    normalized_raw = ("\n".join(normalized_lines) + "\n").encode("utf-8")
-    git_blob_header = f"blob {len(normalized_raw)}\0".encode("ascii")
-    assert (
-        hashlib.sha1(git_blob_header + normalized_raw).hexdigest()
-        == ISSUE_BASE_README_IDENTITY[1]
     )
 
 

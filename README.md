@@ -551,14 +551,38 @@ All three interfaces are thin adapters over one Runtime service.
 
 ### CLI
 
+The CLI is a thin adapter: the Request JSON owns the scope, content types,
+optional Site Skill, tool-exploration permission, and budgets. For example,
+`request.json` can contain this minimal strict Request:
+
+```json
+{
+  "scope": {
+    "seeds": ["https://example.org/"],
+    "allowed_origins": ["https://example.org"],
+    "include_paths": ["/**"],
+    "content_types": ["html"]
+  },
+  "site_skill": null,
+  "explore_all_tools": false,
+  "budgets": {
+    "max_requests": 1,
+    "max_bytes": 1048576,
+    "max_runtime_seconds": 30,
+    "max_tool_attempts_per_target": 1
+  }
+}
+```
+
 ```bash
 web-listening acquire \
-  --scope scope.yaml \
-  --site-skill site-skill.yaml \
-  --explore-all-tools \
+  --request request.json \
   --output ./output \
   --json
 ```
+
+`--site-skill` is optional and accepts a separate Site Skill JSON file. When it
+is supplied, that Site Skill overrides any `site_skill` embedded in the Request.
 
 ### REST
 
