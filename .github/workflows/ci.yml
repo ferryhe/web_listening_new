@@ -22,7 +22,15 @@ jobs:
           python-version: "3.12"
 
       - name: Install project and development tools
-        run: python -m pip install -e ".[dev]"
+        run: python -m pip install -e ".[dev,rest,mcp]"
+
+      - name: Verify interface dependencies
+        run: python -c "import fastapi, mcp"
+
+      - name: Run interface tests
+        run: |
+          python -m pytest -q tests/interfaces/test_rest.py
+          python -m pytest -q tests/interfaces/test_mcp.py
 
       - name: Run quality gates
         run: |
