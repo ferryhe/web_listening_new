@@ -581,6 +581,21 @@ web-listening acquire \
   --json
 ```
 
+A terminal, result-bearing Job can be exported without rerunning acquisition:
+
+```bash
+web-listening get-handoff JOB_ID --output ./output --json
+```
+
+This calls Runtime's read-only projection. The `acquisition-handoff.v1` payload
+is derived only from the persisted Job and Result plus observations reopened
+through the Artifact Store. Its `handoff_id` hashes the canonical payload with
+that field removed, `generated_at` is the Job's persisted finish time, and each
+Artifact uses `/v1/artifacts/{artifact_id}` as its content reference. The export
+contains evidence and references only—never content or a local filesystem path.
+Non-terminal Jobs return `handoff.not_terminal`; terminal Jobs without a
+persisted Result return `handoff.result_unavailable`.
+
 `--site-skill` is optional and accepts a separate Site Skill JSON file. When it
 is supplied, that Site Skill overrides any `site_skill` embedded in the Request.
 
@@ -589,6 +604,7 @@ is supplied, that Site Skill overrides any `site_skill` embedded in the Request.
 ```text
 POST /v1/acquisitions
 GET  /v1/jobs/{run_id}
+GET  /v1/jobs/{job_id}/handoff
 GET  /v1/artifacts/{artifact_id}
 ```
 

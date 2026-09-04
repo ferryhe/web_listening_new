@@ -226,6 +226,20 @@ def _service(
     return service, store, jobs
 
 
+def test_service_get_handoff_projects_persisted_job(tmp_path: Path) -> None:
+    response = _Response(200, BODY, content_type="text/html")
+    service, _store, _jobs = _service(
+        tmp_path,
+        WebHttpAcquisitionTool(lambda: _Transport(response), resolver=_resolver),
+    )
+    job = service.run(_request(_skill()))
+
+    handoff = service.get_handoff(job.job_id)
+
+    assert handoff.to_dict()["job_id"] == job.job_id
+    assert handoff.to_dict()["generated_at"] == job.finished_at
+
+
 def _file_request(url: str, max_bytes: int) -> Request:
     return Request(
         Scope(

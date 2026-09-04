@@ -1,6 +1,6 @@
 """Thin REST adapter over the public Runtime service."""
 
-# pylint: disable=duplicate-code
+# pylint: disable=duplicate-code,too-many-return-statements,too-many-statements
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from web_listening.request.model import RequestValidationError
 from web_listening.request.site_refresh import site_refresh_request_from_json
 from web_listening.request.validate import request_from_json
 from web_listening.result.errors import SafeError
+from web_listening.runtime.handoff import HandoffError
 from web_listening.runtime.jobs import Job, JobStateError, JobStatus
 from web_listening.runtime.service import RuntimeService
 from web_listening.site_skill.model import SiteSkillError
@@ -58,6 +59,12 @@ def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
 
 
 def _runtime_error_response(exc: Exception) -> JSONResponse:
+    if isinstance(exc, HandoffError):
+        if exc.code == "handoff.not_terminal":
+            return _error_response(409, exc.code, "Job is not terminal.")
+        if exc.code == "handoff.result_unavailable":
+            return _error_response(404, exc.code, "Result is unavailable.")
+        return _error_response(500, exc.code, "Handoff export failed.")
     if isinstance(exc, JobStateError):
         if exc.code == "job.not_found":
             return _error_response(404, exc.code, "Resource was not found.")
@@ -108,6 +115,15 @@ def create_app(runtime_provider: RuntimeProvider) -> FastAPI:
         except Exception as exc:  # pylint: disable=broad-exception-caught
             return _runtime_error_response(exc)
         return JSONResponse(status_code=200, content=_job_payload(job))
+
+    @app.get("/v1/jobs/{job_id}/handoff")
+    def get_handoff(job_id: str) -> JSONResponse:
+        try:
+            runtime = runtime_provider()
+            handoff = runtime.get_handoff(job_id)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            return _runtime_error_response(exc)
+        return JSONResponse(status_code=200, content=handoff.to_dict())
 
     @app.get("/v1/artifacts/{artifact_id}")
     def read_artifact(artifact_id: str) -> JSONResponse:

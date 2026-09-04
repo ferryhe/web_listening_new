@@ -688,6 +688,7 @@ def test_pyproject_adds_only_the_dedicated_mcp_extra() -> None:
     } == {
         "black",
         "isort",
+        "jsonschema[format]",
         "pylint",
         "pytest",
     }

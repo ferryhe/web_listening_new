@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ferryhe.github.io/web_listening_new/schemas/acquisition-handoff.v1.schema.json",
+  "title": "Web Listening acquisition handoff v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "handoff_id", "producer", "job_id", "run_id", "status", "generated_at", "source", "artifacts", "attempts", "errors", "usage"],
+  "properties": {
+    "schema_version": {"const": "acquisition-handoff.v1"},
+    "handoff_id": {"$ref": "#/$defs/sha256"},
+    "producer": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "web_listening_new"},
+        "version": {"const": "acquisition-handoff-producer.v1"}
+      }
+    },
+    "job_id": {"$ref": "#/$defs/identifier"},
+    "run_id": {"$ref": "#/$defs/identifier"},
+    "status": {"enum": ["completed", "partial", "rejected", "failed"]},
+    "generated_at": {"$ref": "#/$defs/time"},
+    "source": {"$ref": "#/$defs/source"},
+    "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}},
+    "attempts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/attempt"},
+      "contains": {"properties": {"outcome": {"const": "succeeded"}, "final_url": {"type": "null"}}, "required": ["outcome", "final_url"]},
+      "minContains": 0,
+      "maxContains": 1
+    },
+    "errors": {"type": "array", "items": {"$ref": "#/$defs/error"}},
+    "usage": {"$ref": "#/$defs/usage"}
+  },
+  "$defs": {
+    "text": {"type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f]+$"},
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f]+$"},
+    "errorMessage": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f]+$"},
+    "errorDetailKey": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f]+$"},
+    "errorDetailValue": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f]+$"},
+    "sha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
+    "time": {"type": "string", "format": "date-time", "minLength": 20, "maxLength": 20, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^https?://(?!.*[\\u0000-\\u001f\\u007f\\\\])(?!.*%(?![0-9A-Fa-f]{2}))(?![^/?#]*(?:%40|%2540|%252540))(?:(?:\\[[0-9A-Fa-f:.]+\\])|(?:(?![0-9]+(?:\\.[0-9]+){3}(?=[:/?#]|$))(?:[A-Za-z0-9]|%[0-9A-Fa-f]{2})(?:(?:[A-Za-z0-9-]|%[0-9A-Fa-f]{2}){0,61}(?:[A-Za-z0-9]|%[0-9A-Fa-f]{2}))?(?:\\.(?:[A-Za-z0-9]|%[0-9A-Fa-f]{2})(?:(?:[A-Za-z0-9-]|%[0-9A-Fa-f]{2}){0,61}(?:[A-Za-z0-9]|%[0-9A-Fa-f]{2}))?)*|(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])))(?::0*(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:[/?#]|$)"
+    },
+    "nullableUrl": {"oneOf": [{"$ref": "#/$defs/url"}, {"type": "null"}]},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_id", "requested_url", "current_url", "final_url", "redirects"],
+      "properties": {
+        "source_id": {"$ref": "#/$defs/url"}, "requested_url": {"$ref": "#/$defs/url"},
+        "current_url": {"$ref": "#/$defs/url"}, "final_url": {"$ref": "#/$defs/nullableUrl"},
+        "redirects": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/redirect"},
+          "contains": {"properties": {"decision": {"const": "rejected"}}, "required": ["decision"]},
+          "minContains": 0,
+          "maxContains": 1
+        }
+      }
+    },
+    "redirect": {
+      "type": "object", "additionalProperties": false,
+      "required": ["order", "from_url", "to_url", "http_status", "decision"],
+      "properties": {
+        "order": {"type": "integer", "minimum": 0}, "from_url": {"$ref": "#/$defs/url"},
+        "to_url": {"$ref": "#/$defs/url"}, "http_status": {"type": "integer", "minimum": 300, "maximum": 399},
+        "decision": {"enum": ["followed", "rejected"]}
+      }
+    },
+    "lineage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["lineage_id", "observation_id", "artifact_id", "relation", "source_observation_id", "source_artifact_id"],
+      "properties": {
+        "lineage_id": {"type": "string", "minLength": 72, "maxLength": 72, "pattern": "^lineage-[0-9a-f]{64}$"},
+        "observation_id": {"type": "string", "minLength": 44, "maxLength": 44, "pattern": "^observation-[0-9a-f]{32}$"},
+        "artifact_id": {"type": "string", "minLength": 73, "maxLength": 73, "pattern": "^artifact-[0-9a-f]{64}$"},
+        "relation": {"const": "derived_from"},
+        "source_observation_id": {"type": "string", "minLength": 44, "maxLength": 44, "pattern": "^observation-[0-9a-f]{32}$"},
+        "source_artifact_id": {"type": "string", "minLength": 73, "maxLength": 73, "pattern": "^artifact-[0-9a-f]{64}$"}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_id", "observation_id", "role", "source_url", "observed_at", "mime_type", "size_bytes", "sha256", "lineage", "tool_id", "tool_version", "content_ref"],
+      "properties": {
+        "artifact_id": {"type": "string", "minLength": 73, "maxLength": 73, "pattern": "^artifact-[0-9a-f]{64}$"},
+        "observation_id": {"type": "string", "minLength": 44, "maxLength": 44, "pattern": "^observation-[0-9a-f]{32}$"},
+        "role": {"enum": ["source", "derived"]}, "source_url": {"oneOf": [{"$ref": "#/$defs/url"}, {"type": "string", "pattern": "^urn:web-listening:transform:[A-Za-z0-9._~-]+:[A-Za-z0-9._+~-]+$(?![\\s\\S])"}]},
+        "observed_at": {"$ref": "#/$defs/time"}, "mime_type": {"type": "string", "pattern": "^[a-z0-9][a-z0-9!#$%&'*+.^_`|~-]*/[a-z0-9][a-z0-9!#$%&'*+.^_`|~-]*$(?![\\s\\S])"},
+        "size_bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256"},
+        "lineage": {"type": "array", "items": {"$ref": "#/$defs/lineage"}},
+        "tool_id": {"$ref": "#/$defs/identifier"}, "tool_version": {"$ref": "#/$defs/identifier"},
+        "content_ref": {"type": "string", "minLength": 87, "maxLength": 87, "pattern": "^/v1/artifacts/artifact-[0-9a-f]{64}$"}
+      },
+      "allOf": [
+        {"if": {"properties": {"role": {"const": "source"}}, "required": ["role"]}, "then": {"properties": {"source_url": {"$ref": "#/$defs/url"}, "lineage": {"maxItems": 0}}}},
+        {"if": {"properties": {"role": {"const": "derived"}}, "required": ["role"]}, "then": {"properties": {"source_url": {"type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^urn:web-listening:transform:[A-Za-z0-9._~-]+:[A-Za-z0-9._+~-]+$(?![\\s\\S])"}, "lineage": {"minItems": 1, "maxItems": 1}}}}
+      ]
+    },
+    "error": {
+      "type": "object", "additionalProperties": false, "required": ["code", "message", "details"],
+      "properties": {"code": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$(?![\\s\\S])"}, "message": {"$ref": "#/$defs/errorMessage"}, "details": {"type": "object", "propertyNames": {"$ref": "#/$defs/errorDetailKey"}, "additionalProperties": {"$ref": "#/$defs/errorDetailValue"}}}
+    },
+    "attempt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "order", "attempt_id", "outcome", "tool_id", "tool_version", "started_at", "finished_at", "requested_url", "final_url", "http_status", "error", "requests", "bytes_received", "runtime_ms"],
+      "properties": {
+        "schema_version": {"const": "web-listening-attempt.v1"}, "order": {"type": "integer", "minimum": 0}, "attempt_id": {"$ref": "#/$defs/identifier"},
+        "outcome": {"enum": ["succeeded", "failed", "skipped"]}, "tool_id": {"$ref": "#/$defs/identifier"}, "tool_version": {"$ref": "#/$defs/identifier"},
+        "started_at": {"$ref": "#/$defs/time"}, "finished_at": {"$ref": "#/$defs/time"}, "requested_url": {"$ref": "#/$defs/url"},
+        "final_url": {"$ref": "#/$defs/nullableUrl"}, "http_status": {"oneOf": [{"type": "integer", "minimum": 100, "maximum": 599}, {"type": "null"}]},
+        "error": {"oneOf": [{"$ref": "#/$defs/error"}, {"type": "null"}]}, "requests": {"type": "integer", "minimum": 0},
+        "bytes_received": {"type": "integer", "minimum": 0}, "runtime_ms": {"type": "integer", "minimum": 0}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"outcome": {"const": "succeeded"}}, "required": ["outcome"]},
+          "then": {
+            "properties": {"error": {"type": "null"}},
+            "oneOf": [
+              {"properties": {"final_url": {"$ref": "#/$defs/url"}, "http_status": {"type": "integer", "minimum": 100, "maximum": 599}, "requests": {"type": "integer", "minimum": 1}}},
+              {"properties": {"final_url": {"type": "null"}, "http_status": {"type": "null"}, "requests": {"const": 0}, "bytes_received": {"const": 0}}}
+            ]
+          }
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "failed"}}, "required": ["outcome"]},
+          "then": {"properties": {"error": {"$ref": "#/$defs/error"}}}
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "skipped"}}, "required": ["outcome"]},
+          "then": {"properties": {"final_url": {"type": "null"}, "http_status": {"type": "null"}, "error": {"$ref": "#/$defs/error"}, "requests": {"const": 0}, "bytes_received": {"const": 0}, "runtime_ms": {"const": 0}}}
+        }
+      ]
+    },
+    "usage": {
+      "type": "object", "additionalProperties": false, "required": ["requests", "bytes_received", "runtime_ms", "tool_attempts"],
+      "properties": {"requests": {"type": "integer", "minimum": 0}, "bytes_received": {"type": "integer", "minimum": 0}, "runtime_ms": {"type": "integer", "minimum": 0}, "tool_attempts": {"type": "integer", "minimum": 0}}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "completed"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "artifacts": {"minItems": 1, "contains": {"properties": {"role": {"const": "source"}}, "required": ["role"]}, "minContains": 1, "maxContains": 1},
+          "errors": {"maxItems": 0},
+          "attempts": {"minItems": 1, "items": {"properties": {"outcome": {"const": "succeeded"}}}, "contains": {"properties": {"outcome": {"const": "succeeded"}, "final_url": {"$ref": "#/$defs/url"}}, "required": ["outcome", "final_url"]}, "minContains": 1, "maxContains": 1},
+          "source": {"properties": {"final_url": {"$ref": "#/$defs/url"}, "redirects": {"items": {"properties": {"decision": {"const": "followed"}}}}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "partial"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "artifacts": {"minItems": 1, "contains": {"properties": {"role": {"const": "source"}}, "required": ["role"]}, "minContains": 1, "maxContains": 1},
+          "attempts": {"contains": {"properties": {"outcome": {"const": "succeeded"}, "final_url": {"$ref": "#/$defs/url"}}, "required": ["outcome", "final_url"]}, "minContains": 1, "maxContains": 1},
+          "source": {"properties": {"final_url": {"$ref": "#/$defs/url"}, "redirects": {"items": {"properties": {"decision": {"const": "followed"}}}}}}
+        },
+        "anyOf": [
+          {"properties": {"errors": {"minItems": 1}}},
+          {"properties": {"attempts": {"contains": {"properties": {"outcome": {"enum": ["failed", "skipped"]}}, "required": ["outcome"]}}}}
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"status": {"enum": ["rejected", "failed"]}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "artifacts": {"maxItems": 0},
+          "errors": {"minItems": 1},
+          "attempts": {"not": {"contains": {"properties": {"outcome": {"const": "succeeded"}}, "required": ["outcome"]}}},
+          "source": {"properties": {"final_url": {"type": "null"}}}
+        }
+      }
+    }
+  ]
+}

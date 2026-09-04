@@ -27,6 +27,7 @@ from web_listening.request.site_refresh import (
     SiteRefreshRequest,
 )
 from web_listening.result.errors import SafeError
+from web_listening.result.handoff import AcquisitionHandoff
 from web_listening.result.manifest import SiteSkillEvidence, Usage
 from web_listening.result.model import Result
 from web_listening.result.site_explore import SiteExploreResult
@@ -35,6 +36,7 @@ from web_listening.result.site_refresh import (
     SiteChange,
     SiteRefreshResult,
 )
+from web_listening.runtime.handoff import HandoffError
 from web_listening.runtime.jobs import Job, JobStateError, JobStatus
 from web_listening.site_skill.model import (
     DiscoveryRecipe,
@@ -250,6 +252,7 @@ class FakeRuntime:
     explore_error: Exception | None = None
     refresh_error: Exception | None = None
     get_error: Exception | None = None
+    handoff_error: Exception | None = None
     read_error: Exception | None = None
 
     def __init__(self) -> None:
@@ -267,6 +270,7 @@ class FakeRuntime:
         cls.explore_error = None
         cls.refresh_error = None
         cls.get_error = None
+        cls.handoff_error = None
         cls.read_error = None
 
     @classmethod
@@ -289,6 +293,13 @@ class FakeRuntime:
         if self.get_error is not None:
             raise self.get_error
         return _job()
+
+    def get_handoff(self, job_id: str) -> AcquisitionHandoff:
+        self.job_ids.append(job_id)
+        if self.handoff_error is not None:
+            raise self.handoff_error
+        path = ROOT / "tests/result/fixtures/acquisition-handoff-completed.v1.json"
+        return AcquisitionHandoff.from_json(path.read_bytes())
 
     def explore_site(self, request: Request) -> SiteExploreResult:
         self.requests.append(request)
@@ -330,7 +341,7 @@ def _write_json(path: Path, payload: object) -> Path:
     return path
 
 
-def test_help_lists_the_five_public_commands(
+def test_help_lists_the_six_public_commands(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as caught:
@@ -338,7 +349,10 @@ def test_help_lists_the_five_public_commands(
 
     output = capsys.readouterr()
     assert caught.value.code == 0
-    assert "{acquire,site-explore,site-refresh,get-job,read-artifact}" in output.out
+    assert (
+        "{acquire,site-explore,site-refresh,get-job,get-handoff,read-artifact}"
+        in output.out
+    )
     assert output.err == ""
     for dropped in (
         "search",
@@ -349,6 +363,36 @@ def test_help_lists_the_five_public_commands(
         "validate-site-skill",
     ):
         assert dropped not in output.out.lower()
+
+
+def test_get_handoff_calls_only_runtime_and_emits_contract(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = cli.main(
+        ["get-handoff", "run-completed-001", "--output", str(tmp_path), "--json"]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == cli.EXIT_SUCCESS
+    assert json.loads(output.out)["schema_version"] == "acquisition-handoff.v1"
+    assert FakeRuntime.instances[0].job_ids == ["run-completed-001"]
+
+
+@pytest.mark.parametrize("code", ("handoff.not_terminal", "handoff.result_unavailable"))
+def test_get_handoff_preserves_stable_runtime_diagnostics(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], code: str
+) -> None:
+    FakeRuntime.handoff_error = HandoffError(code)
+
+    exit_code = cli.main(
+        ["get-handoff", "job-one", "--output", str(tmp_path), "--json"]
+    )
+
+    output = capsys.readouterr()
+    assert exit_code == cli.EXIT_RUNTIME_ERROR
+    assert output.out == ""
+    assert output.err == f"{code}\n"
+    assert FakeRuntime.instances[0].closed is True
 
 
 def test_site_explore_calls_only_runtime_and_emits_the_strict_contract(

@@ -39,7 +39,7 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{acquire,site-explore,site-refresh,get-job,read-artifact}",
+        metavar="{acquire,site-explore,site-refresh,get-job,get-handoff,read-artifact}",
     )
 
     acquire = commands.add_parser("acquire", help="Submit one validated Request file.")
@@ -66,6 +66,13 @@ def _parser() -> argparse.ArgumentParser:
     get_job.add_argument("job_id")
     get_job.add_argument("--output", required=True, type=Path)
     get_job.add_argument("--json", action="store_true", help="Emit JSON.")
+
+    get_handoff = commands.add_parser(
+        "get-handoff", help="Export one terminal Runtime Job handoff."
+    )
+    get_handoff.add_argument("job_id")
+    get_handoff.add_argument("--output", required=True, type=Path)
+    get_handoff.add_argument("--json", action="store_true", help="Emit JSON.")
 
     read_artifact = commands.add_parser(
         "read-artifact", help="Read one stored Artifact by ID."
@@ -188,6 +195,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.output,
                 lambda runtime: _job_payload(runtime.get_job(args.job_id)),
             )
+        elif args.command == "get-handoff":
+            payload = _run_with_runtime(
+                args.output,
+                lambda runtime: runtime.get_handoff(args.job_id).to_dict(),
+            )
         else:
             payload = _run_with_runtime(
                 args.output,
@@ -206,6 +218,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if code in {"job.id_invalid", "artifact.id_invalid"}:
             _diagnose(code)
             return EXIT_INPUT_ERROR
+        if code in {"handoff.not_terminal", "handoff.result_unavailable"}:
+            _diagnose(code)
+            return EXIT_RUNTIME_ERROR
         _diagnose("runtime.failed")
         return EXIT_RUNTIME_ERROR
     _emit(payload)
