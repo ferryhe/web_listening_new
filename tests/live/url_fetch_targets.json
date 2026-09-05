@@ -1,0 +1,14 @@
+{
+  "schema_version": "web-listening-url-fetch-live-targets.v1",
+  "authorized_window": "issue-53-20260905-authorized",
+  "budgets": {
+    "max_requests": 3,
+    "max_bytes": 1048576,
+    "max_runtime_seconds": 30,
+    "max_tool_attempts_per_target": 2
+  },
+  "targets": [
+    {"kind": "html", "url": "https://example.com/", "provenance": "IANA example domain"},
+    {"kind": "file", "url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", "provenance": "W3C public test resource"}
+  ]
+}

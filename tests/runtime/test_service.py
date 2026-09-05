@@ -1347,6 +1347,7 @@ def test_open_registers_builtin_discovery_for_site_workflows(tmp_path: Path) -> 
     assert [(item.tool_id, item.version) for item in discovery] == [
         ("discovery.html_file_links", "1.0.0"),
         ("discovery.html_links", "1.0.0"),
+        ("discovery.html_navigation", "1.0.0"),
         ("discovery.rss", "1.0.0"),
         ("discovery.sitemap", "1.0.0"),
     ]
@@ -1367,6 +1368,7 @@ def test_close_is_idempotent_guards_operations_and_does_not_close_injections(
         lambda: service.explore_site(_request(None)),
         lambda: service.refresh_site(object()),  # type: ignore[arg-type]
         lambda: service.get_job("job-one"),
+        lambda: service.cancel_url_fetch("job-one"),
         lambda: service.read_artifact("artifact-one"),
     ):
         with pytest.raises(RuntimeError, match="^runtime.closed$"):

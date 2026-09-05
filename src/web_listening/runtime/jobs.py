@@ -30,6 +30,7 @@ from web_listening.request.site_batch import (
     site_batch_request_from_json,
     validate_site_batch_request,
 )
+from web_listening.request.url_fetch import UrlFetchRequest, url_fetch_request_from_json
 from web_listening.request.validate import request_from_mapping, validate_request
 from web_listening.result.errors import (
     ResultValidationError,
@@ -41,6 +42,7 @@ from web_listening.result.errors import (
 )
 from web_listening.result.model import Result
 from web_listening.result.site_batch import SiteBatchResult
+from web_listening.result.url_fetch import NavigationDiscovery, UrlFetchResult
 from web_listening.runtime.site_batch import (
     site_batch_child_result_from_mapping,
     site_batch_result_from_mapping,
@@ -186,6 +188,33 @@ class SiteBatchClaim:
     request: SiteBatchRequest
 
 
+@dataclass(frozen=True, slots=True)
+class UrlFetchJob:
+    """One caller-owned durable Smart URL Fetch execution."""
+
+    job_id: str
+    status: JobStatus
+    submitted_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    cancel_requested_at: str | None = None
+    result: UrlFetchResult | None = None
+    failure_code: str | None = None
+    caller_id: str | None = None
+    idempotency_key: str | None = None
+    request_json: str | None = None
+    request_fingerprint: str | None = None
+    execution_request_json: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UrlFetchClaim:
+    """Claimed URL fetch and its revalidated persisted request."""
+
+    job: UrlFetchJob
+    request: UrlFetchRequest
+
+
 class JobRepository:
     """Own legal Job state transitions and immutable readback only."""
 
@@ -195,6 +224,9 @@ class JobRepository:
         self._artifact_grants: set[tuple[str, str]] = set()
         self._batches: dict[str, SiteBatch] = {}
         self._batch_results: dict[str, tuple[object, ...]] = {}
+        self._url_fetches: dict[str, UrlFetchJob] = {}
+        self._url_fetch_results: dict[str, tuple[Result, ...]] = {}
+        self._url_fetch_discovery: dict[str, tuple[NavigationDiscovery, ...]] = {}
         self._lock = threading.RLock()
         self._closed = False
         self._connection: sqlite3.Connection | None = None
@@ -634,6 +666,355 @@ class JobRepository:
             row["request_fingerprint"],
             row["execution_request_json"],
         )
+
+    def submit_url_fetch(
+        self,
+        job_id: str,
+        request: UrlFetchRequest,
+        *,
+        caller_id: str,
+        idempotency_key: str,
+        at: str,
+        execution_request: UrlFetchRequest | None = None,
+    ) -> UrlFetchJob:
+        """Persist canonical URL-fetch intent before any I/O."""
+        identifier = _validate_job_id(job_id)
+        timestamp = _validate_time(at)
+        caller = _validate_boundary_text(caller_id, "caller.invalid", 256)
+        key = _validate_idempotency_key(idempotency_key)
+        canonical = UrlFetchRequest.from_dict(request.to_dict())
+        request_json = canonical.canonical_json_bytes().decode()
+        execution_json = (
+            (execution_request or canonical).canonical_json_bytes().decode()
+        )
+        item = UrlFetchJob(
+            identifier,
+            JobStatus.SUBMITTED,
+            timestamp,
+            caller_id=caller,
+            idempotency_key=key,
+            request_json=request_json,
+            request_fingerprint=canonical.request_sha256,
+            execution_request_json=execution_json,
+        )
+        with self._lock:
+            self._ensure_open()
+            if self._connection is None:
+                existing = next(
+                    (
+                        value
+                        for value in self._url_fetches.values()
+                        if value.caller_id == caller and value.idempotency_key == key
+                    ),
+                    None,
+                )
+                if existing:
+                    if existing.request_fingerprint != canonical.request_sha256:
+                        raise JobStateError("idempotency.conflict")
+                    return existing
+                self._url_fetches[identifier] = item
+                return item
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT job_id,request_fingerprint FROM url_fetches "
+                    "WHERE caller_id=? AND idempotency_key=?",
+                    (caller, key),
+                ).fetchone()
+                if row:
+                    if row["request_fingerprint"] != canonical.request_sha256:
+                        raise JobStateError("idempotency.conflict")
+                    result = self._url_fetch_from_database(row["job_id"])
+                    self._connection.execute("COMMIT")
+                    return result
+                self._connection.execute(
+                    "INSERT INTO url_fetches "
+                    "(job_id,status,submitted_at,caller_id,idempotency_key,"
+                    "request_json,request_fingerprint,execution_request_json) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        identifier,
+                        "submitted",
+                        timestamp,
+                        caller,
+                        key,
+                        request_json,
+                        canonical.request_sha256,
+                        execution_json,
+                    ),
+                )
+                self._connection.execute("COMMIT")
+                return self._url_fetch_from_database(identifier)
+            except BaseException:
+                self._rollback()
+                raise
+
+    def get_url_fetch(self, job_id: str) -> UrlFetchJob:
+        """Read one URL-fetch snapshot."""
+        identifier = _validate_job_id(job_id)
+        with self._lock:
+            self._ensure_open()
+            if self._connection is None:
+                try:
+                    return self._url_fetches[identifier]
+                except KeyError as exc:
+                    raise JobStateError("url_fetch.not_found") from exc
+            return self._url_fetch_from_database(identifier)
+
+    def claim_next_url_fetch(self, *, at: str) -> UrlFetchClaim | None:
+        """Atomically claim the oldest submitted URL fetch."""
+        timestamp = _validate_time(at)
+        with self._lock:
+            if self._connection is None:
+                queued = sorted(
+                    (
+                        item
+                        for item in self._url_fetches.values()
+                        if item.status is JobStatus.SUBMITTED
+                    ),
+                    key=lambda item: (item.submitted_at, item.job_id),
+                )
+                if not queued:
+                    return None
+                job = replace(
+                    queued[0],
+                    status=JobStatus.RUNNING,
+                    started_at=queued[0].started_at or timestamp,
+                )
+                self._url_fetches[job.job_id] = job
+            else:
+                try:
+                    self._connection.execute("BEGIN IMMEDIATE")
+                    row = self._connection.execute(
+                        "SELECT job_id FROM url_fetches WHERE status='submitted' "
+                        "ORDER BY submitted_at,job_id LIMIT 1"
+                    ).fetchone()
+                    if row is None:
+                        self._connection.execute("COMMIT")
+                        return None
+                    self._connection.execute(
+                        "UPDATE url_fetches SET status='running',"
+                        "started_at=COALESCE(started_at,?) "
+                        "WHERE job_id=? AND status='submitted'",
+                        (timestamp, row["job_id"]),
+                    )
+                    job = self._url_fetch_from_database(row["job_id"])
+                    self._connection.execute("COMMIT")
+                except BaseException:
+                    self._rollback()
+                    raise
+            assert job.execution_request_json
+            return UrlFetchClaim(
+                job, url_fetch_request_from_json(job.execution_request_json)
+            )
+
+    def checkpoint_url_fetch(self, job_id: str, order: int, result: Result) -> None:
+        """Durably commit one completed hop before later I/O."""
+        payload = json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":"))
+        with self._lock:
+            current = self.get_url_fetch(job_id)
+            if current.status is not JobStatus.RUNNING:
+                raise JobStateError("url_fetch.checkpoint_order_invalid")
+            if self._connection is None:
+                prior = self._url_fetch_results.get(job_id, ())
+                if order != len(prior) + 1:
+                    raise JobStateError("url_fetch.checkpoint_order_invalid")
+                self._url_fetch_results[job_id] = (*prior, result)
+                if current.caller_id:
+                    self._artifact_grants.update(
+                        (current.caller_id, artifact.artifact_id)
+                        for artifact in result.artifacts
+                    )
+                return
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                count = self._connection.execute(
+                    "SELECT COUNT(*) FROM url_fetch_hops WHERE job_id=?", (job_id,)
+                ).fetchone()[0]
+                if order != count + 1:
+                    raise JobStateError("url_fetch.checkpoint_order_invalid")
+                self._connection.execute(
+                    "INSERT INTO url_fetch_hops (job_id,hop_order,result_json) VALUES (?,?,?)",
+                    (job_id, order, payload),
+                )
+                self._connection.executemany(
+                    "INSERT OR IGNORE INTO url_fetch_artifact_grants "
+                    "(job_id,caller_id,artifact_id) VALUES (?,?,?)",
+                    (
+                        (job_id, current.caller_id, artifact.artifact_id)
+                        for artifact in result.artifacts
+                    ),
+                )
+                self._connection.execute("COMMIT")
+            except BaseException:
+                self._rollback()
+                raise
+
+    def url_fetch_checkpoints(self, job_id: str) -> tuple[Result, ...]:
+        """Return the ordered completed-hop prefix."""
+        self.get_url_fetch(job_id)
+        if self._connection is None:
+            return self._url_fetch_results.get(job_id, ())
+        rows = self._connection.execute(
+            "SELECT result_json FROM url_fetch_hops WHERE job_id=? ORDER BY hop_order",
+            (job_id,),
+        ).fetchall()
+        try:
+            return tuple(Result.from_dict(json.loads(row[0])) for row in rows)
+        except (TypeError, ValueError) as exc:
+            raise JobStateError("url_fetch.persisted_invalid") from exc
+
+    def checkpoint_url_fetch_discovery(
+        self, job_id: str, order: int, discovery: NavigationDiscovery
+    ) -> None:
+        """Durably commit navigation evidence before later I/O."""
+        payload = json.dumps(discovery.to_dict(), sort_keys=True, separators=(",", ":"))
+        with self._lock:
+            current = self.get_url_fetch(job_id)
+            if current.status is not JobStatus.RUNNING:
+                raise JobStateError("url_fetch.checkpoint_order_invalid")
+            if self._connection is None:
+                prior = self._url_fetch_discovery.get(job_id, ())
+                if order != len(prior) + 1:
+                    raise JobStateError("url_fetch.checkpoint_order_invalid")
+                self._url_fetch_discovery[job_id] = (*prior, discovery)
+                return
+            count = self._connection.execute(
+                "SELECT COUNT(*) FROM url_fetch_discovery WHERE job_id=?", (job_id,)
+            ).fetchone()[0]
+            if order != count + 1:
+                raise JobStateError("url_fetch.checkpoint_order_invalid")
+            self._connection.execute(
+                "INSERT INTO url_fetch_discovery "
+                "(job_id,discovery_order,evidence_json) VALUES (?,?,?)",
+                (job_id, order, payload),
+            )
+
+    def url_fetch_discovery_checkpoints(
+        self, job_id: str
+    ) -> tuple[NavigationDiscovery, ...]:
+        """Return ordered persisted navigation evidence."""
+        self.get_url_fetch(job_id)
+        if self._connection is None:
+            return self._url_fetch_discovery.get(job_id, ())
+        rows = self._connection.execute(
+            "SELECT evidence_json FROM url_fetch_discovery WHERE job_id=? "
+            "ORDER BY discovery_order",
+            (job_id,),
+        ).fetchall()
+        try:
+            return tuple(
+                NavigationDiscovery.from_dict(json.loads(row[0])) for row in rows
+            )
+        except (TypeError, ValueError) as exc:
+            raise JobStateError("url_fetch.persisted_invalid") from exc
+
+    def finish_url_fetch(
+        self,
+        job_id: str,
+        *,
+        at: str,
+        result: UrlFetchResult | None = None,
+        failure_code: str | None = None,
+    ) -> UrlFetchJob:
+        """Atomically terminalize one claimed URL fetch."""
+        current = self.get_url_fetch(job_id)
+        if current.status is not JobStatus.RUNNING:
+            raise JobStateError("url_fetch.not_claimed")
+        status = JobStatus.FAILED if result is None else JobStatus(result.status.value)
+        updated = replace(
+            current,
+            status=status,
+            finished_at=_validate_time(at),
+            result=result,
+            failure_code=failure_code,
+        )
+        with self._lock:
+            if self._connection is None:
+                self._url_fetches[job_id] = updated
+                return updated
+            self._connection.execute(
+                "UPDATE url_fetches SET status=?,finished_at=?,"
+                "result_json=?,failure_code=? "
+                "WHERE job_id=? AND status='running'",
+                (
+                    status.value,
+                    updated.finished_at,
+                    (
+                        None
+                        if result is None
+                        else json.dumps(
+                            result.to_dict(), sort_keys=True, separators=(",", ":")
+                        )
+                    ),
+                    failure_code,
+                    job_id,
+                ),
+            )
+            return self._url_fetch_from_database(job_id)
+
+    def cancel_url_fetch(self, job_id: str, *, at: str) -> UrlFetchJob:
+        """Persist a cooperative URL-fetch cancellation request."""
+        current = self.get_url_fetch(job_id)
+        if current.status in _TERMINAL or current.cancel_requested_at:
+            return current
+        timestamp = _validate_time(at)
+        with self._lock:
+            if self._connection is None:
+                updated = replace(current, cancel_requested_at=timestamp)
+                self._url_fetches[job_id] = updated
+                return updated
+            self._connection.execute(
+                "UPDATE url_fetches SET cancel_requested_at=? "
+                "WHERE job_id=? AND finished_at IS NULL",
+                (timestamp, job_id),
+            )
+            return self._url_fetch_from_database(job_id)
+
+    def reconcile_url_fetches(self) -> None:
+        """Return interrupted URL fetches to the resumable queue."""
+        with self._lock:
+            if self._connection is None:
+                for key, item in tuple(self._url_fetches.items()):
+                    if item.status is JobStatus.RUNNING:
+                        self._url_fetches[key] = replace(
+                            item, status=JobStatus.SUBMITTED
+                        )
+            else:
+                self._connection.execute(
+                    "UPDATE url_fetches SET status='submitted' WHERE status='running'"
+                )
+
+    def _url_fetch_from_database(self, job_id: str) -> UrlFetchJob:
+        """Revalidate one persisted URL-fetch snapshot."""
+        assert self._connection is not None
+        row = self._connection.execute(
+            "SELECT * FROM url_fetches WHERE job_id=?", (job_id,)
+        ).fetchone()
+        if row is None:
+            raise JobStateError("url_fetch.not_found")
+        try:
+            return UrlFetchJob(
+                row["job_id"],
+                JobStatus(row["status"]),
+                row["submitted_at"],
+                row["started_at"],
+                row["finished_at"],
+                row["cancel_requested_at"],
+                (
+                    None
+                    if row["result_json"] is None
+                    else UrlFetchResult.from_dict(json.loads(row["result_json"]))
+                ),
+                row["failure_code"],
+                row["caller_id"],
+                row["idempotency_key"],
+                row["request_json"],
+                row["request_fingerprint"],
+                row["execution_request_json"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise JobStateError("url_fetch.persisted_invalid") from exc
 
     def close(self) -> None:
         """Close a persistent handle; repeated closes are harmless."""
@@ -1080,6 +1461,11 @@ class JobRepository:
                     (caller, identifier),
                 ).fetchone()
                 is not None
+                or self._connection.execute(
+                    "SELECT 1 FROM url_fetch_artifact_grants WHERE caller_id=? AND artifact_id=?",
+                    (caller, identifier),
+                ).fetchone()
+                is not None
             )
 
     def check(self) -> None:
@@ -1249,6 +1635,41 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         );
         CREATE UNIQUE INDEX IF NOT EXISTS site_batches_idempotency
         ON site_batches(caller_id,idempotency_key);
+        CREATE TABLE IF NOT EXISTS url_fetches (
+            job_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            cancel_requested_at TEXT,
+            result_json TEXT,
+            failure_code TEXT,
+            caller_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            execution_request_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS url_fetch_hops (
+            job_id TEXT NOT NULL REFERENCES url_fetches(job_id),
+            hop_order INTEGER NOT NULL,
+            result_json TEXT NOT NULL,
+            PRIMARY KEY (job_id,hop_order)
+        );
+        CREATE TABLE IF NOT EXISTS url_fetch_discovery (
+            job_id TEXT NOT NULL REFERENCES url_fetches(job_id),
+            discovery_order INTEGER NOT NULL,
+            evidence_json TEXT NOT NULL,
+            PRIMARY KEY (job_id,discovery_order)
+        );
+        CREATE TABLE IF NOT EXISTS url_fetch_artifact_grants (
+            job_id TEXT NOT NULL REFERENCES url_fetches(job_id),
+            caller_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            PRIMARY KEY (job_id,artifact_id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS url_fetches_idempotency
+        ON url_fetches(caller_id,idempotency_key);
         """)
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()

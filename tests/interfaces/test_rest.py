@@ -421,6 +421,9 @@ def test_app_exposes_exactly_the_six_readme_routes_and_disables_docs(
         ("/v1/site-batches", ("POST",)),
         ("/v1/site-batches/{batch_id}", ("GET",)),
         ("/v1/site-batches/{batch_id}/cancel", ("POST",)),
+        ("/v1/url-fetches", ("POST",)),
+        ("/v1/url-fetches/{job_id}", ("GET",)),
+        ("/v1/url-fetches/{job_id}/cancel", ("POST",)),
     }
     client = TestClient(app, headers=AUTH)
     assert client.get("/docs").status_code == 404
