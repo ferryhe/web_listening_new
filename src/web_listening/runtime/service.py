@@ -24,6 +24,7 @@ from web_listening.request.site_batch import (
     validate_site_batch_request,
 )
 from web_listening.request.site_refresh import SiteRefreshRequest
+from web_listening.request.url_fetch import UrlFetchRequest, url_fetch_request_from_json
 from web_listening.request.validate import compile_access_policy
 from web_listening.result.errors import SafeError
 from web_listening.result.handoff import AcquisitionHandoff
@@ -37,11 +38,13 @@ from web_listening.runtime.jobs import (
     JobStateError,
     JobStatus,
     SiteBatch,
+    UrlFetchJob,
     canonical_request_facts,
 )
 from web_listening.runtime.site_batch import run_site_batch
 from web_listening.runtime.site_explore import run_site_explore
 from web_listening.runtime.site_refresh import run_site_refresh
+from web_listening.runtime.url_fetch import run_url_fetch
 from web_listening.runtime.workflow import (
     cancellation_check,
     cancelled_result,
@@ -57,6 +60,10 @@ from web_listening.tool_registry.discovery.builtins.html_links import (
     HTML_LINKS_MANIFEST,
     HtmlFileLinksDiscoveryTool,
     HtmlLinksDiscoveryTool,
+)
+from web_listening.tool_registry.discovery.builtins.html_navigation import (
+    HTML_NAVIGATION_MANIFEST,
+    HtmlNavigationDiscoveryTool,
 )
 from web_listening.tool_registry.discovery.builtins.rss import (
     RSS_MANIFEST,
@@ -119,6 +126,7 @@ class RuntimeService:
             registry.register(HTML_FILE_LINKS_MANIFEST, file_discovery)
             discovery = HtmlLinksDiscoveryTool()
             registry.register(HTML_LINKS_MANIFEST, discovery)
+            registry.register(HTML_NAVIGATION_MANIFEST, HtmlNavigationDiscoveryTool())
             registry.register(RSS_MANIFEST, RssDiscoveryTool())
             registry.register(SITEMAP_MANIFEST, SitemapDiscoveryTool())
             lifecycle = ToolLifecycle(root)
@@ -256,6 +264,85 @@ class RuntimeService:
             at=self._clock(),
             execution_request=admitted,
         )
+
+    def fetch_url(
+        self, request: UrlFetchRequest, *, caller_id: str, idempotency_key: str
+    ) -> UrlFetchJob:
+        """Durably submit one strict URL fetch for the persistent worker."""
+        self._ensure_open()
+        canonical = UrlFetchRequest.from_dict(request.to_dict())
+        admitted = replace(
+            canonical,
+            budgets=_admit(canonical.compile(), self._admission_maxima).budgets,
+        )
+        return self._jobs.submit_url_fetch(
+            self._job_id_factory(),
+            canonical,
+            caller_id=caller_id,
+            idempotency_key=idempotency_key,
+            at=self._clock(),
+            execution_request=admitted,
+        )
+
+    def get_url_fetch(self, job_id: str) -> UrlFetchJob:
+        """Return one persisted URL-fetch snapshot."""
+        self._ensure_open()
+        return self._jobs.get_url_fetch(job_id)
+
+    def get_owned_url_fetch(self, job_id: str, caller_id: str) -> UrlFetchJob:
+        """Read a URL fetch only for its exact caller owner."""
+        job = self.get_url_fetch(job_id)
+        if job.caller_id != caller_id:
+            raise JobStateError("url_fetch.not_found")
+        return job
+
+    def cancel_url_fetch(self, job_id: str) -> UrlFetchJob:
+        """Request cancellation at the next hop boundary."""
+        return self._jobs.cancel_url_fetch(job_id, at=self._clock())
+
+    def cancel_owned_url_fetch(self, job_id: str, caller_id: str) -> UrlFetchJob:
+        """Cancel a caller-owned URL fetch without disclosing others."""
+        self.get_owned_url_fetch(job_id, caller_id)
+        return self.cancel_url_fetch(job_id)
+
+    def execute_submitted_url_fetch(self, job_id: str) -> UrlFetchJob:
+        """Resume one claimed URL fetch from its durable hop prefix."""
+        job = self._jobs.get_url_fetch(job_id)
+        if job.status is not JobStatus.RUNNING or not job.execution_request_json:
+            raise JobStateError("url_fetch.not_claimed")
+        request = url_fetch_request_from_json(job.execution_request_json)
+        prior = self._jobs.url_fetch_checkpoints(job_id)
+        prior_discovery = self._jobs.url_fetch_discovery_checkpoints(job_id)
+        try:
+            result = run_url_fetch(
+                request,
+                self._registry,
+                self._artifact_store,
+                run_id=job_id,
+                clock=self._clock,
+                completed_results=prior,
+                completed_discovery=prior_discovery,
+                checkpoint=lambda order, item: self._jobs.checkpoint_url_fetch(
+                    job_id, order, item
+                ),
+                checkpoint_discovery=lambda order, item: (
+                    self._jobs.checkpoint_url_fetch_discovery(job_id, order, item)
+                ),
+                should_cancel=lambda: self._jobs.get_url_fetch(
+                    job_id
+                ).cancel_requested_at
+                is not None,
+            )
+            return self._jobs.finish_url_fetch(
+                job_id,
+                at=self._clock(),
+                result=result,
+                failure_code=(result.errors[0].code if result.errors else None),
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            return self._jobs.finish_url_fetch(
+                job_id, at=self._clock(), failure_code="runtime.workflow_failed"
+            )
 
     def get_batch(self, batch_id: str) -> SiteBatch:
         """Return one persisted batch snapshot."""

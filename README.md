@@ -601,6 +601,14 @@ CLI and MCP submission is durable but does not start an ungoverned background
 process; the persistent `web-listening-server` worker polls the existing durable
 queue at a small bounded interval and executes queued work.
 
+Smart URL Fetch uses `fetch-url`, `url-fetch-get`, and `url-fetch-cancel` with
+the same persistent worker. `fetch-url URL --budgets budgets.json` authorizes
+only the canonical seed origin and `/**`, permits HTML and FILE, and does not
+activate a Site Skill. HTML navigation is bounded (three hops by default) and
+may be disabled with `--no-follow-html-navigation`; type resolution uses only
+the governed final response MIME. `--save-content` reads a completed terminal
+source Artifact through Runtime's public Artifact API.
+
 `--site-skill` is optional and accepts a separate Site Skill JSON file. When it
 is supplied, that Site Skill overrides any `site_skill` embedded in the Request.
 
@@ -618,6 +626,9 @@ POST /v1/site-refreshes
 POST /v1/site-batches
 GET  /v1/site-batches/{batch_id}
 POST /v1/site-batches/{batch_id}/cancel
+POST /v1/url-fetches
+GET  /v1/url-fetches/{job_id}
+POST /v1/url-fetches/{job_id}/cancel
 ```
 
 Except for unauthenticated `/health` and `/ready`, REST requires

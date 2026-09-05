@@ -1347,6 +1347,7 @@ def test_open_registers_builtin_discovery_for_site_workflows(tmp_path: Path) -> 
     assert [(item.tool_id, item.version) for item in discovery] == [
         ("discovery.html_file_links", "1.0.0"),
         ("discovery.html_links", "1.0.0"),
+        ("discovery.html_navigation", "1.0.0"),
         ("discovery.rss", "1.0.0"),
         ("discovery.sitemap", "1.0.0"),
     ]

@@ -2,6 +2,7 @@
 
 # pylint: disable=consider-using-from-import,missing-function-docstring
 # pylint: disable=use-implicit-booleaness-not-comparison
+# pylint: disable=too-many-lines,protected-access
 
 from __future__ import annotations
 
@@ -36,8 +37,9 @@ from web_listening.result.site_refresh import (
     SiteChange,
     SiteRefreshResult,
 )
+from web_listening.result.url_fetch import ResolutionKind, UrlFetchResult
 from web_listening.runtime.handoff import HandoffError
-from web_listening.runtime.jobs import Job, JobStateError, JobStatus
+from web_listening.runtime.jobs import Job, JobStateError, JobStatus, UrlFetchJob
 from web_listening.site_skill.model import (
     DiscoveryRecipe,
     SiteSkill,
@@ -68,6 +70,31 @@ def _job() -> Job:
         started_at="2026-08-26T12:00:00Z",
         finished_at="2026-08-26T12:00:01Z",
         result=_result(),
+    )
+
+
+def _url_fetch_job(status: JobStatus = JobStatus.COMPLETED) -> UrlFetchJob:
+    target = _result()
+    source = next(item for item in target.artifacts if item.role == "source")
+    result = UrlFetchResult(
+        target.status,
+        target.manifest.requested_url,
+        target.manifest.final_url,
+        "html",
+        ResolutionKind.DIRECT_HTML,
+        source,
+        (),
+        target,
+        (),
+        target.usage,
+        "terminal_html",
+        target.errors,
+    )
+    return UrlFetchJob(
+        "url-fetch-one",
+        status,
+        "2026-08-26T12:00:00Z",
+        result=result if status is JobStatus.COMPLETED else None,
     )
 
 
@@ -294,6 +321,12 @@ class FakeRuntime:
             raise self.get_error
         return _job()
 
+    def get_url_fetch(self, job_id: str) -> UrlFetchJob:
+        self.job_ids.append(job_id)
+        if self.get_error is not None:
+            raise self.get_error
+        return _url_fetch_job()
+
     def get_handoff(self, job_id: str) -> AcquisitionHandoff:
         self.job_ids.append(job_id)
         if self.handoff_error is not None:
@@ -339,6 +372,47 @@ def _fake_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 def _write_json(path: Path, payload: object) -> Path:
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
+
+
+def test_url_fetch_get_save_content_uses_runtime_read(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    destination = tmp_path / "saved.bin"
+    assert (
+        cli.main(
+            [
+                "url-fetch-get",
+                "url-fetch-one",
+                "--output",
+                str(tmp_path / "data"),
+                "--save-content",
+                str(destination),
+                "--json",
+            ]
+        )
+        == cli.EXIT_SUCCESS
+    )
+    assert destination.read_bytes() == b"\x00phase-9\xff"
+    runtime = FakeRuntime.instances[0]
+    assert runtime.artifact_ids == [
+        _url_fetch_job().result.terminal_artifact.artifact_id
+    ]
+    assert json.loads(capsys.readouterr().out)["status"] == "completed"
+
+
+def test_url_fetch_save_rejects_nonterminal_or_missing_artifact(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    with pytest.raises(RuntimeError, match="url_fetch.content_unavailable"):
+        cli._save_url_fetch_content(
+            runtime, _url_fetch_job(JobStatus.SUBMITTED), tmp_path / "never"
+        )
+
+
+def test_url_fetch_wait_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = FakeRuntime()
+    monkeypatch.setattr(cli.time, "monotonic", lambda: 1.0)
+    with pytest.raises(RuntimeError, match="url_fetch.not_terminal"):
+        cli._wait_url_fetch(runtime, _url_fetch_job(JobStatus.SUBMITTED), 0)
 
 
 def test_help_lists_the_six_public_commands(

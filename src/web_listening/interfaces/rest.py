@@ -22,10 +22,17 @@ from web_listening.artifact.model import ArtifactStoreError, StoredArtifact
 from web_listening.request.model import RequestValidationError
 from web_listening.request.site_batch import site_batch_request_from_json
 from web_listening.request.site_refresh import site_refresh_request_from_json
+from web_listening.request.url_fetch import url_fetch_request_from_json
 from web_listening.request.validate import request_from_json
 from web_listening.result.errors import SafeError
 from web_listening.runtime.handoff import HandoffError
-from web_listening.runtime.jobs import Job, JobStateError, JobStatus, SiteBatch
+from web_listening.runtime.jobs import (
+    Job,
+    JobStateError,
+    JobStatus,
+    SiteBatch,
+    UrlFetchJob,
+)
 from web_listening.runtime.service import RuntimeService
 from web_listening.site_skill.model import SiteSkillError
 from web_listening.site_skill.validate import site_skill_from_mapping
@@ -73,6 +80,19 @@ def _batch_payload(batch: SiteBatch) -> dict[str, object]:
     }
 
 
+def _url_fetch_payload(job: UrlFetchJob) -> dict[str, object]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status.value,
+        "submitted_at": job.submitted_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "cancel_requested_at": job.cancel_requested_at,
+        "result": None if job.result is None else job.result.to_dict(),
+        "failure_code": job.failure_code,
+    }
+
+
 def _artifact_payload(artifact: StoredArtifact) -> dict[str, object]:
     return {
         "artifact_id": artifact.artifact_id,
@@ -94,7 +114,11 @@ def _error(status: int, code: str, message: str, **headers: str) -> JSONResponse
 
 def _runtime_error(exc: Exception) -> JSONResponse:
     code = getattr(exc, "code", "runtime.failed")
-    if isinstance(exc, JobStateError) and code in {"job.not_found", "batch.not_found"}:
+    if isinstance(exc, JobStateError) and code in {
+        "job.not_found",
+        "batch.not_found",
+        "url_fetch.not_found",
+    }:
         return _error(404, code, "Resource was not found.")
     if isinstance(exc, ArtifactStoreError) and code == "artifact.not_found":
         return _error(404, code, "Resource was not found.")
@@ -204,6 +228,74 @@ def create_app(
                 except Exception:
                     pass
             return JSONResponse(status_code=202, content=_batch_payload(batch))
+        except Exception as exc:
+            return _runtime_error(exc)
+
+    @app.post("/v1/url-fetches")
+    async def submit_url_fetch(http_request: HttpRequest) -> JSONResponse:
+        identity = caller(http_request)
+        if isinstance(identity, JSONResponse):
+            return identity
+        key = http_request.headers.get("idempotency-key")
+        if key is None:
+            return _error(422, "idempotency.required", "Idempotency-Key is required.")
+        try:
+            request = url_fetch_request_from_json(
+                (await http_request.body()).decode("utf-8")
+            )
+        except UnicodeDecodeError:
+            return _error(422, "url_fetch.invalid_json", "Request is invalid.")
+        except RequestValidationError as exc:
+            return _error(422, exc.code, "Request is invalid.")
+        try:
+            job = runtime_provider().fetch_url(
+                request, caller_id=identity, idempotency_key=key
+            )
+            if wake is not None:
+                try:
+                    wake()
+                except Exception:
+                    pass
+            return JSONResponse(status_code=202, content=_url_fetch_payload(job))
+        except Exception as exc:
+            return _runtime_error(exc)
+
+    @app.get("/v1/url-fetches/{job_id}")
+    def get_url_fetch(job_id: str, http_request: HttpRequest) -> JSONResponse:
+        identity = caller(http_request)
+        if isinstance(identity, JSONResponse):
+            return identity
+        try:
+            return JSONResponse(
+                status_code=200,
+                content=_url_fetch_payload(
+                    runtime_provider().get_owned_url_fetch(job_id, identity)
+                ),
+            )
+        except Exception as exc:
+            return _runtime_error(exc)
+
+    @app.post("/v1/url-fetches/{job_id}/cancel")
+    def cancel_url_fetch(job_id: str, http_request: HttpRequest) -> JSONResponse:
+        identity = caller(http_request)
+        if isinstance(identity, JSONResponse):
+            return identity
+        try:
+            job = runtime_provider().cancel_owned_url_fetch(job_id, identity)
+            return JSONResponse(
+                status_code=(
+                    200
+                    if job.status
+                    in {
+                        JobStatus.COMPLETED,
+                        JobStatus.PARTIAL,
+                        JobStatus.FAILED,
+                        JobStatus.REJECTED,
+                    }
+                    else 202
+                ),
+                content=_url_fetch_payload(job),
+            )
         except Exception as exc:
             return _runtime_error(exc)
 

@@ -1,6 +1,6 @@
 """Thin command-line adapter over the public Runtime service."""
 
-# pylint: disable=too-many-branches
+# pylint: disable=too-many-branches,too-many-statements
 
 from __future__ import annotations
 
@@ -8,16 +8,19 @@ import argparse
 import base64
 import json
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
 from web_listening.artifact.model import StoredArtifact
+from web_listening.request.budgets import budgets_from_mapping
 from web_listening.request.model import Request, RequestValidationError
 from web_listening.request.site_batch import site_batch_request_from_json
 from web_listening.request.site_refresh import site_refresh_request_from_json
+from web_listening.request.url_fetch import UrlFetchRequest
 from web_listening.request.validate import request_from_json
-from web_listening.runtime.jobs import Job, SiteBatch
+from web_listening.runtime.jobs import Job, JobStatus, SiteBatch, UrlFetchJob
 from web_listening.runtime.service import RuntimeService
 from web_listening.site_skill.model import SiteSkillError
 from web_listening.site_skill.validate import site_skill_from_mapping
@@ -99,6 +102,28 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("batch_id")
         command.add_argument("--output", required=True, type=Path)
         command.add_argument("--json", action="store_true", help="Emit JSON.")
+    fetch_url = commands.add_parser(
+        "fetch-url", help="Submit a governed same-origin Smart URL Fetch."
+    )
+    fetch_url.add_argument("url")
+    fetch_url.add_argument("--budgets", required=True, type=Path)
+    fetch_url.add_argument("--explore-all-tools", action="store_true")
+    fetch_url.add_argument("--max-navigation-hops", type=int, default=3)
+    fetch_url.add_argument("--no-follow-html-navigation", action="store_true")
+    fetch_url.add_argument("--caller-id", default="local-cli")
+    fetch_url.add_argument("--idempotency-key", required=True)
+    fetch_url.add_argument("--save-content", type=Path)
+    fetch_url.add_argument("--output", required=True, type=Path)
+    fetch_url.add_argument("--json", action="store_true", help="Emit JSON.")
+    for name in ("url-fetch-get", "url-fetch-cancel"):
+        command = commands.add_parser(
+            name, help=f"{name.rsplit('-', maxsplit=1)[-1].title()} a URL fetch."
+        )
+        command.add_argument("job_id")
+        command.add_argument("--output", required=True, type=Path)
+        command.add_argument("--json", action="store_true", help="Emit JSON.")
+        if name == "url-fetch-get":
+            command.add_argument("--save-content", type=Path)
     return parser
 
 
@@ -168,6 +193,51 @@ def _batch_payload(batch: SiteBatch) -> dict[str, object]:
         "result": None if batch.result is None else batch.result.to_dict(),
         "failure_code": batch.failure_code,
     }
+
+
+def _url_fetch_payload(job: UrlFetchJob) -> dict[str, object]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status.value,
+        "submitted_at": job.submitted_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "cancel_requested_at": job.cancel_requested_at,
+        "result": None if job.result is None else job.result.to_dict(),
+        "failure_code": job.failure_code,
+    }
+
+
+def _save_url_fetch_content(
+    runtime: RuntimeService, job: UrlFetchJob, destination: Path
+) -> None:
+    if (
+        job.status
+        not in {
+            JobStatus.COMPLETED,
+            JobStatus.PARTIAL,
+            JobStatus.REJECTED,
+            JobStatus.FAILED,
+        }
+        or job.result is None
+        or job.result.terminal_artifact is None
+    ):
+        raise RuntimeError("url_fetch.content_unavailable")
+    destination.write_bytes(
+        runtime.read_artifact(job.result.terminal_artifact.artifact_id).content
+    )
+
+
+def _wait_url_fetch(
+    runtime: RuntimeService, job: UrlFetchJob, timeout_seconds: int
+) -> UrlFetchJob:
+    deadline = time.monotonic() + timeout_seconds
+    while job.status in {JobStatus.SUBMITTED, JobStatus.RUNNING}:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("url_fetch.not_terminal")
+        time.sleep(0.05)
+        job = runtime.get_url_fetch(job.job_id)
+    return job
 
 
 def _artifact_payload(artifact: StoredArtifact) -> dict[str, object]:
@@ -257,6 +327,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = _run_with_runtime(
                 args.output,
                 lambda runtime: _batch_payload(runtime.cancel_batch(args.batch_id)),
+            )
+        elif args.command == "fetch-url":
+            budgets = budgets_from_mapping(_load_json(args.budgets))
+            request = UrlFetchRequest(
+                args.url,
+                args.explore_all_tools,
+                not args.no_follow_html_navigation,
+                args.max_navigation_hops,
+                budgets,
+            )
+
+            def submit_url(runtime):
+                job = runtime.fetch_url(
+                    request,
+                    caller_id=args.caller_id,
+                    idempotency_key=args.idempotency_key,
+                )
+                if args.save_content is not None:
+                    job = _wait_url_fetch(
+                        runtime, job, request.budgets.max_runtime_seconds
+                    )
+                    _save_url_fetch_content(runtime, job, args.save_content)
+                return _url_fetch_payload(job)
+
+            payload = _run_with_runtime(args.output, submit_url)
+        elif args.command == "url-fetch-get":
+
+            def get_url(runtime):
+                job = runtime.get_url_fetch(args.job_id)
+                if args.save_content is not None:
+                    _save_url_fetch_content(runtime, job, args.save_content)
+                return _url_fetch_payload(job)
+
+            payload = _run_with_runtime(args.output, get_url)
+        elif args.command == "url-fetch-cancel":
+            payload = _run_with_runtime(
+                args.output,
+                lambda runtime: _url_fetch_payload(
+                    runtime.cancel_url_fetch(args.job_id)
+                ),
             )
         else:
             payload = _run_with_runtime(

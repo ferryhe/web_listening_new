@@ -53,6 +53,7 @@ class AcquisitionService:
         self._futures: set[Future[None]] = set()
         self._active_job_ids: set[str] = set()
         self._active_batch_ids: set[str] = set()
+        self._active_url_fetch_ids: set[str] = set()
         self._worker_count = 0
         self._wake_generation = 0
         self._claim_failed = False
@@ -60,6 +61,8 @@ class AcquisitionService:
         self._jobs.reconcile(at=self._clock())
         if hasattr(self._jobs, "reconcile_batches"):
             self._jobs.reconcile_batches()
+        if hasattr(self._jobs, "reconcile_url_fetches"):
+            self._jobs.reconcile_url_fetches()
 
     def wake(self) -> None:
         """Use available capacity to process durable submitted work."""
@@ -98,6 +101,7 @@ class AcquisitionService:
             self._poll_event.set()
             active = tuple(self._active_job_ids)
             active_batches = tuple(self._active_batch_ids)
+            active_url_fetches = tuple(self._active_url_fetch_ids)
         for job_id in active:
             try:
                 self._runtime.cancel(job_id)
@@ -106,6 +110,11 @@ class AcquisitionService:
         for batch_id in active_batches:
             try:
                 self._runtime.cancel_batch(batch_id)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+        for job_id in active_url_fetches:
+            try:
+                self._runtime.cancel_url_fetch(job_id)
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
         self._executor.shutdown(wait=True)
@@ -144,6 +153,22 @@ class AcquisitionService:
                     self._worker_count -= 1
                 return
             if claim is None:
+                url_claim = (
+                    self._jobs.claim_next_url_fetch(at=now)
+                    if hasattr(self._jobs, "claim_next_url_fetch")
+                    else None
+                )
+                if url_claim is not None:
+                    with self._lock:
+                        self._active_url_fetch_ids.add(url_claim.job.job_id)
+                    try:
+                        self._runtime.execute_submitted_url_fetch(url_claim.job.job_id)
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        pass
+                    finally:
+                        with self._lock:
+                            self._active_url_fetch_ids.discard(url_claim.job.job_id)
+                    continue
                 batch_claim = (
                     self._jobs.claim_next_batch(at=now)
                     if hasattr(self._jobs, "claim_next_batch")
