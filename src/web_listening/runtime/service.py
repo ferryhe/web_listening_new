@@ -298,6 +298,7 @@ class RuntimeService:
 
     def cancel_url_fetch(self, job_id: str) -> UrlFetchJob:
         """Request cancellation at the next hop boundary."""
+        self._ensure_open()
         return self._jobs.cancel_url_fetch(job_id, at=self._clock())
 
     def cancel_owned_url_fetch(self, job_id: str, caller_id: str) -> UrlFetchJob:

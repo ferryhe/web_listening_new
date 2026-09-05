@@ -1368,6 +1368,7 @@ def test_close_is_idempotent_guards_operations_and_does_not_close_injections(
         lambda: service.explore_site(_request(None)),
         lambda: service.refresh_site(object()),  # type: ignore[arg-type]
         lambda: service.get_job("job-one"),
+        lambda: service.cancel_url_fetch("job-one"),
         lambda: service.read_artifact("artifact-one"),
     ):
         with pytest.raises(RuntimeError, match="^runtime.closed$"):
