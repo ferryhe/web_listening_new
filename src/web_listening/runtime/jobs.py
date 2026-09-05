@@ -354,18 +354,38 @@ class JobRepository:
                 )
                 self._batches[batch.batch_id] = batch
             else:
-                row = self._connection.execute(
-                    "SELECT batch_id FROM site_batches WHERE status='submitted' "
-                    "ORDER BY submitted_at,batch_id LIMIT 1"
-                ).fetchone()
-                if row is None:
-                    return None
-                self._connection.execute(
-                    "UPDATE site_batches SET status='running',started_at=COALESCE(started_at,?) "
-                    "WHERE batch_id=? AND status='submitted'",
-                    (timestamp, row["batch_id"]),
-                )
-                batch = self._batch_from_database(row["batch_id"])
+                try:
+                    self._connection.execute("BEGIN IMMEDIATE")
+                    row = self._connection.execute(
+                        "SELECT batch_id FROM site_batches WHERE status='submitted' "
+                        "ORDER BY submitted_at,batch_id LIMIT 1"
+                    ).fetchone()
+                    if row is None:
+                        self._connection.execute("COMMIT")
+                        return None
+                    updated = self._connection.execute(
+                        "UPDATE site_batches SET status='running',"
+                        "started_at=COALESCE(started_at,?) "
+                        "WHERE batch_id=? AND status='submitted'",
+                        (timestamp, row["batch_id"]),
+                    )
+                    if updated.rowcount != 1:
+                        raise JobStateError("batch.claim_failed")
+                    batch = self._batch_from_database(row["batch_id"])
+                    if batch.status is not JobStatus.RUNNING:
+                        raise JobStateError("batch.claim_failed")
+                    assert batch.execution_request_json is not None
+                    try:
+                        request = site_batch_request_from_json(
+                            batch.execution_request_json
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise JobStateError("batch.persisted_invalid") from exc
+                    self._connection.execute("COMMIT")
+                    return SiteBatchClaim(batch, request)
+                except BaseException:
+                    self._rollback()
+                    raise
             assert batch.execution_request_json is not None
             try:
                 request = site_batch_request_from_json(batch.execution_request_json)
@@ -388,28 +408,83 @@ class JobRepository:
         identifier = _validate_job_id(batch_id)
         payload = json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":"))
         with self._lock:
-            current = self.get_batch(identifier)
-            children = tuple(
-                replace(
-                    item,
-                    status=result.status.value if item.order == order else item.status,
-                )
-                for item in current.children
-            )
             if self._connection is None:
+                current = self.get_batch(identifier)
+                existing = self._batch_results.get(identifier, ())
+                if (
+                    current.status is not JobStatus.RUNNING
+                    or order != len(existing) + 1
+                    or order > len(current.children)
+                ):
+                    raise JobStateError("batch.checkpoint_order_invalid")
+                children = tuple(
+                    replace(
+                        item,
+                        status=(
+                            result.status.value if item.order == order else item.status
+                        ),
+                    )
+                    for item in current.children
+                )
                 updated = replace(current, children=children)
                 self._batches[identifier] = updated
-                existing = self._batch_results.get(identifier, ())
-                if order != len(existing) + 1:
-                    raise JobStateError("batch.checkpoint_order_invalid")
                 self._batch_results[identifier] = (*existing, result)
                 return updated
-            self._connection.execute(
-                "UPDATE site_batch_children SET status=?,result_json=? "
-                "WHERE batch_id=? AND child_order=?",
-                (result.status.value, payload, identifier, order),
-            )
-            return self._batch_from_database(identifier)
+            try:
+                assert self._connection is not None
+                self._connection.execute("BEGIN IMMEDIATE")
+                current = self._batch_from_database(identifier)
+                if current.status is not JobStatus.RUNNING:
+                    raise JobStateError("batch.checkpoint_order_invalid")
+                request = self.claimed_batch_request(identifier)
+                rows = self._connection.execute(
+                    "SELECT child_order,result_json FROM site_batch_children "
+                    "WHERE batch_id=? ORDER BY child_order",
+                    (identifier,),
+                ).fetchall()
+                prefix = 0
+                empty_seen = False
+                for row in rows:
+                    if row["result_json"] is None:
+                        empty_seen = True
+                    elif empty_seen:
+                        raise JobStateError("batch.checkpoint_order_invalid")
+                    else:
+                        try:
+                            site_batch_child_result_from_mapping(
+                                request.phase, json.loads(row["result_json"])
+                            )
+                        except (TypeError, ValueError) as exc:
+                            raise JobStateError(
+                                "batch.checkpoint_order_invalid"
+                            ) from exc
+                        prefix += 1
+                if order != prefix + 1 or order > len(rows):
+                    raise JobStateError("batch.checkpoint_order_invalid")
+                updated = self._connection.execute(
+                    "UPDATE site_batch_children SET status=?,result_json=? "
+                    "WHERE batch_id=? AND child_order=? AND result_json IS NULL",
+                    (result.status.value, payload, identifier, order),
+                )
+                if updated.rowcount != 1:
+                    raise JobStateError("batch.checkpoint_order_invalid")
+                persisted = self._batch_from_database(identifier)
+                row = self._connection.execute(
+                    "SELECT status,result_json FROM site_batch_children "
+                    "WHERE batch_id=? AND child_order=?",
+                    (identifier, order),
+                ).fetchone()
+                if (
+                    row is None
+                    or row["status"] != result.status.value
+                    or row["result_json"] != payload
+                ):
+                    raise JobStateError("batch.checkpoint_order_invalid")
+                self._connection.execute("COMMIT")
+                return persisted
+            except BaseException:
+                self._rollback()
+                raise
 
     def batch_checkpoint_results(self, batch_id: str) -> tuple[object, ...]:
         """Return the valid contiguous completed child prefix."""
