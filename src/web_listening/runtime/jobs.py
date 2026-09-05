@@ -3,7 +3,7 @@
 # pylint: disable=duplicate-code,too-many-arguments,too-many-boolean-expressions
 # pylint: disable=too-many-lines
 # pylint: disable=too-many-instance-attributes,too-many-locals
-# pylint: disable=unidiomatic-typecheck
+# pylint: disable=unidiomatic-typecheck,too-many-public-methods
 
 from __future__ import annotations
 
@@ -25,6 +25,11 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 
 from web_listening.artifact.lineage import validate_artifact_id
 from web_listening.request.model import Request
+from web_listening.request.site_batch import (
+    SiteBatchRequest,
+    site_batch_request_from_json,
+    validate_site_batch_request,
+)
 from web_listening.request.validate import request_from_mapping, validate_request
 from web_listening.result.errors import (
     ResultValidationError,
@@ -35,6 +40,11 @@ from web_listening.result.errors import (
     validate_utc_time,
 )
 from web_listening.result.model import Result
+from web_listening.result.site_batch import SiteBatchResult
+from web_listening.runtime.site_batch import (
+    site_batch_child_result_from_mapping,
+    site_batch_result_from_mapping,
+)
 from web_listening.site_skill.model import SiteSkill, SiteSkillError
 from web_listening.site_skill.validate import (
     site_skill_from_mapping,
@@ -139,6 +149,43 @@ class JobEvent:
     at: str
 
 
+@dataclass(frozen=True, slots=True)
+class BatchChild:
+    """One stable ordered child checkpoint exposed with its parent."""
+
+    site_key: str
+    order: int
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class SiteBatch:
+    """One caller-owned durable multi-site execution snapshot."""
+
+    batch_id: str
+    status: JobStatus
+    submitted_at: str
+    children: tuple[BatchChild, ...]
+    started_at: str | None = None
+    finished_at: str | None = None
+    cancel_requested_at: str | None = None
+    result: SiteBatchResult | None = None
+    failure_code: str | None = None
+    caller_id: str | None = None
+    idempotency_key: str | None = None
+    request_json: str | None = None
+    request_fingerprint: str | None = None
+    execution_request_json: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SiteBatchClaim:
+    """Claimed batch and its revalidated persisted request."""
+
+    batch: SiteBatch
+    request: SiteBatchRequest
+
+
 class JobRepository:
     """Own legal Job state transitions and immutable readback only."""
 
@@ -146,6 +193,8 @@ class JobRepository:
         self._jobs: dict[str, Job] = {}
         self._events: dict[str, list[JobEvent]] = {}
         self._artifact_grants: set[tuple[str, str]] = set()
+        self._batches: dict[str, SiteBatch] = {}
+        self._batch_results: dict[str, tuple[object, ...]] = {}
         self._lock = threading.RLock()
         self._closed = False
         self._connection: sqlite3.Connection | None = None
@@ -173,6 +222,343 @@ class JobRepository:
             connection.close()
             raise
         self._connection = connection
+
+    def submit_batch(
+        self,
+        batch_id: str,
+        request: SiteBatchRequest,
+        *,
+        caller_id: str,
+        idempotency_key: str,
+        at: str,
+        execution_request: SiteBatchRequest | None = None,
+    ) -> SiteBatch:
+        """Atomically persist a strict batch parent and ordered children."""
+        identifier = _validate_job_id(batch_id)
+        timestamp = _validate_time(at)
+        caller = _validate_boundary_text(caller_id, "caller.invalid", 256)
+        key = _validate_idempotency_key(idempotency_key)
+        canonical = validate_site_batch_request(request)
+        request_json = canonical.canonical_json_bytes().decode("utf-8")
+        fingerprint = canonical.request_sha256
+        execution = validate_site_batch_request(execution_request or canonical)
+        execution_json = execution.canonical_json_bytes().decode("utf-8")
+        children = tuple(
+            BatchChild(site_key, order, "submitted")
+            for order, site_key in enumerate(canonical.site_keys, start=1)
+        )
+        batch = SiteBatch(
+            identifier,
+            JobStatus.SUBMITTED,
+            timestamp,
+            children,
+            caller_id=caller,
+            idempotency_key=key,
+            request_json=request_json,
+            request_fingerprint=fingerprint,
+            execution_request_json=execution_json,
+        )
+        with self._lock:
+            self._ensure_open()
+            if self._connection is None:
+                existing = next(
+                    (
+                        item
+                        for item in self._batches.values()
+                        if item.caller_id == caller and item.idempotency_key == key
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if existing.request_fingerprint != fingerprint:
+                        raise JobStateError("idempotency.conflict")
+                    return existing
+                self._batches[identifier] = batch
+                return batch
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT batch_id,request_fingerprint FROM site_batches "
+                    "WHERE caller_id=? AND idempotency_key=?",
+                    (caller, key),
+                ).fetchone()
+                if row is not None:
+                    if row["request_fingerprint"] != fingerprint:
+                        raise JobStateError("idempotency.conflict")
+                    result = self._batch_from_database(row["batch_id"])
+                    self._connection.execute("COMMIT")
+                    return result
+                self._connection.execute(
+                    "INSERT INTO site_batches "
+                    "(batch_id,status,submitted_at,caller_id,idempotency_key,"
+                    "request_json,request_fingerprint,execution_request_json) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        identifier,
+                        "submitted",
+                        timestamp,
+                        caller,
+                        key,
+                        request_json,
+                        fingerprint,
+                        execution_json,
+                    ),
+                )
+                self._connection.executemany(
+                    "INSERT INTO site_batch_children "
+                    "(batch_id,child_order,site_key,status) VALUES (?,?,?,?)",
+                    (
+                        (identifier, item.order, item.site_key, item.status)
+                        for item in children
+                    ),
+                )
+                result = self._batch_from_database(identifier)
+                self._connection.execute("COMMIT")
+                return result
+            except BaseException:
+                self._rollback()
+                raise
+
+    def get_batch(self, batch_id: str) -> SiteBatch:
+        """Read one batch snapshot and its ordered children."""
+        identifier = _validate_job_id(batch_id)
+        with self._lock:
+            self._ensure_open()
+            if self._connection is None:
+                try:
+                    return self._batches[identifier]
+                except KeyError as exc:
+                    raise JobStateError("batch.not_found") from exc
+            return self._batch_from_database(identifier)
+
+    def claim_next_batch(self, *, at: str) -> SiteBatchClaim | None:
+        """Claim the oldest queued batch; checkpoints make claims resumable."""
+        timestamp = _validate_time(at)
+        with self._lock:
+            self._ensure_open()
+            if self._connection is None:
+                queued = sorted(
+                    (
+                        item
+                        for item in self._batches.values()
+                        if item.status is JobStatus.SUBMITTED
+                    ),
+                    key=lambda item: (item.submitted_at, item.batch_id),
+                )
+                if not queued:
+                    return None
+                batch = replace(
+                    queued[0],
+                    status=JobStatus.RUNNING,
+                    started_at=queued[0].started_at or timestamp,
+                )
+                self._batches[batch.batch_id] = batch
+            else:
+                row = self._connection.execute(
+                    "SELECT batch_id FROM site_batches WHERE status='submitted' "
+                    "ORDER BY submitted_at,batch_id LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return None
+                self._connection.execute(
+                    "UPDATE site_batches SET status='running',started_at=COALESCE(started_at,?) "
+                    "WHERE batch_id=? AND status='submitted'",
+                    (timestamp, row["batch_id"]),
+                )
+                batch = self._batch_from_database(row["batch_id"])
+            assert batch.execution_request_json is not None
+            try:
+                request = site_batch_request_from_json(batch.execution_request_json)
+            except (TypeError, ValueError) as exc:
+                raise JobStateError("batch.persisted_invalid") from exc
+            return SiteBatchClaim(batch, request)
+
+    def claimed_batch_request(self, batch_id: str) -> SiteBatchRequest:
+        """Revalidate the request of one already claimed batch."""
+        batch = self.get_batch(batch_id)
+        if batch.execution_request_json is None:
+            raise JobStateError("batch.persisted_invalid")
+        try:
+            return site_batch_request_from_json(batch.execution_request_json)
+        except (TypeError, ValueError) as exc:
+            raise JobStateError("batch.persisted_invalid") from exc
+
+    def checkpoint_batch(self, batch_id: str, order: int, result: object) -> SiteBatch:
+        """Durably commit all completed child evidence before later I/O."""
+        identifier = _validate_job_id(batch_id)
+        payload = json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":"))
+        with self._lock:
+            current = self.get_batch(identifier)
+            children = tuple(
+                replace(
+                    item,
+                    status=result.status.value if item.order == order else item.status,
+                )
+                for item in current.children
+            )
+            if self._connection is None:
+                updated = replace(current, children=children)
+                self._batches[identifier] = updated
+                existing = self._batch_results.get(identifier, ())
+                if order != len(existing) + 1:
+                    raise JobStateError("batch.checkpoint_order_invalid")
+                self._batch_results[identifier] = (*existing, result)
+                return updated
+            self._connection.execute(
+                "UPDATE site_batch_children SET status=?,result_json=? "
+                "WHERE batch_id=? AND child_order=?",
+                (result.status.value, payload, identifier, order),
+            )
+            return self._batch_from_database(identifier)
+
+    def batch_checkpoint_results(self, batch_id: str) -> tuple[object, ...]:
+        """Return the valid contiguous completed child prefix."""
+        batch = self.get_batch(batch_id)
+        if self._connection is None:
+            return self._batch_results.get(batch.batch_id, ())
+        assert self._connection is not None
+        rows = self._connection.execute(
+            "SELECT result_json FROM site_batch_children WHERE batch_id=? "
+            "ORDER BY child_order",
+            (batch.batch_id,),
+        ).fetchall()
+        request = self.claimed_batch_request(batch_id)
+        results = []
+        for row in rows:
+            if row["result_json"] is None:
+                break
+            results.append(
+                site_batch_child_result_from_mapping(
+                    request.phase, json.loads(row["result_json"])
+                )
+            )
+        return tuple(results)
+
+    def finish_batch(
+        self,
+        batch_id: str,
+        *,
+        at: str,
+        failure_code: str | None = None,
+        result: SiteBatchResult | None = None,
+    ) -> SiteBatch:
+        """Terminalize a batch, preserving its latest durable checkpoint."""
+        identifier = _validate_job_id(batch_id)
+        timestamp = _validate_time(at)
+        with self._lock:
+            current = self.get_batch(identifier)
+            if current.status in _TERMINAL:
+                return current
+            terminal_result = result or current.result
+            status = (
+                JobStatus(terminal_result.status.value)
+                if terminal_result is not None
+                else JobStatus.FAILED
+            )
+            if self._connection is None:
+                updated = replace(
+                    current,
+                    status=status,
+                    finished_at=timestamp,
+                    failure_code=failure_code,
+                    result=terminal_result,
+                )
+                self._batches[identifier] = updated
+                return updated
+            self._connection.execute(
+                "UPDATE site_batches SET status=?,finished_at=?,failure_code=?,"
+                "result_json=? WHERE batch_id=?",
+                (
+                    status.value,
+                    timestamp,
+                    failure_code,
+                    (
+                        None
+                        if terminal_result is None
+                        else json.dumps(
+                            terminal_result.to_dict(),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    ),
+                    identifier,
+                ),
+            )
+            return self._batch_from_database(identifier)
+
+    def cancel_batch(self, batch_id: str, *, at: str) -> SiteBatch:
+        """Persist only the first batch cancellation timestamp."""
+        timestamp = _validate_time(at)
+        with self._lock:
+            current = self.get_batch(batch_id)
+            if current.status in _TERMINAL or current.cancel_requested_at is not None:
+                return current
+            if self._connection is None:
+                updated = replace(current, cancel_requested_at=timestamp)
+                self._batches[current.batch_id] = updated
+                return updated
+            self._connection.execute(
+                "UPDATE site_batches SET cancel_requested_at=? WHERE batch_id=? "
+                "AND cancel_requested_at IS NULL AND finished_at IS NULL",
+                (timestamp, current.batch_id),
+            )
+            return self._batch_from_database(current.batch_id)
+
+    def reconcile_batches(self) -> None:
+        """Return interrupted batches to the one queue at a safe child boundary."""
+        with self._lock:
+            self._ensure_open()
+            if self._connection is None:
+                self._batches = {
+                    key: (
+                        replace(value, status=JobStatus.SUBMITTED)
+                        if value.status is JobStatus.RUNNING
+                        else value
+                    )
+                    for key, value in self._batches.items()
+                }
+                return
+            self._connection.execute(
+                "UPDATE site_batches SET status='submitted' WHERE status='running'"
+            )
+
+    def _batch_from_database(self, batch_id: str) -> SiteBatch:
+        assert self._connection is not None
+        row = self._connection.execute(
+            "SELECT * FROM site_batches WHERE batch_id=?", (batch_id,)
+        ).fetchone()
+        if row is None:
+            raise JobStateError("batch.not_found")
+        child_rows = self._connection.execute(
+            "SELECT site_key,child_order,status FROM site_batch_children "
+            "WHERE batch_id=? ORDER BY child_order",
+            (batch_id,),
+        ).fetchall()
+        result = None
+        if row["result_json"] is not None:
+            try:
+                result = site_batch_result_from_mapping(json.loads(row["result_json"]))
+            except (TypeError, ValueError) as exc:
+                raise JobStateError("batch.persisted_invalid") from exc
+        return SiteBatch(
+            row["batch_id"],
+            JobStatus(row["status"]),
+            row["submitted_at"],
+            tuple(
+                BatchChild(item["site_key"], item["child_order"], item["status"])
+                for item in child_rows
+            ),
+            row["started_at"],
+            row["finished_at"],
+            row["cancel_requested_at"],
+            result,
+            row["failure_code"],
+            row["caller_id"],
+            row["idempotency_key"],
+            row["request_json"],
+            row["request_fingerprint"],
+            row["execution_request_json"],
+        )
 
     def close(self) -> None:
         """Close a persistent handle; repeated closes are harmless."""
@@ -763,6 +1149,31 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             artifact_id TEXT NOT NULL,
             PRIMARY KEY (job_id, artifact_id)
         );
+        CREATE TABLE IF NOT EXISTS site_batches (
+            batch_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            cancel_requested_at TEXT,
+            result_json TEXT,
+            failure_code TEXT,
+            caller_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL
+            ,execution_request_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS site_batch_children (
+            batch_id TEXT NOT NULL REFERENCES site_batches(batch_id),
+            child_order INTEGER NOT NULL,
+            site_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result_json TEXT,
+            PRIMARY KEY (batch_id, child_order)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS site_batches_idempotency
+        ON site_batches(caller_id,idempotency_key);
         """)
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
@@ -1296,11 +1707,14 @@ def _validate_persisted_requests(row: sqlite3.Row) -> None:
 
 
 __all__ = [
+    "BatchChild",
     "Job",
     "JobClaim",
     "JobEvent",
     "JobRepository",
     "JobStateError",
     "JobStatus",
+    "SiteBatch",
+    "SiteBatchClaim",
     "canonical_request_facts",
 ]

@@ -43,6 +43,7 @@ class ServerConfig:
     max_attempts: int = 4
     binary_cap_bytes: int = 100 * 1024 * 1024
     base64_cap_bytes: int = 1024 * 1024
+    worker_poll_interval_seconds: float = 0.25
 
     def __post_init__(self) -> None:
         if not 1 <= self.concurrency <= 32:
@@ -64,6 +65,8 @@ class ServerConfig:
             raise ValueError("server.admission_invalid")
         if self.binary_cap_bytes <= 0 or self.base64_cap_bytes <= 0:
             raise ValueError("server.cap_invalid")
+        if self.worker_poll_interval_seconds <= 0:
+            raise ValueError("worker.poll_interval_invalid")
 
 
 def write_token_file(path: Path, caller_id: str) -> str:
@@ -168,6 +171,7 @@ def build_app(config: ServerConfig) -> FastAPI:
             runtime.job_repository,
             concurrency=config.concurrency,
             clock=runtime.clock,
+            poll_interval_seconds=config.worker_poll_interval_seconds,
         )
         state.update(runtime=runtime, worker=worker, ready=True)
         worker.wake()
@@ -225,6 +229,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-attempts", type=int, default=4)
     parser.add_argument("--binary-cap-bytes", type=int, default=100 * 1024 * 1024)
     parser.add_argument("--base64-cap-bytes", type=int, default=1024 * 1024)
+    parser.add_argument(
+        "--worker-poll-interval",
+        type=float,
+        default=0.25,
+        dest="worker_poll_interval_seconds",
+    )
     return parser
 
 

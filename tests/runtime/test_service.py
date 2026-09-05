@@ -30,10 +30,12 @@ from web_listening.request.model import (
     RequestValidationError,
     Scope,
 )
+from web_listening.request.site_batch import SiteBatchPhase, SiteBatchRequest
 from web_listening.request.site_refresh import SiteRefreshRequest
 from web_listening.result.errors import ResultValidationError
 from web_listening.runtime.jobs import JobRepository, JobStateError, JobStatus
 from web_listening.runtime.service import RuntimeService
+from web_listening.runtime.site_batch import site_batch_result_from_mapping
 from web_listening.site_skill.model import (
     DiscoveryRecipe,
     SuccessChecks,
@@ -232,6 +234,77 @@ def _service(
         job_id_factory=lambda: next(identifiers),
     )
     return service, store, jobs
+
+
+def _batch_parent() -> Request:
+    return Request(
+        Scope(
+            ("https://example.test/report", "https://two.test/report"),
+            ("https://example.test", "https://two.test"),
+            ("/**",),
+            (ContentType.HTML,),
+        ),
+        None,
+        False,
+        Budgets(2, 2 * 1024 * 1024, 30, 1),
+    )
+
+
+def test_cancelled_submitted_batch_persists_strict_zero_io_result(
+    tmp_path: Path,
+) -> None:
+    transport = _Transport(_Response(200, BODY, content_type="text/html"))
+    service, store, jobs = _service(
+        tmp_path, WebHttpAcquisitionTool(lambda: transport, resolver=_resolver)
+    )
+    submitted = service.submit_batch(
+        SiteBatchRequest(SiteBatchPhase.FIRST, _batch_parent(), ()),
+        caller_id="caller",
+        idempotency_key="cancel-before",
+    )
+    service.cancel_batch(submitted.batch_id)
+    claim = jobs.claim_next_batch(at=NOW)
+    assert claim is not None
+    terminal = service.execute_submitted_batch(submitted.batch_id)
+    assert not transport.requests
+    assert terminal.result is not None
+    assert terminal.result.stop_reason == "cancelled"
+    assert site_batch_result_from_mapping(terminal.result.to_dict()) == terminal.result
+    assert service.get_batch(submitted.batch_id).result == terminal.result
+    store.close()
+
+
+def test_cancel_after_first_checkpoint_preserves_child_and_starts_no_second(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transport = _Transport(_Response(200, BODY, content_type="text/html"))
+    service, store, jobs = _service(
+        tmp_path, WebHttpAcquisitionTool(lambda: transport, resolver=_resolver)
+    )
+    submitted = service.submit_batch(
+        SiteBatchRequest(SiteBatchPhase.FIRST, _batch_parent(), ()),
+        caller_id="caller",
+        idempotency_key="cancel-after-first",
+    )
+    claim = jobs.claim_next_batch(at=NOW)
+    assert claim is not None
+    original = jobs.checkpoint_batch
+
+    def checkpoint(batch_id, order, result):
+        persisted = original(batch_id, order, result)
+        if order == 1:
+            service.cancel_batch(batch_id)
+        return persisted
+
+    monkeypatch.setattr(jobs, "checkpoint_batch", checkpoint)
+    terminal = service.execute_submitted_batch(submitted.batch_id)
+    assert terminal.result is not None
+    assert len(terminal.result.site_results) == 2
+    assert terminal.result.site_results[0].target_results
+    assert terminal.result.site_results[1].usage.requests == 0
+    assert all("two.test" not in url for url in transport.requests)
+    assert site_batch_result_from_mapping(terminal.result.to_dict()) == terminal.result
+    store.close()
 
 
 def test_service_get_handoff_projects_persisted_job(tmp_path: Path) -> None:

@@ -27,6 +27,7 @@ from web_listening.request.site_batch import (
 )
 from web_listening.request.site_refresh import SiteRefreshRequest
 from web_listening.result.errors import ResultValidationError
+from web_listening.result.manifest import Usage
 from web_listening.result.model import ResultStatus
 from web_listening.result.site_batch import FileDiscoveryStatus, SiteBatchMode
 from web_listening.runtime.site_batch import (
@@ -1169,6 +1170,62 @@ def test_failed_site_continues_but_explicit_cancellation_stops(tmp_path: Path) -
         assert cancelled_acquisition.targets == [SEEDS[0]]
     finally:
         cancelled_store.close()
+
+
+def test_boundary_cancel_before_start_is_strict_and_performs_zero_target_io(
+    tmp_path: Path,
+) -> None:
+    acquisition = _Acquisition(_standard_bodies())
+    store = ArtifactStore(tmp_path / "cancel-before-start")
+    try:
+        result = run_site_batch(
+            SiteBatchRequest(SiteBatchPhase.FIRST, _parent(), ()),
+            _registry(acquisition),
+            store,
+            run_id="cancel-before-start",
+            clock=lambda: NOW,
+            should_cancel=lambda: True,
+        )
+        assert not acquisition.targets
+        assert result.stop_reason == "cancelled"
+        assert len(result.site_results) == 1
+        assert result.site_results[0].usage == Usage(0, 0, 0, 0)
+        assert site_batch_result_from_mapping(result.to_dict()) == result
+    finally:
+        store.close()
+
+
+def test_boundary_cancel_after_first_preserves_checkpoint_and_starts_no_later_io(
+    tmp_path: Path,
+) -> None:
+    acquisition = _Acquisition(_standard_bodies())
+    store = ArtifactStore(tmp_path / "cancel-after-first")
+    cancelled = False
+
+    def checkpoint(order, _result):
+        nonlocal cancelled
+        cancelled = order == 1
+
+    try:
+        result = run_site_batch(
+            SiteBatchRequest(SiteBatchPhase.FIRST, _parent(), ()),
+            _registry(acquisition),
+            store,
+            run_id="cancel-after-first",
+            clock=lambda: NOW,
+            checkpoint=checkpoint,
+            should_cancel=lambda: cancelled,
+        )
+        assert len(result.site_results) == 2
+        assert result.site_results[0].target_results
+        assert result.site_results[1].usage == Usage(0, 0, 0, 0)
+        assert result.usage == result.site_results[0].usage
+        assert result.next_refresh_contexts[0].site_skill.site_key == "one.test"
+        assert all(not target.startswith(SEEDS[1]) for target in acquisition.targets)
+        assert all(not target.startswith(SEEDS[2]) for target in acquisition.targets)
+        assert site_batch_result_from_mapping(result.to_dict()) == result
+    finally:
+        store.close()
 
 
 def test_refresh_replays_persisted_contexts_without_caller_fallback(

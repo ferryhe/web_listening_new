@@ -9,6 +9,7 @@ from threading import Event, Thread
 import pytest
 
 from web_listening.request.model import Budgets, ContentType, Request, Scope
+from web_listening.request.site_batch import SiteBatchPhase, SiteBatchRequest
 from web_listening.result.model import ResultStatus
 from web_listening.runtime.acquisition_service import AcquisitionService
 from web_listening.runtime.jobs import JobRepository, JobStatus
@@ -36,6 +37,8 @@ class _Runtime:
         self.jobs = jobs
         self.fail_first = fail_first
         self.calls: list[str] = []
+        self.batch_calls: list[str] = []
+        self.batch_executed = Event()
 
     def execute_submitted(self, job_id: str, _request: Request, _cancel) -> object:
         self.calls.append(job_id)
@@ -77,6 +80,15 @@ class _Runtime:
 
     def cancel(self, job_id: str) -> object:
         return self.jobs.cancel(job_id, at=NOW)
+
+    def execute_submitted_batch(self, batch_id: str) -> object:
+        self.batch_calls.append(batch_id)
+        result = self.jobs.finish_batch(batch_id, at=NOW, failure_code="test.finished")
+        self.batch_executed.set()
+        return result
+
+    def cancel_batch(self, batch_id: str) -> object:
+        return self.jobs.cancel_batch(batch_id, at=NOW)
 
 
 class _ClaimGate:
@@ -202,3 +214,43 @@ def test_claim_failure_marks_worker_unhealthy() -> None:
     workers.run_available()
     assert not workers.healthy
     workers.close()
+
+
+def test_persistent_poll_finds_batch_submitted_by_another_handle(
+    tmp_path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    jobs = JobRepository(database)
+    runtime = _Runtime(jobs)
+    workers = AcquisitionService(  # type: ignore[arg-type]
+        runtime,
+        jobs,
+        concurrency=1,
+        clock=lambda: NOW,
+        poll_interval_seconds=0.01,
+    )
+    workers.wake()
+    external = JobRepository(database)
+    parent = Request(
+        Scope(
+            ("https://one.test/", "https://two.test/"),
+            ("https://one.test", "https://two.test"),
+            ("/**",),
+            (ContentType.HTML,),
+        ),
+        None,
+        False,
+        Budgets(1, 1000, 10, 1),
+    )
+    external.submit_batch(
+        "batch-external",
+        SiteBatchRequest(SiteBatchPhase.FIRST, parent, ()),
+        caller_id="caller",
+        idempotency_key="external",
+        at=NOW,
+    )
+    assert runtime.batch_executed.wait(2)
+    workers.close()
+    external.close()
+    jobs.close()
+    assert runtime.batch_calls == ["batch-external"]

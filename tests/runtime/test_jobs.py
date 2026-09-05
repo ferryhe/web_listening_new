@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from web_listening.request.model import Budgets, ContentType, Request, Scope
+from web_listening.request.site_batch import SiteBatchPhase, SiteBatchRequest
 from web_listening.result.errors import parse_utc_time
 from web_listening.result.model import Result
 from web_listening.runtime.jobs import (
@@ -71,6 +72,80 @@ def _request() -> Request:
         False,
         Budgets(2, 1000, 10, 1),
     )
+
+
+def _batch_request(max_requests: int = 2) -> SiteBatchRequest:
+    return SiteBatchRequest(
+        SiteBatchPhase.FIRST,
+        Request(
+            Scope(
+                ("https://one.test/report", "https://two.test/report"),
+                ("https://one.test", "https://two.test"),
+                ("/report",),
+                (ContentType.HTML,),
+            ),
+            None,
+            False,
+            Budgets(max_requests, 1000, 10, 1),
+        ),
+        (),
+    )
+
+
+def test_site_batch_submission_is_ordered_idempotent_and_persistent(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    repository = JobRepository(database)
+    first = repository.submit_batch(
+        "batch-one", _batch_request(), caller_id="caller", idempotency_key="key", at=NOW
+    )
+    replay = repository.submit_batch(
+        "batch-two",
+        _batch_request(),
+        caller_id="caller",
+        idempotency_key="key",
+        at=LATER,
+    )
+    assert replay.batch_id == first.batch_id
+    assert [(item.order, item.site_key, item.status) for item in first.children] == [
+        (1, "one.test", "submitted"),
+        (2, "two.test", "submitted"),
+    ]
+    with pytest.raises(JobStateError, match="^idempotency.conflict$"):
+        repository.submit_batch(
+            "batch-three",
+            _batch_request(3),
+            caller_id="caller",
+            idempotency_key="key",
+            at=LATER,
+        )
+    repository.close()
+    reopened = JobRepository(database)
+    assert (
+        reopened.get_batch("batch-one").request_fingerprint == first.request_fingerprint
+    )
+    reopened.close()
+
+
+def test_site_batch_cancel_preserves_first_timestamp_and_restarts_running(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    repository = JobRepository(database)
+    repository.submit_batch(
+        "batch-one", _batch_request(), caller_id="caller", idempotency_key="key", at=NOW
+    )
+    claimed = repository.claim_next_batch(at=LATER)
+    assert claimed is not None and claimed.batch.status is JobStatus.RUNNING
+    first = repository.cancel_batch("batch-one", at="2026-08-25T20:00:02Z")
+    second = repository.cancel_batch("batch-one", at="2026-08-25T20:00:03Z")
+    assert second.cancel_requested_at == first.cancel_requested_at
+    repository.close()
+    reopened = JobRepository(database)
+    reopened.reconcile_batches()
+    assert reopened.get_batch("batch-one").status is JobStatus.SUBMITTED
+    reopened.close()
 
 
 def _site_skill():
