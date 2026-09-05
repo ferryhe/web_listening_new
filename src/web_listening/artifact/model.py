@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import BinaryIO
 
 
 class ArtifactStoreError(ValueError):
@@ -49,6 +50,17 @@ class StoredArtifact:
     size_bytes: int
     mime_type: str
     content: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedArtifactStream:
+    """Verified delivery metadata plus a pinned, rewound descriptor."""
+
+    artifact_id: str
+    blob_sha256: str
+    size_bytes: int
+    mime_type: str
+    stream: BinaryIO
 
 
 @dataclass(frozen=True, slots=True)

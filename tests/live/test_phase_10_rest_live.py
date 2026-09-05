@@ -20,8 +20,9 @@ pytest.importorskip("fastapi", reason="install the optional web-listening[rest] 
 
 from fastapi.testclient import TestClient  # pylint: disable=import-error
 
-from web_listening.interfaces.rest import create_app
+from web_listening.interfaces.rest import RestConfig, create_app
 from web_listening.result.model import Result
+from web_listening.runtime.acquisition_service import AcquisitionService
 from web_listening.runtime.service import RuntimeService
 
 TARGETS = Path(__file__).with_name("phase_10_site_targets.json")
@@ -32,6 +33,11 @@ AUTHORIZED_WINDOW = "issue-11-2026-08-26-user-authorized"
 CANONICAL_REQUEST_SHA256 = (
     "775dc2b617d54fcc28c517bda0f5a121fcec92b82d756438fb09dd6fae4467f7"
 )
+TEST_TOKEN = "phase-10-fixed-local-asgi-token"
+TEST_AUTH = {
+    "Authorization": f"Bearer {TEST_TOKEN}",
+    "Idempotency-Key": "phase-10-ipcc-live",
+}
 
 
 def _newline_canonical_sha256(content: bytes) -> str:
@@ -265,6 +271,7 @@ def test_phase_10_rest_live(capsys: pytest.CaptureFixture[str], tmp_path: Path) 
     """Acquire IPCC once, then read its Job and Artifact through local ASGI."""
     payload, target, request = _load_authorized_snapshot()
     runtime: RuntimeService | None = None
+    worker: AcquisitionService | None = None
     record: dict[str, object] = {
         "schema_version": "phase-10-rest-live-evidence.v1",
         "authorization_window": AUTHORIZED_WINDOW,
@@ -293,7 +300,21 @@ def test_phase_10_rest_live(capsys: pytest.CaptureFixture[str], tmp_path: Path) 
     }
     try:
         runtime = RuntimeService.open(tmp_path / "runtime-data")
-        client = TestClient(create_app(lambda: runtime))
+        worker = AcquisitionService(
+            runtime,
+            runtime.job_repository,
+            concurrency=1,
+            clock=runtime.clock,
+        )
+        config = RestConfig(
+            "phase-10-live",
+            hashlib.sha256(TEST_TOKEN.encode("utf-8")).hexdigest(),
+            binary_cap_bytes=2 * 1024 * 1024,
+            base64_cap_bytes=2 * 1024 * 1024,
+        )
+        client = TestClient(
+            create_app(lambda: runtime, config, wake=worker.wake), headers=TEST_AUTH
+        )
 
         acquire = client.post("/v1/acquisitions", json=request)
         acquire_json = acquire.json()
@@ -306,8 +327,19 @@ def test_phase_10_rest_live(capsys: pytest.CaptureFixture[str], tmp_path: Path) 
                 request_json=request,
             )
         )
-        assert acquire.status_code == 201
-        result = Result.from_dict(acquire_json["result"])
+        assert acquire.status_code == 202
+        assert acquire_json["status"] == "submitted"
+        assert acquire_json["result"] is None
+        worker.run_available()
+        job_id = acquire_json["job_id"]
+
+        get_job = client.get(f"/v1/jobs/{job_id}")
+        get_job_json = get_job.json()
+        record["http_exchanges"].append(
+            _exchange("GET", f"/v1/jobs/{job_id}", get_job.status_code, get_job_json)
+        )
+        assert get_job.status_code == 200
+        result = Result.from_dict(get_job_json["result"])
         assert result.status.value == "completed"
         assert len(result.attempts) == 1
         attempt = result.attempts[0]
@@ -319,17 +351,8 @@ def test_phase_10_rest_live(capsys: pytest.CaptureFixture[str], tmp_path: Path) 
         assert not result.manifest.redirects
         assert payload["network_limits"]["retry"] == 0
         assert payload["network_limits"]["concurrency"] == 1
-        job_id = acquire_json["job_id"]
         artifact_evidence = result.artifacts[0]
         artifact_id = artifact_evidence.artifact_id
-
-        get_job = client.get(f"/v1/jobs/{job_id}")
-        get_job_json = get_job.json()
-        record["http_exchanges"].append(
-            _exchange("GET", f"/v1/jobs/{job_id}", get_job.status_code, get_job_json)
-        )
-        assert get_job.status_code == 200
-        assert get_job_json == acquire_json
 
         read_artifact = client.get(f"/v1/artifacts/{artifact_id}")
         artifact_json = read_artifact.json()
@@ -369,7 +392,7 @@ def test_phase_10_rest_live(capsys: pytest.CaptureFixture[str], tmp_path: Path) 
             "artifact_size_bytes": artifact_json["size_bytes"],
         }
         record["runtime_correlation"] = {
-            "post_job_equals_get_job": get_job_json == acquire_json,
+            "post_job_equals_get_job": get_job_json["job_id"] == acquire_json["job_id"],
             "result_schema_version": result.schema_version,
             "result_canonical_sha256": hashlib.sha256(
                 result.canonical_json_bytes()
@@ -391,6 +414,8 @@ def test_phase_10_rest_live(capsys: pytest.CaptureFixture[str], tmp_path: Path) 
             "outcome": "pytest_pass",
         }
     finally:
+        if worker is not None:
+            worker.close()
         if runtime is not None:
             runtime.close()
         _emit(record, capsys)

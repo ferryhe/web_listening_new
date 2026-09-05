@@ -1,6 +1,7 @@
 """Offline contract tests for the minimal immutable Artifact repository."""
 
 # pylint: disable=protected-access,redefined-outer-name,too-many-arguments,too-many-lines
+# pylint: disable=missing-function-docstring
 
 from __future__ import annotations
 
@@ -125,6 +126,32 @@ def test_read_artifact_returns_minimal_verified_frozen_value(
     assert not hasattr(loaded, "__dict__")
     with pytest.raises(FrozenInstanceError):
         loaded.content = b"changed"  # type: ignore[misc]
+
+
+def test_verified_stream_is_exact_rewound_and_closed(store: ArtifactStore) -> None:
+    committed = store.commit_observation(proposal())
+    with store.open_verified_artifact(committed.artifact.artifact_id) as opened:
+        descriptor = opened.stream.fileno()
+        assert opened.stream.read() == HTML
+        assert opened.size_bytes == len(HTML)
+    with pytest.raises(OSError):
+        __import__("os").fstat(descriptor)
+
+
+def test_verified_stream_detects_corruption_before_yield(store: ArtifactStore) -> None:
+    committed = store.commit_observation(proposal())
+    path = store._path_for(committed.blob.relative_path)
+    path.write_bytes(b"x" * len(HTML))
+    with pytest.raises(ArtifactStoreError, match="blob.corrupt"):
+        with store.open_verified_artifact(committed.artifact.artifact_id):
+            pytest.fail("corrupt descriptor was yielded")
+
+
+def test_artifact_grants_are_explicit_per_caller(store: ArtifactStore) -> None:
+    identifier = store.commit_observation(proposal()).artifact.artifact_id
+    store.grant_artifacts("caller-one", (identifier,))
+    assert store.caller_has_artifact("caller-one", identifier)
+    assert not store.caller_has_artifact("caller-two", identifier)
 
 
 @pytest.mark.parametrize(

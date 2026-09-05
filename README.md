@@ -603,10 +603,37 @@ is supplied, that Site Skill overrides any `site_skill` embedded in the Request.
 
 ```text
 POST /v1/acquisitions
-GET  /v1/jobs/{run_id}
+GET  /v1/jobs/{job_id}
+POST /v1/jobs/{job_id}/cancel
 GET  /v1/jobs/{job_id}/handoff
 GET  /v1/artifacts/{artifact_id}
+GET  /v1/artifacts/{artifact_id}/content
+POST /v1/site-explorations
+POST /v1/site-refreshes
 ```
+
+Except for unauthenticated `/health` and `/ready`, REST requires
+`Authorization: Bearer <opaque-token>`. The operator supplies an owner-only JSON
+token file containing exactly `caller_id` and `token_sha256`. Acquisitions also
+require `Idempotency-Key` and return a durable Job with HTTP 202; the existing
+bounded worker executes it asynchronously. Job, handoff, and Artifact reads are
+caller-owned and do not reveal whether another caller's resource exists.
+
+`/v1/artifacts/{artifact_id}` is a bounded base64 compatibility response (1 MiB
+by default). `/content` streams the full verified bytes from a pinned descriptor
+(100 MiB default cap); range requests are not supported.
+
+Run the single-process service with explicit storage and credentials:
+
+```bash
+web-listening-server --data-root ./data --token-file ./operator-token.json
+```
+
+It binds to `127.0.0.1:8000` by default, uses two internal acquisition workers,
+holds an exclusive data-root lock, exposes no CORS or API documentation, and
+becomes unready before cooperative shutdown. Server admission authority defaults
+to 100 requests, 100 MiB, 600 seconds, and four attempts and can only shrink a
+caller's Request budgets.
 
 ### MCP
 

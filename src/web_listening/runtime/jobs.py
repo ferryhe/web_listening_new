@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+from web_listening.artifact.lineage import validate_artifact_id
 from web_listening.request.model import Request
 from web_listening.request.validate import request_from_mapping, validate_request
 from web_listening.result.errors import (
@@ -144,6 +145,7 @@ class JobRepository:
     def __init__(self, database_path: str | os.PathLike[str] | None = None) -> None:
         self._jobs: dict[str, Job] = {}
         self._events: dict[str, list[JobEvent]] = {}
+        self._artifact_grants: set[tuple[str, str]] = set()
         self._lock = threading.RLock()
         self._closed = False
         self._connection: sqlite3.Connection | None = None
@@ -166,6 +168,7 @@ class JobRepository:
             connection.execute("PRAGMA journal_mode = DELETE")
             connection.execute("PRAGMA synchronous = FULL")
             _create_schema(connection)
+            _backfill_artifact_grants(connection)
         except BaseException:
             connection.close()
             raise
@@ -543,6 +546,7 @@ class JobRepository:
                         timestamp,
                     )
                 )
+                self._record_artifact_grants(current, updated)
                 return updated
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
@@ -572,6 +576,7 @@ class JobRepository:
                     ),
                 )
                 self._insert_event(event)
+                self._insert_artifact_grants(current, updated)
                 persisted = self._validate_persisted_snapshot(
                     updated, (*_expected_events(current), event)
                 )
@@ -599,6 +604,51 @@ class JobRepository:
                 self._require(identifier)
                 return tuple(self._events[identifier])
             return self._read_snapshot(identifier)[1]
+
+    def caller_has_artifact(self, caller_id: str, artifact_id: str) -> bool:
+        """Query Artifact authority committed atomically with terminal Jobs."""
+        caller = _validate_boundary_text(caller_id, "caller.invalid", 256)
+        identifier = validate_artifact_id(artifact_id)
+        with self._lock:
+            self._ensure_open()
+            if self._connection is None:
+                return (caller, identifier) in self._artifact_grants
+            return (
+                self._connection.execute(
+                    "SELECT 1 FROM job_artifact_grants WHERE caller_id=? AND artifact_id=?",
+                    (caller, identifier),
+                ).fetchone()
+                is not None
+            )
+
+    def check(self) -> None:
+        """Perform a minimal read-only repository integrity probe."""
+        with self._lock:
+            self._ensure_open()
+            if self._connection is not None:
+                result = self._connection.execute("PRAGMA quick_check(1)").fetchone()
+                if result is None or result[0] != "ok":
+                    raise JobStateError("repository.check_failed")
+
+    def _record_artifact_grants(self, current: Job, updated: Job) -> None:
+        if current.caller_id is not None and updated.result is not None:
+            self._artifact_grants.update(
+                (current.caller_id, item.artifact_id)
+                for item in updated.result.artifacts
+            )
+
+    def _insert_artifact_grants(self, current: Job, updated: Job) -> None:
+        if current.caller_id is None or updated.result is None:
+            return
+        assert self._connection is not None
+        self._connection.executemany(
+            "INSERT OR IGNORE INTO job_artifact_grants"
+            " (job_id,caller_id,artifact_id) VALUES (?,?,?)",
+            (
+                (updated.job_id, current.caller_id, item.artifact_id)
+                for item in updated.result.artifacts
+            ),
+        )
 
     def _require(self, job_id: str) -> Job:
         if self._connection is None:
@@ -707,6 +757,12 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             at TEXT NOT NULL,
             PRIMARY KEY (job_id, sequence)
         );
+        CREATE TABLE IF NOT EXISTS job_artifact_grants (
+            job_id TEXT NOT NULL REFERENCES jobs(job_id),
+            caller_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            PRIMARY KEY (job_id, artifact_id)
+        );
         """)
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
@@ -731,6 +787,25 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS jobs_idempotency "
         "ON jobs(caller_id,idempotency_key) WHERE caller_id IS NOT NULL"
     )
+
+
+def _backfill_artifact_grants(connection: sqlite3.Connection) -> None:
+    """Migrate caller-owned persisted Results into explicit grant rows."""
+    rows = connection.execute(
+        "SELECT job_id,caller_id,result_json FROM jobs "
+        "WHERE caller_id IS NOT NULL AND result_json IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        result = _result_from_json(row["result_json"])
+        if result is not None:
+            connection.executemany(
+                "INSERT OR IGNORE INTO job_artifact_grants"
+                " (job_id,caller_id,artifact_id) VALUES (?,?,?)",
+                (
+                    (row["job_id"], row["caller_id"], item.artifact_id)
+                    for item in result.artifacts
+                ),
+            )
 
 
 def _reject_symlink_chain(path: Path) -> None:

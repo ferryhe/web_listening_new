@@ -1,5 +1,7 @@
 """Smoke tests for the Phase 0 package and quality configuration."""
 
+# pylint: disable=missing-function-docstring
+
 from __future__ import annotations
 
 import importlib
@@ -69,3 +71,13 @@ def test_quality_tool_configuration_is_minimal_and_consistent() -> None:
         "-m",
         "not live",
     ]
+
+
+def test_server_entrypoint_is_packaged_in_rest_extra() -> None:
+    assert PROJECT_CONFIG["project"]["scripts"]["web-listening-server"] == (
+        "web_listening.interfaces.server:main"
+    )
+    assert any(
+        dependency.startswith("uvicorn>=")
+        for dependency in PROJECT_CONFIG["project"]["optional-dependencies"]["rest"]
+    )

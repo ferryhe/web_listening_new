@@ -948,4 +948,7 @@ def test_pyproject_declares_only_the_requested_console_script() -> None:
         "project"
     ]
 
-    assert project["scripts"] == {"web-listening": "web_listening.interfaces.cli:main"}
+    assert project["scripts"] == {
+        "web-listening": "web_listening.interfaces.cli:main",
+        "web-listening-server": "web_listening.interfaces.server:main",
+    }

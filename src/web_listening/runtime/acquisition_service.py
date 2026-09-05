@@ -44,6 +44,10 @@ class AcquisitionService:
         )
         self._lock = threading.Lock()
         self._futures: set[Future[None]] = set()
+        self._active_job_ids: set[str] = set()
+        self._worker_count = 0
+        self._wake_generation = 0
+        self._claim_failed = False
         self._closed = False
         self._jobs.reconcile(at=self._clock())
 
@@ -52,8 +56,10 @@ class AcquisitionService:
         with self._lock:
             if self._closed:
                 raise RuntimeError("worker.closed")
+            self._wake_generation += 1
             self._futures = {future for future in self._futures if not future.done()}
-            for _unused in range(self._concurrency - len(self._futures)):
+            for _unused in range(self._concurrency - self._worker_count):
+                self._worker_count += 1
                 future = self._executor.submit(self._worker)
                 self._futures.add(future)
 
@@ -78,10 +84,34 @@ class AcquisitionService:
             if self._closed:
                 return
             self._closed = True
+            active = tuple(self._active_job_ids)
+        for job_id in active:
+            try:
+                self._runtime.cancel(job_id)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
         self._executor.shutdown(wait=True)
+
+    @property
+    def healthy(self) -> bool:
+        """Report whether the worker still accepts durable work."""
+        with self._lock:
+            return (
+                not self._closed
+                and not self._claim_failed
+                and not any(
+                    future.done() and future.exception() is not None
+                    for future in self._futures
+                )
+            )
 
     def _worker(self) -> None:
         while True:
+            with self._lock:
+                if self._closed:
+                    self._worker_count -= 1
+                    return
+                observed_generation = self._wake_generation
             now = self._clock()
             deadline = (
                 parse_utc_time(now) + timedelta(seconds=self._lease_seconds)
@@ -91,8 +121,28 @@ class AcquisitionService:
                     self._worker_id, at=now, lease_deadline=deadline
                 )
             except Exception:  # pylint: disable=broad-exception-caught
+                with self._lock:
+                    self._claim_failed = True
+                    self._worker_count -= 1
                 return
             if claim is None:
+                with self._lock:
+                    if self._wake_generation != observed_generation:
+                        continue
+                    self._worker_count -= 1
+                    return
+            with self._lock:
+                if self._closed:
+                    cancel_claim = True
+                    self._worker_count -= 1
+                else:
+                    cancel_claim = False
+                    self._active_job_ids.add(claim.job.job_id)
+            if cancel_claim:
+                try:
+                    self._runtime.cancel(claim.job.job_id)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
                 return
             try:
                 self._runtime.execute_submitted(
@@ -100,6 +150,9 @@ class AcquisitionService:
                 )
             except Exception:  # pylint: disable=broad-exception-caught
                 continue
+            finally:
+                with self._lock:
+                    self._active_job_ids.discard(claim.job.job_id)
 
 
 __all__ = ["AcquisitionService"]

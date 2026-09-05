@@ -9,8 +9,10 @@ import sqlite3
 import stat
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO, Iterator
 
 from web_listening.artifact.identity import (
     artifact_id,
@@ -38,6 +40,7 @@ from web_listening.artifact.model import (
     Observation,
     StoredArtifact,
     StoredObservation,
+    VerifiedArtifactStream,
 )
 from web_listening.artifact.observation import (
     ObservationProposal,
@@ -107,6 +110,15 @@ class ArtifactStore:
             if not self._closed:
                 self._connection.close()
                 self._closed = True
+
+    def check(self) -> None:
+        """Perform a minimal read-only repository and path integrity probe."""
+        with self._lock:
+            self._ensure_open()
+            self._check_repository_paths()
+            result = self._connection.execute("PRAGMA quick_check(1)").fetchone()
+            if result is None or result[0] != "ok":
+                raise ArtifactStoreError("repository.check_failed")
 
     def commit_observation(self, proposal: ObservationProposal) -> StoredObservation:
         """Atomically publish one Blob, Artifact, Observation, and optional edge."""
@@ -245,6 +257,89 @@ class ArtifactStore:
                 content=content,
             )
 
+    @contextmanager
+    def open_verified_artifact(  # pylint: disable=redefined-outer-name
+        self, artifact_id: str
+    ) -> Iterator[VerifiedArtifactStream]:
+        """Verify an Artifact before yielding its pinned, rewound descriptor."""
+        identifier = validate_artifact_id(artifact_id)
+        descriptor: int | None = None
+        stream: BinaryIO | None = None
+        with self._lock:
+            self._ensure_open()
+            self._check_repository_paths()
+            row = self._connection.execute(
+                "SELECT a.artifact_id,a.blob_sha256,a.mime_type,a.role,"
+                "b.sha256,b.size_bytes,b.relative_path FROM artifacts AS a "
+                "JOIN blobs AS b ON b.sha256=a.blob_sha256 "
+                "WHERE a.artifact_id=?",
+                (identifier,),
+            ).fetchone()
+            if row is None:
+                raise ArtifactStoreError("artifact.not_found")
+            artifact = self._artifact_from_row(row)
+            blob = self._blob_from_row(row)
+            descriptor = self._open_verified_descriptor(
+                self._path_for(blob.relative_path), blob.sha256, blob.size_bytes
+            )
+            stream = os.fdopen(descriptor, "rb", closefd=True)
+            descriptor = None
+            verified = VerifiedArtifactStream(
+                artifact.artifact_id,
+                blob.sha256,
+                blob.size_bytes,
+                artifact.mime_type,
+                stream,
+            )
+        try:
+            yield verified
+        finally:
+            if stream is not None:
+                stream.close()
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def grant_artifacts(self, caller_id: str, artifact_ids: tuple[str, ...]) -> None:
+        """Durably grant a caller only the explicit Result Artifact identities."""
+        if not caller_id or len(caller_id) > 256:
+            raise ArtifactStoreError("caller.invalid")
+        identifiers = tuple(validate_artifact_id(item) for item in artifact_ids)
+        with self._lock:
+            self._ensure_open()
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                for identifier in identifiers:
+                    exists = self._connection.execute(
+                        "SELECT 1 FROM artifacts WHERE artifact_id=?", (identifier,)
+                    ).fetchone()
+                    if exists is None:
+                        raise ArtifactStoreError("artifact.not_found")
+                    self._connection.execute(
+                        "INSERT OR IGNORE INTO artifact_grants(caller_id,artifact_id)"
+                        " VALUES (?,?)",
+                        (caller_id, identifier),
+                    )
+                self._connection.execute("COMMIT")
+            except BaseException:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+
+    def caller_has_artifact(  # pylint: disable=redefined-outer-name
+        self, caller_id: str, artifact_id: str
+    ) -> bool:
+        """Return whether the durable caller/Artifact grant exists."""
+        identifier = validate_artifact_id(artifact_id)
+        with self._lock:
+            self._ensure_open()
+            return (
+                self._connection.execute(
+                    "SELECT 1 FROM artifact_grants WHERE caller_id=? AND artifact_id=?",
+                    (caller_id, identifier),
+                ).fetchone()
+                is not None
+            )
+
     def get_observation(self, observation_id: str) -> StoredObservation:
         """Load a complete Observation and fail closed on identity drift."""
         identifier = validate_observation_id(observation_id)
@@ -378,6 +473,11 @@ class ArtifactStore:
                     REFERENCES observations(observation_id),
                 source_artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
                 CHECK (observation_id <> source_observation_id)
+            );
+            CREATE TABLE IF NOT EXISTS artifact_grants (
+                caller_id TEXT NOT NULL,
+                artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+                PRIMARY KEY (caller_id, artifact_id)
             );
             """)
 
@@ -582,6 +682,46 @@ class ArtifactStore:
         if content_sha256(content) != digest:
             raise ArtifactStoreError(corrupt_code)
         return content
+
+    def _open_verified_descriptor(self, target: Path, digest: str, size: int) -> int:
+        """Open, hash, and rewind one regular immutable Blob descriptor."""
+        self._reject_symlink_chain(target.parent)
+        target_stat = self._lstat(target)
+        if target_stat is None or self._is_link_like(target, target_stat):
+            raise ArtifactStoreError("blob.corrupt")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(target, flags)
+        except OSError as exc:
+            raise ArtifactStoreError("blob.corrupt") from exc
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_size != size
+                or self._identity(opened) != self._identity(target_stat)
+            ):
+                raise ArtifactStoreError("blob.corrupt")
+            hasher = __import__("hashlib").sha256()
+            total = 0
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                hasher.update(chunk)
+            if total != size or hasher.hexdigest() != digest:
+                raise ArtifactStoreError("blob.corrupt")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
 
     @staticmethod
     def _lstat(path: Path) -> os.stat_result | None:
