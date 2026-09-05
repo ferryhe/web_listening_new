@@ -152,7 +152,10 @@ def create_app(
                 request, caller_id=identity, idempotency_key=key
             )
             if wake is not None:
-                wake()
+                try:
+                    wake()
+                except Exception:  # Durable submission remains authoritative.
+                    pass
             return JSONResponse(status_code=202, content=_job_payload(job))
         except Exception as exc:
             return _runtime_error(exc)

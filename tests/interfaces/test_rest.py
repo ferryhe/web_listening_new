@@ -464,6 +464,24 @@ def test_acquire_offloads_runtime_run_from_the_handler_thread(
     assert len(provider_thread_ids) == len(runtime.run_thread_ids) == 1
 
 
+def test_durable_submit_stays_202_when_wake_fails_and_replay_is_idempotent(
+    runtime: FakeRuntime,
+) -> None:
+    def fail_wake() -> None:
+        raise RuntimeError("worker unhealthy")
+
+    client = TestClient(
+        rest.create_app(lambda: runtime, CONFIG, wake=fail_wake), headers=AUTH
+    )
+    headers = {"Idempotency-Key": "wake-failure-key"}
+    first = client.post("/v1/acquisitions", headers=headers, json=_request_payload())
+    replay = client.post("/v1/acquisitions", headers=headers, json=_request_payload())
+
+    assert first.status_code == replay.status_code == 202
+    assert first.json()["job_id"] == replay.json()["job_id"]
+    assert first.json() == replay.json() == _rest_job_payload(runtime.run_job)
+
+
 def test_site_explore_maps_request_to_one_runtime_call_with_contract_parity(
     runtime: FakeRuntime,
 ) -> None:
