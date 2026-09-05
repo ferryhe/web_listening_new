@@ -1,5 +1,7 @@
 """Thin command-line adapter over the public Runtime service."""
 
+# pylint: disable=too-many-branches
+
 from __future__ import annotations
 
 import argparse
@@ -12,9 +14,10 @@ from pathlib import Path
 
 from web_listening.artifact.model import StoredArtifact
 from web_listening.request.model import Request, RequestValidationError
+from web_listening.request.site_batch import site_batch_request_from_json
 from web_listening.request.site_refresh import site_refresh_request_from_json
 from web_listening.request.validate import request_from_json
-from web_listening.runtime.jobs import Job
+from web_listening.runtime.jobs import Job, SiteBatch
 from web_listening.runtime.service import RuntimeService
 from web_listening.site_skill.model import SiteSkillError
 from web_listening.site_skill.validate import site_skill_from_mapping
@@ -80,6 +83,22 @@ def _parser() -> argparse.ArgumentParser:
     read_artifact.add_argument("artifact_id")
     read_artifact.add_argument("--output", required=True, type=Path)
     read_artifact.add_argument("--json", action="store_true", help="Emit JSON.")
+
+    batch_submit = commands.add_parser(
+        "batch-submit", help="Durably submit one strict site batch."
+    )
+    batch_submit.add_argument("--request", required=True, type=Path)
+    batch_submit.add_argument("--caller-id", required=True)
+    batch_submit.add_argument("--idempotency-key", required=True)
+    batch_submit.add_argument("--output", required=True, type=Path)
+    batch_submit.add_argument("--json", action="store_true", help="Emit JSON.")
+    for name in ("batch-get", "batch-cancel"):
+        command = commands.add_parser(
+            name, help=f"{name.split('-')[1].title()} a site batch."
+        )
+        command.add_argument("batch_id")
+        command.add_argument("--output", required=True, type=Path)
+        command.add_argument("--json", action="store_true", help="Emit JSON.")
     return parser
 
 
@@ -131,6 +150,23 @@ def _job_payload(job: Job) -> dict[str, object]:
         "finished_at": job.finished_at,
         "result": result,
         "failure_code": job.failure_code,
+    }
+
+
+def _batch_payload(batch: SiteBatch) -> dict[str, object]:
+    return {
+        "batch_id": batch.batch_id,
+        "status": batch.status.value,
+        "submitted_at": batch.submitted_at,
+        "started_at": batch.started_at,
+        "finished_at": batch.finished_at,
+        "cancel_requested_at": batch.cancel_requested_at,
+        "children": [
+            {"site_key": item.site_key, "order": item.order, "status": item.status}
+            for item in batch.children
+        ],
+        "result": None if batch.result is None else batch.result.to_dict(),
+        "failure_code": batch.failure_code,
     }
 
 
@@ -199,6 +235,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = _run_with_runtime(
                 args.output,
                 lambda runtime: runtime.get_handoff(args.job_id).to_dict(),
+            )
+        elif args.command == "batch-submit":
+            batch_request = site_batch_request_from_json(_read_text(args.request))
+            payload = _run_with_runtime(
+                args.output,
+                lambda runtime: _batch_payload(
+                    runtime.submit_batch(
+                        batch_request,
+                        caller_id=args.caller_id,
+                        idempotency_key=args.idempotency_key,
+                    )
+                ),
+            )
+        elif args.command == "batch-get":
+            payload = _run_with_runtime(
+                args.output,
+                lambda runtime: _batch_payload(runtime.get_batch(args.batch_id)),
+            )
+        elif args.command == "batch-cancel":
+            payload = _run_with_runtime(
+                args.output,
+                lambda runtime: _batch_payload(runtime.cancel_batch(args.batch_id)),
             )
         else:
             payload = _run_with_runtime(

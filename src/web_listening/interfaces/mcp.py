@@ -1,6 +1,6 @@
 """Thin MCP adapter over the public Runtime and Site Skill services."""
 
-# pylint: disable=duplicate-code,too-many-return-statements
+# pylint: disable=duplicate-code,too-many-return-statements,too-many-locals
 
 from __future__ import annotations
 
@@ -18,9 +18,10 @@ from mcp.server.stdio import stdio_server  # pylint: disable=import-error
 
 from web_listening.artifact.model import StoredArtifact
 from web_listening.request.model import RequestValidationError
+from web_listening.request.site_batch import site_batch_request_from_mapping
 from web_listening.request.validate import request_from_mapping
 from web_listening.result.errors import SafeError
-from web_listening.runtime.jobs import Job
+from web_listening.runtime.jobs import Job, SiteBatch
 from web_listening.runtime.service import RuntimeService
 from web_listening.site_skill.model import SiteSkillError
 from web_listening.site_skill.validate import (
@@ -384,6 +385,43 @@ def _output_schema(success: dict[str, object]) -> dict[str, object]:
 
 _TOOLS = (
     types.Tool(
+        name="web_listening_submit_site_batch",
+        description="Durably submit a strict site batch for the persistent worker.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "request": {"type": "object"},
+                "caller_id": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+            },
+            "required": ["request", "caller_id", "idempotency_key"],
+            "additionalProperties": False,
+        },
+        outputSchema={"type": "object"},
+    ),
+    types.Tool(
+        name="web_listening_get_site_batch",
+        description="Read one durable site batch.",
+        inputSchema={
+            "type": "object",
+            "properties": {"batch_id": {"type": "string"}},
+            "required": ["batch_id"],
+            "additionalProperties": False,
+        },
+        outputSchema={"type": "object"},
+    ),
+    types.Tool(
+        name="web_listening_cancel_site_batch",
+        description="Request cancellation at the next child boundary.",
+        inputSchema={
+            "type": "object",
+            "properties": {"batch_id": {"type": "string"}},
+            "required": ["batch_id"],
+            "additionalProperties": False,
+        },
+        outputSchema={"type": "object"},
+    ),
+    types.Tool(
         name="web_listening_acquire",
         description="Run one governed Request through the public Runtime service.",
         inputSchema={
@@ -449,6 +487,23 @@ def _job_payload(job: Job) -> dict[str, object]:
     }
 
 
+def _batch_payload(batch: SiteBatch) -> dict[str, object]:
+    return {
+        "batch_id": batch.batch_id,
+        "status": batch.status.value,
+        "submitted_at": batch.submitted_at,
+        "started_at": batch.started_at,
+        "finished_at": batch.finished_at,
+        "cancel_requested_at": batch.cancel_requested_at,
+        "children": [
+            {"site_key": item.site_key, "order": item.order, "status": item.status}
+            for item in batch.children
+        ],
+        "result": None if batch.result is None else batch.result.to_dict(),
+        "failure_code": batch.failure_code,
+    }
+
+
 def _artifact_payload(artifact: StoredArtifact) -> dict[str, object]:
     return {
         "artifact_id": artifact.artifact_id,
@@ -476,7 +531,7 @@ def _error_result(code: str, message: str) -> types.CallToolResult:
 
 def _runtime_error(exc: Exception) -> types.CallToolResult:
     code = getattr(exc, "code", "")
-    if code in {"job.not_found", "artifact.not_found"}:
+    if code in {"job.not_found", "batch.not_found", "artifact.not_found"}:
         return _error_result(code, "Resource was not found.")
     if code in {"job.id_invalid", "artifact.id_invalid"}:
         return _error_result(code, "Identifier is invalid.")
@@ -504,6 +559,35 @@ async def _call_tool(
                 raise SiteSkillError("site_skill.invalid")
             skill = site_skill_from_mapping(arguments["site_skill"])
             return site_skill_to_mapping(skill)
+
+        if name == "web_listening_submit_site_batch":
+            if set(arguments) != {"request", "caller_id", "idempotency_key"}:
+                raise RequestValidationError("site_batch_request.invalid")
+            request = site_batch_request_from_mapping(arguments["request"])
+            caller_id = arguments["caller_id"]
+            key = arguments["idempotency_key"]
+            if not isinstance(caller_id, str) or not isinstance(key, str):
+                raise RequestValidationError("site_batch_request.invalid")
+            runtime = runtime_provider()
+            batch = await anyio.to_thread.run_sync(
+                lambda: runtime.submit_batch(
+                    request, caller_id=caller_id, idempotency_key=key
+                )
+            )
+            return _batch_payload(batch)
+
+        if name in {"web_listening_get_site_batch", "web_listening_cancel_site_batch"}:
+            batch_id = _single_string_argument(
+                arguments, "batch_id", "batch.id_invalid"
+            )
+            runtime = runtime_provider()
+            operation = (
+                runtime.get_batch
+                if name == "web_listening_get_site_batch"
+                else runtime.cancel_batch
+            )
+            batch = await anyio.to_thread.run_sync(lambda: operation(batch_id))
+            return _batch_payload(batch)
 
         if name == "web_listening_acquire":
             request = request_from_mapping(arguments)
@@ -542,7 +626,7 @@ async def _call_tool(
 
 
 def create_server(runtime_provider: RuntimeProvider) -> Server:
-    """Create a server exposing exactly the four governed high-level tools."""
+    """Create a server exposing governed high-level Runtime tools."""
     server = Server("web-listening", version="0.1.0")
 
     @server.list_tools()

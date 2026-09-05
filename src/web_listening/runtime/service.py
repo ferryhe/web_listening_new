@@ -19,6 +19,10 @@ from web_listening.artifact.model import (
 )
 from web_listening.artifact.store import ArtifactStore
 from web_listening.request.model import Budgets, Request, RequestValidationError
+from web_listening.request.site_batch import (
+    SiteBatchRequest,
+    validate_site_batch_request,
+)
 from web_listening.request.site_refresh import SiteRefreshRequest
 from web_listening.request.validate import compile_access_policy
 from web_listening.result.errors import SafeError
@@ -32,8 +36,10 @@ from web_listening.runtime.jobs import (
     JobRepository,
     JobStateError,
     JobStatus,
+    SiteBatch,
     canonical_request_facts,
 )
+from web_listening.runtime.site_batch import run_site_batch
 from web_listening.runtime.site_explore import run_site_explore
 from web_listening.runtime.site_refresh import run_site_refresh
 from web_listening.runtime.workflow import (
@@ -222,6 +228,91 @@ class RuntimeService:
             at=self._clock(),
             execution_request=admitted,
         )
+
+    def submit_batch(
+        self,
+        request: SiteBatchRequest,
+        *,
+        caller_id: str,
+        idempotency_key: str,
+    ) -> SiteBatch:
+        """Durably submit one strict availability-first batch."""
+        self._ensure_open()
+        canonical = validate_site_batch_request(request)
+        admitted_parent = _admit(canonical.request, self._admission_maxima)
+        admitted = SiteBatchRequest(
+            canonical.phase,
+            admitted_parent,
+            canonical.refresh_contexts,
+            canonical.schema_version,
+            canonical.sites,
+        )
+        # Persist the admitted request: it is the complete authority workers execute.
+        return self._jobs.submit_batch(
+            self._job_id_factory(),
+            canonical,
+            caller_id=caller_id,
+            idempotency_key=idempotency_key,
+            at=self._clock(),
+            execution_request=admitted,
+        )
+
+    def get_batch(self, batch_id: str) -> SiteBatch:
+        """Return one persisted batch snapshot."""
+        self._ensure_open()
+        return self._jobs.get_batch(batch_id)
+
+    def get_owned_batch(self, batch_id: str, caller_id: str) -> SiteBatch:
+        """Read a batch only for its exact caller owner."""
+        batch = self.get_batch(batch_id)
+        if batch.caller_id != caller_id:
+            raise JobStateError("batch.not_found")
+        return batch
+
+    def cancel_batch(self, batch_id: str) -> SiteBatch:
+        """Request cancellation at the next safe child boundary."""
+        self._ensure_open()
+        return self._jobs.cancel_batch(batch_id, at=self._clock())
+
+    def cancel_owned_batch(self, batch_id: str, caller_id: str) -> SiteBatch:
+        """Cancel a caller-owned batch without disclosing other parents."""
+        self.get_owned_batch(batch_id, caller_id)
+        return self.cancel_batch(batch_id)
+
+    def execute_submitted_batch(self, batch_id: str) -> SiteBatch:
+        """Resume one claimed batch from its latest durable child boundary."""
+        batch = self._jobs.get_batch(batch_id)
+        if batch.status is not JobStatus.RUNNING or batch.request_json is None:
+            raise JobStateError("batch.not_claimed")
+        request = self._jobs.claimed_batch_request(batch_id)
+        prior = self._jobs.batch_checkpoint_results(batch_id)
+        if prior:
+            self._grant_target_results(
+                batch.caller_id or "",
+                tuple(target for child in prior for target in child.target_results),
+            )
+
+        def persist(order, result):
+            self._jobs.checkpoint_batch(batch_id, order, result)
+            self._grant_target_results(batch.caller_id or "", result.target_results)
+
+        try:
+            result = run_site_batch(
+                request,
+                self._registry,
+                self._artifact_store,
+                run_id=batch_id,
+                clock=self._clock,
+                completed_results=prior,
+                checkpoint=persist,
+                should_cancel=lambda: self._jobs.get_batch(batch_id).cancel_requested_at
+                is not None,
+            )
+            return self._jobs.finish_batch(batch_id, at=self._clock(), result=result)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return self._jobs.finish_batch(
+                batch_id, at=self._clock(), failure_code="runtime.workflow_failed"
+            )
 
     def cancel(self, job_id: str) -> Job:
         """Request cooperative cancellation without inventing a Job status."""

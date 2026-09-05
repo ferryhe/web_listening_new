@@ -36,6 +36,9 @@ TOOL_NAMES = {
     "web_listening_get_job",
     "web_listening_read_artifact",
     "web_listening_validate_site_skill",
+    "web_listening_submit_site_batch",
+    "web_listening_get_site_batch",
+    "web_listening_cancel_site_batch",
 }
 
 EXPECTED_STRING_ARRAY = {

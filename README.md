@@ -596,6 +596,11 @@ contains evidence and references only—never content or a local filesystem path
 Non-terminal Jobs return `handoff.not_terminal`; terminal Jobs without a
 persisted Result return `handoff.result_unavailable`.
 
+Multi-site batches use `batch-submit`, `batch-get`, and `batch-cancel`. Local
+CLI and MCP submission is durable but does not start an ungoverned background
+process; the persistent `web-listening-server` worker polls the existing durable
+queue at a small bounded interval and executes queued work.
+
 `--site-skill` is optional and accepts a separate Site Skill JSON file. When it
 is supplied, that Site Skill overrides any `site_skill` embedded in the Request.
 
@@ -610,6 +615,9 @@ GET  /v1/artifacts/{artifact_id}
 GET  /v1/artifacts/{artifact_id}/content
 POST /v1/site-explorations
 POST /v1/site-refreshes
+POST /v1/site-batches
+GET  /v1/site-batches/{batch_id}
+POST /v1/site-batches/{batch_id}/cancel
 ```
 
 Except for unauthenticated `/health` and `/ready`, REST requires
@@ -642,6 +650,9 @@ web_listening_acquire
 web_listening_get_job
 web_listening_read_artifact
 web_listening_validate_site_skill
+web_listening_submit_site_batch
+web_listening_get_site_batch
+web_listening_cancel_site_batch
 ```
 
 An agent calls `web_listening_acquire`; it does not invoke CloakBrowser or Playwright directly. Web Listening remains responsible for authorization, selection, execution, storage, and audit records.

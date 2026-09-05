@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import replace
 
 from web_listening.artifact.site_state import SiteState
@@ -37,6 +38,7 @@ from web_listening.result.site_explore import (
 from web_listening.result.site_refresh import SiteRefreshResult, SiteSkillUpdate
 from web_listening.runtime.site_explore import run_site_explore
 from web_listening.runtime.site_refresh import run_site_refresh
+from web_listening.runtime.workflow import cancellation_check
 from web_listening.site_skill.validate import site_skill_from_mapping
 from web_listening.tool_registry.registry import Registry
 
@@ -50,16 +52,37 @@ def run_site_batch(  # pylint: disable=too-many-arguments
     *,
     run_id: str,
     clock: Callable[[], str],
+    completed_results: tuple[SiteResult, ...] = (),
+    checkpoint: Callable[[int, SiteResult], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> SiteBatchResult:
     """Run every authorized site independently in stable serial order."""
     request = validate_site_batch_request(request)
     run_id = validate_site_batch_run_id(run_id)
     parent = request.request
-    results: list[SiteResult] = []
+    results: list[SiteResult] = list(completed_results)
     modes: list[SiteBatchMode] = []
     contexts: list[SiteRefreshContext] = []
     file_statuses: list[FileDiscoveryStatus] = []
-    for index, _seed in enumerate(parent.scope.seeds, start=1):
+    if len(results) > len(request.site_keys):
+        raise ResultValidationError("site_batch.site_results_invalid")
+    for index, prior in enumerate(results, start=1):
+        input_context = (
+            None
+            if request.phase is SiteBatchPhase.FIRST
+            else request.refresh_contexts[index - 1]
+        )
+        file_status = _file_status(prior, request.sites[index - 1].file_discovery_goal)
+        file_statuses.append(file_status)
+        mode = _mode(request.phase, prior, site_batch_child_run_id(run_id, index))
+        modes.append(mode)
+        context = _next_context(request.phase, prior, mode, input_context, file_status)
+        if context is not None:
+            contexts.append(context)
+    for index, _seed in enumerate(
+        parent.scope.seeds[len(results) :], start=len(results) + 1
+    ):
+        cancel_before_child = should_cancel is not None and should_cancel()
         child_run_id = site_batch_child_run_id(run_id, index)
         site = request.sites[index - 1]
         child_scope = site.scope
@@ -69,37 +92,41 @@ def run_site_batch(  # pylint: disable=too-many-arguments
             if request.phase is SiteBatchPhase.FIRST
             else request.refresh_contexts[index - 1]
         )
-        if request.phase is SiteBatchPhase.FIRST:
-            child_request = Request(
-                child_scope,
-                None,
-                parent.explore_all_tools,
-                parent.budgets,
-            )
-            result: SiteResult = run_site_explore(
-                child_request,
-                registry,
-                artifact_store,
-                run_id=child_run_id,
-                clock=clock,
-                require_file=require_file,
-            )
-        else:
-            assert input_context is not None
-            result = run_site_refresh(
-                SiteRefreshRequest(
+        context = (
+            cancellation_check(lambda: True) if cancel_before_child else nullcontext()
+        )
+        with context:
+            if request.phase is SiteBatchPhase.FIRST:
+                child_request = Request(
                     child_scope,
-                    input_context.site_skill,
-                    input_context.previous_state,
+                    None,
                     parent.explore_all_tools,
                     parent.budgets,
-                ),
-                registry,
-                artifact_store,
-                run_id=child_run_id,
-                clock=clock,
-                require_file=require_file,
-            )
+                )
+                result: SiteResult = run_site_explore(
+                    child_request,
+                    registry,
+                    artifact_store,
+                    run_id=child_run_id,
+                    clock=clock,
+                    require_file=require_file,
+                )
+            else:
+                assert input_context is not None
+                result = run_site_refresh(
+                    SiteRefreshRequest(
+                        child_scope,
+                        input_context.site_skill,
+                        input_context.previous_state,
+                        parent.explore_all_tools,
+                        parent.budgets,
+                    ),
+                    registry,
+                    artifact_store,
+                    run_id=child_run_id,
+                    clock=clock,
+                    require_file=require_file,
+                )
         results.append(result)
         file_status = _file_status(result, site.file_discovery_goal)
         file_statuses.append(file_status)
@@ -114,6 +141,8 @@ def run_site_batch(  # pylint: disable=too-many-arguments
         )
         if context is not None:
             contexts.append(context)
+        if checkpoint is not None:
+            checkpoint(index, result)
         if _cancelled(result):
             break
     return _batch_result(
@@ -167,6 +196,25 @@ def site_batch_result_from_mapping(value: object) -> SiteBatchResult:
         site_skill_evidence=tuple(evidence),
         next_refresh_contexts=contexts,
     )
+
+
+def site_batch_child_result_from_mapping(
+    phase: SiteBatchPhase, value: object
+) -> SiteResult:
+    """Rebuild one inert persisted child checkpoint without performing I/O."""
+    if not isinstance(value, Mapping):
+        raise ResultValidationError("site_batch.site_results_invalid")
+    if phase is SiteBatchPhase.FIRST:
+        evidence = _candidate_evidence(value.get("site_skill_candidate"))
+        return SiteExploreResult.from_dict(value, site_skill_candidate=evidence)
+    update_payload = value.get("site_skill_update")
+    update = None
+    if isinstance(update_payload, Mapping):
+        update = SiteSkillUpdate.from_dict(
+            update_payload,
+            candidate=_candidate_evidence(update_payload.get("candidate")),
+        )
+    return SiteRefreshResult.from_dict(value, site_skill_update=update)
 
 
 def _candidate_evidence(value: object) -> SiteSkillCandidateEvidence | None:
@@ -313,4 +361,8 @@ def _usage(results: tuple[SiteResult, ...]) -> Usage:
     )
 
 
-__all__ = ["run_site_batch", "site_batch_result_from_mapping"]
+__all__ = [
+    "run_site_batch",
+    "site_batch_child_result_from_mapping",
+    "site_batch_result_from_mapping",
+]

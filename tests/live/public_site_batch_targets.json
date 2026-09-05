@@ -1,0 +1,49 @@
+{
+  "schema_version": "public-site-batch-targets.v1",
+  "authorization_window": "manager-supplied",
+  "source_catalog_path": "tests/live/catalog/dev_test_sites.json",
+  "source_catalog_sha256": "B13747A4516810BED5AB5FF164EFC3FD9F5F1C91B51FF3DCE5708A23724A0E6E",
+  "limits_per_site_per_phase": {
+    "max_requests": 12,
+    "max_bytes": 52428800,
+    "max_runtime_seconds": 60,
+    "max_tool_attempts_per_target": 4,
+    "concurrency": 1,
+    "retry": 0
+  },
+  "targets": [
+    {
+      "site_key": "soa",
+      "document_url": "https://www.soa.org/publications/publications-landing/",
+      "allowed_origins": ["https://www.soa.org"],
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/dev_test_sites.json",
+        "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+        "old_site_key": "soa"
+      }
+    },
+    {
+      "site_key": "cas",
+      "document_url": "https://www.casact.org/about/governance/annual-reports",
+      "allowed_origins": ["https://www.casact.org"],
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/dev_test_sites.json",
+        "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+        "old_site_key": "cas"
+      }
+    },
+    {
+      "site_key": "iaa",
+      "document_url": "https://actuaries.org/annual-reports/",
+      "allowed_origins": ["https://actuaries.org"],
+      "provenance": {
+        "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+        "old_path": "config/dev_test_sites.json",
+        "old_blob": "922ddc452e6f8cb1e8e1eee78832ba178f915fe1",
+        "old_site_key": "iaa"
+      }
+    }
+  ]
+}
