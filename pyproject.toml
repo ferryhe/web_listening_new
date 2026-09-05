@@ -12,10 +12,12 @@ dependencies = []
 
 [project.scripts]
 web-listening = "web_listening.interfaces.cli:main"
+web-listening-server = "web_listening.interfaces.server:main"
 
 [project.optional-dependencies]
 rest = [
     "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 mcp = [
     "anyio>=4.5",

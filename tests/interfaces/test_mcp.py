@@ -694,6 +694,7 @@ def test_pyproject_adds_only_the_dedicated_mcp_extra() -> None:
     }
     assert project["scripts"] == {
         "web-listening": "web_listening.interfaces.cli:main",
+        "web-listening-server": "web_listening.interfaces.server:main",
     }
 
 

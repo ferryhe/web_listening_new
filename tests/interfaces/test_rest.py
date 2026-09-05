@@ -9,9 +9,12 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import tomllib
+from contextlib import contextmanager
 from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
 from threading import get_ident
 from urllib.parse import quote
@@ -24,7 +27,11 @@ from fastapi.testclient import TestClient  # pylint: disable=import-error
 
 import web_listening.interfaces.cli as cli
 import web_listening.interfaces.rest as rest
-from web_listening.artifact.model import ArtifactStoreError, StoredArtifact
+from web_listening.artifact.model import (
+    ArtifactStoreError,
+    StoredArtifact,
+    VerifiedArtifactStream,
+)
 from web_listening.artifact.site_state import SiteState
 from web_listening.request.model import (
     Budgets,
@@ -81,7 +88,14 @@ def _job(name: str = "completed.v1.json") -> Job:
         finished_at="2026-08-25T12:00:01Z",
         result=result,
         failure_code=failure_code,
+        caller_id="caller-one",
     )
+
+
+def _rest_job_payload(job: Job) -> dict[str, object]:
+    payload = cli._job_payload(job)
+    payload["cancel_requested_at"] = job.cancel_requested_at
+    return payload
 
 
 def _explore_result() -> SiteExploreResult:
@@ -281,6 +295,7 @@ class FakeRuntime:
         self.refresh_thread_ids: list[int] = []
         self.job_ids: list[str] = []
         self.artifact_ids: list[str] = []
+        self.last_stream: BytesIO | None = None
 
     def run(self, request: Request) -> Job:
         self.run_thread_ids.append(get_ident())
@@ -289,11 +304,20 @@ class FakeRuntime:
             raise self.run_error
         return self.run_job
 
+    def submit(self, request: Request, *, caller_id: str, idempotency_key: str) -> Job:
+        del idempotency_key
+        assert caller_id == "caller-one"
+        return self.run(request)
+
     def get_job(self, job_id: str) -> Job:
         self.job_ids.append(job_id)
         if self.get_error is not None:
             raise self.get_error
         return self.get_job_result
+
+    def get_owned_job(self, job_id: str, caller_id: str) -> Job:
+        assert caller_id == "caller-one"
+        return self.get_job(job_id)
 
     def get_handoff(self, job_id: str) -> AcquisitionHandoff:
         self.job_ids.append(job_id)
@@ -302,12 +326,20 @@ class FakeRuntime:
         path = RESULT_FIXTURES / "acquisition-handoff-completed.v1.json"
         return AcquisitionHandoff.from_json(path.read_bytes())
 
+    def get_owned_handoff(self, job_id: str, caller_id: str) -> AcquisitionHandoff:
+        assert caller_id == "caller-one"
+        return self.get_handoff(job_id)
+
     def explore_site(self, request: Request) -> SiteExploreResult:
         self.explore_thread_ids.append(get_ident())
         self.requests.append(request)
         if self.explore_error is not None:
             raise self.explore_error
         return _explore_result()
+
+    def explore_site_owned(self, request: Request, caller_id: str) -> SiteExploreResult:
+        assert caller_id == "caller-one"
+        return self.explore_site(request)
 
     def refresh_site(self, request: SiteRefreshRequest) -> SiteRefreshResult:
         self.refresh_thread_ids.append(get_ident())
@@ -316,11 +348,37 @@ class FakeRuntime:
             raise self.refresh_error
         return _refresh_result()
 
+    def refresh_site_owned(
+        self, request: SiteRefreshRequest, caller_id: str
+    ) -> SiteRefreshResult:
+        assert caller_id == "caller-one"
+        return self.refresh_site(request)
+
     def read_artifact(self, artifact_id: str) -> StoredArtifact:
         self.artifact_ids.append(artifact_id)
         if self.read_error is not None:
             raise self.read_error
         return self.artifact
+
+    def read_owned_artifact(self, artifact_id: str, caller_id: str) -> StoredArtifact:
+        assert caller_id == "caller-one"
+        return self.read_artifact(artifact_id)
+
+    @contextmanager
+    def open_owned_artifact(self, artifact_id: str, caller_id: str):
+        stored = self.read_owned_artifact(artifact_id, caller_id)
+        stream = BytesIO(stored.content)
+        self.last_stream = stream
+        try:
+            yield VerifiedArtifactStream(
+                stored.artifact_id,
+                stored.blob_sha256,
+                stored.size_bytes,
+                stored.mime_type,
+                stream,
+            )
+        finally:
+            stream.close()
 
 
 @pytest.fixture
@@ -328,25 +386,40 @@ def runtime() -> FakeRuntime:
     return FakeRuntime()
 
 
+TOKEN = "opaque-test-token"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+CONFIG = rest.RestConfig("caller-one", hashlib.sha256(TOKEN.encode()).hexdigest())
+
+
+def _app(provider) -> object:
+    return rest.create_app(provider, CONFIG)
+
+
 def _client(runtime: FakeRuntime) -> TestClient:
-    return TestClient(rest.create_app(lambda: runtime))
+    client = TestClient(_app(lambda: runtime))
+    client.headers.update({**AUTH, "Idempotency-Key": "test-key"})
+    return client
 
 
 def test_app_exposes_exactly_the_six_readme_routes_and_disables_docs(
     runtime: FakeRuntime,
 ) -> None:
-    app = rest.create_app(lambda: runtime)
+    app = _app(lambda: runtime)
 
     observed = {(route.path, tuple(sorted(route.methods))) for route in app.routes}
     assert observed == {
         ("/v1/acquisitions", ("POST",)),
-        ("/v1/jobs/{run_id}", ("GET",)),
+        ("/health", ("GET",)),
+        ("/ready", ("GET",)),
+        ("/v1/jobs/{job_id}", ("GET",)),
+        ("/v1/jobs/{job_id}/cancel", ("POST",)),
         ("/v1/jobs/{job_id}/handoff", ("GET",)),
         ("/v1/artifacts/{artifact_id}", ("GET",)),
+        ("/v1/artifacts/{artifact_id}/content", ("GET",)),
         ("/v1/site-explorations", ("POST",)),
         ("/v1/site-refreshes", ("POST",)),
     }
-    client = TestClient(app)
+    client = TestClient(app, headers=AUTH)
     assert client.get("/docs").status_code == 404
     assert client.get("/redoc").status_code == 404
     assert client.get("/openapi.json").status_code == 404
@@ -367,10 +440,10 @@ def test_acquire_maps_a_strict_request_to_runtime_and_returns_exact_result_schem
 ) -> None:
     response = _client(runtime).post("/v1/acquisitions", json=_request_payload())
 
-    assert response.status_code == 201
+    assert response.status_code == 202
     assert len(runtime.requests) == 1
     assert isinstance(runtime.requests[0], Request)
-    assert response.json() == cli._job_payload(runtime.run_job)
+    assert response.json() == _rest_job_payload(runtime.run_job)
     assert Result.from_dict(response.json()["result"]) == runtime.run_job.result
 
 
@@ -383,13 +456,30 @@ def test_acquire_offloads_runtime_run_from_the_handler_thread(
         provider_thread_ids.append(get_ident())
         return runtime
 
-    response = TestClient(rest.create_app(provider)).post(
-        "/v1/acquisitions", json=_request_payload()
+    response = TestClient(_app(provider), headers=AUTH).post(
+        "/v1/acquisitions", headers={"Idempotency-Key": "key"}, json=_request_payload()
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 202
     assert len(provider_thread_ids) == len(runtime.run_thread_ids) == 1
-    assert runtime.run_thread_ids[0] != provider_thread_ids[0]
+
+
+def test_durable_submit_stays_202_when_wake_fails_and_replay_is_idempotent(
+    runtime: FakeRuntime,
+) -> None:
+    def fail_wake() -> None:
+        raise RuntimeError("worker unhealthy")
+
+    client = TestClient(
+        rest.create_app(lambda: runtime, CONFIG, wake=fail_wake), headers=AUTH
+    )
+    headers = {"Idempotency-Key": "wake-failure-key"}
+    first = client.post("/v1/acquisitions", headers=headers, json=_request_payload())
+    replay = client.post("/v1/acquisitions", headers=headers, json=_request_payload())
+
+    assert first.status_code == replay.status_code == 202
+    assert first.json()["job_id"] == replay.json()["job_id"]
+    assert first.json() == replay.json() == _rest_job_payload(runtime.run_job)
 
 
 def test_site_explore_maps_request_to_one_runtime_call_with_contract_parity(
@@ -401,7 +491,7 @@ def test_site_explore_maps_request_to_one_runtime_call_with_contract_parity(
         provider_thread_ids.append(get_ident())
         return runtime
 
-    response = TestClient(rest.create_app(provider)).post(
+    response = TestClient(_app(provider), headers=AUTH).post(
         "/v1/site-explorations", json=_request_payload()
     )
 
@@ -423,7 +513,7 @@ def test_site_refresh_maps_request_to_one_runtime_call_with_contract_parity(
         provider_thread_ids.append(get_ident())
         return runtime
 
-    response = TestClient(rest.create_app(provider)).post(
+    response = TestClient(_app(provider), headers=AUTH).post(
         "/v1/site-refreshes", json=_refresh_request_payload()
     )
 
@@ -453,7 +543,7 @@ def test_site_refresh_rejects_sensitive_previous_state_before_runtime_provider(
         provider_calls += 1
         return runtime
 
-    response = TestClient(rest.create_app(provider)).post(
+    response = TestClient(_app(provider), headers=AUTH).post(
         "/v1/site-refreshes", json=payload
     )
 
@@ -485,7 +575,7 @@ def test_site_refresh_rejects_absolute_path_before_runtime_provider(
         provider_calls += 1
         return runtime
 
-    response = TestClient(rest.create_app(provider)).post(
+    response = TestClient(_app(provider), headers=AUTH).post(
         "/v1/site-refreshes", json=payload
     )
 
@@ -518,7 +608,7 @@ def test_site_refresh_accepts_public_natural_language_slug(
         provider_calls += 1
         return runtime
 
-    response = TestClient(rest.create_app(provider)).post(
+    response = TestClient(_app(provider), headers=AUTH).post(
         "/v1/site-refreshes", json=payload
     )
 
@@ -537,7 +627,7 @@ def test_acquire_validates_embedded_site_skill_before_runtime(
         "/v1/acquisitions", json=_request_payload(_site_skill())
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 202
     assert len(runtime.requests) == 1
     parsed = runtime.requests[0]
     assert isinstance(parsed.site_skill, SiteSkill)
@@ -605,7 +695,9 @@ def test_acquire_redacts_provider_and_runtime_validation_errors(
         raise error
 
     if failure_source == "provider":
-        client = TestClient(rest.create_app(failing_provider))
+        client = TestClient(
+            _app(failing_provider), headers={**AUTH, "Idempotency-Key": "test-key"}
+        )
     else:
         runtime.run_error = error
         client = _client(runtime)
@@ -625,7 +717,7 @@ def test_acquire_redacts_provider_and_runtime_validation_errors(
 
 @pytest.mark.parametrize(
     ("fixture", "status"),
-    [("rejected-boundary.v1.json", 422), ("failed.v1.json", 500)],
+    [("rejected-boundary.v1.json", 202), ("failed.v1.json", 202)],
 )
 def test_acquire_maps_rejected_and_failed_jobs_without_changing_result_body(
     runtime: FakeRuntime, fixture: str, status: int
@@ -635,7 +727,7 @@ def test_acquire_maps_rejected_and_failed_jobs_without_changing_result_body(
     response = _client(runtime).post("/v1/acquisitions", json=_request_payload())
 
     assert response.status_code == status
-    assert response.json() == cli._job_payload(runtime.run_job)
+    assert response.json() == _rest_job_payload(runtime.run_job)
     assert Result.from_dict(response.json()["result"]) == runtime.run_job.result
 
 
@@ -646,7 +738,7 @@ def test_get_job_calls_only_public_runtime_and_returns_cli_parity(
 
     assert response.status_code == 200
     assert runtime.job_ids == ["run-completed-001"]
-    assert response.json() == cli._job_payload(runtime.get_job_result)
+    assert response.json() == _rest_job_payload(runtime.get_job_result)
 
 
 @pytest.mark.parametrize(
@@ -686,6 +778,41 @@ def test_read_artifact_returns_lossless_base64_with_cli_parity(
     assert base64.b64decode(response.json()["content"], validate=True) == (
         runtime.artifact.content
     )
+    assert runtime.last_stream is not None and runtime.last_stream.closed
+
+
+def test_base64_cap_is_checked_before_stream_body_read(runtime: FakeRuntime) -> None:
+    class Unreadable(BytesIO):
+        """Fail if an over-cap response attempts to read stream content."""
+
+        def read(self, *_args, **_kwargs):
+            raise AssertionError("over-cap body was read")
+
+    @contextmanager
+    def open_over_cap(_artifact_id: str, _caller_id: str):
+        stream = Unreadable(b"not-read")
+        try:
+            yield VerifiedArtifactStream(
+                "artifact-one", "a" * 64, 2 * 1024 * 1024, "text/plain", stream
+            )
+        finally:
+            stream.close()
+
+    runtime.open_owned_artifact = open_over_cap  # type: ignore[method-assign]
+    config = replace(CONFIG, base64_cap_bytes=1024 * 1024)
+    client = TestClient(rest.create_app(lambda: runtime, config), headers=AUTH)
+    response = client.get("/v1/artifacts/artifact-one")
+    assert response.status_code == 413
+
+
+def test_stream_uses_exact_authoritative_text_mime_without_charset(
+    runtime: FakeRuntime,
+) -> None:
+    runtime.artifact = replace(runtime.artifact, mime_type="text/plain")
+    response = _client(runtime).get("/v1/artifacts/artifact-one/content")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/plain"
+    assert response.content == runtime.artifact.content
 
 
 @pytest.mark.parametrize(
@@ -809,11 +936,11 @@ def test_rest_source_has_only_interface_dto_and_public_runtime_authority() -> No
 
     assert "RuntimeService" in source
     assert "runtime_provider" in source
-    assert "run_in_threadpool(runtime.run, request)" in source
-    assert "run_in_threadpool(runtime.explore_site, request)" in source
-    assert "run_in_threadpool(runtime.refresh_site, request)" in source
-    assert "runtime.get_job(" in source
-    assert "runtime.read_artifact(" in source
+    assert "runtime_provider().submit(" in source
+    assert "runtime_provider().explore_site_owned" in source
+    assert "runtime_provider().refresh_site_owned" in source
+    assert "runtime_provider().get_owned_job(" in source
+    assert "runtime_provider().open_owned_artifact(" in source
     assert "RuntimeService.open" not in source
     assert all(name not in source for name in forbidden)
 
@@ -825,5 +952,6 @@ def test_pyproject_keeps_rest_dependencies_in_one_optional_extra() -> None:
 
     assert project["dependencies"] == []
     rest_dependencies = project["optional-dependencies"]["rest"]
-    assert len(rest_dependencies) == 1
+    assert len(rest_dependencies) == 2
     assert rest_dependencies[0].startswith("fastapi>=")
+    assert rest_dependencies[1].startswith("uvicorn>=")

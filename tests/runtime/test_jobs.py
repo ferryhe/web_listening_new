@@ -1936,3 +1936,44 @@ def test_sqlite_open_failure_does_not_mutate_outside_path(
     assert list(outside.iterdir()) == [sentinel]
     assert sentinel.read_bytes() == b"preserve"
     assert not (data_dir / "jobs.sqlite3").exists()
+
+
+def test_terminal_artifact_grants_are_atomic_caller_scoped_and_backfilled(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "jobs.sqlite3"
+    repository = JobRepository(path)
+    repository.submit_request(
+        "job-grant",
+        _request(),
+        caller_id="caller-one",
+        idempotency_key="grant",
+        at=RESULT_WINDOW_START,
+    )
+    claim = repository.claim_next(
+        "worker", at=RESULT_WINDOW_START, lease_deadline=RESULT_WINDOW_END
+    )
+    assert claim is not None
+    result, failure = _terminal_facts(JobStatus.COMPLETED)
+    result = replace(result, manifest=replace(result.manifest, run_id="job-grant"))
+    repository.transition(
+        "job-grant",
+        JobStatus.COMPLETED,
+        at=RESULT_WINDOW_END,
+        result=result,
+        failure_code=failure,
+        claim_token=claim.token,
+    )
+    artifact_id = result.artifacts[0].artifact_id
+    assert repository.caller_has_artifact("caller-one", artifact_id)
+    assert not repository.caller_has_artifact("caller-two", artifact_id)
+    repository.close()
+
+    with sqlite3.connect(path) as connection:
+        connection.execute("DELETE FROM job_artifact_grants")
+    reopened = JobRepository(path)
+    try:
+        assert reopened.caller_has_artifact("caller-one", artifact_id)
+        assert not reopened.caller_has_artifact("caller-two", artifact_id)
+    finally:
+        reopened.close()

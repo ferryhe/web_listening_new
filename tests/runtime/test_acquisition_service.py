@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from threading import Event, Thread
+
 import pytest
 
 from web_listening.request.model import Budgets, ContentType, Request, Scope
@@ -73,6 +75,28 @@ class _Runtime:
             claim_token=job.claim_token,
         )
 
+    def cancel(self, job_id: str) -> object:
+        return self.jobs.cancel(job_id, at=NOW)
+
+
+class _ClaimGate:
+    def __init__(self, jobs: JobRepository, *, fail: bool = False) -> None:
+        self.jobs = jobs
+        self.claimed = Event()
+        self.release = Event()
+        self.fail = fail
+
+    def reconcile(self, *, at: str) -> object:
+        return self.jobs.reconcile(at=at)
+
+    def claim_next(self, *args, **kwargs):
+        if self.fail:
+            raise RuntimeError("repository failed")
+        claim = self.jobs.claim_next(*args, **kwargs)
+        self.claimed.set()
+        self.release.wait(5)
+        return claim
+
 
 def test_workers_reconcile_running_and_execute_submitted_in_stable_order() -> None:
     jobs = JobRepository()
@@ -127,3 +151,54 @@ def test_worker_concurrency_requires_builtin_int_in_range(invalid: object) -> No
         AcquisitionService(  # type: ignore[arg-type]
             runtime, jobs, concurrency=invalid, clock=lambda: NOW
         )
+
+
+def test_wake_during_final_empty_claim_is_not_lost() -> None:
+    jobs = JobRepository()
+    gate = _ClaimGate(jobs)
+    runtime = _Runtime(jobs)
+    workers = AcquisitionService(  # type: ignore[arg-type]
+        runtime, gate, concurrency=1, clock=lambda: NOW
+    )
+    workers.wake()
+    assert gate.claimed.wait(5)
+    jobs.submit_request(
+        "job-late", _request(), caller_id="caller", idempotency_key="late", at=NOW
+    )
+    workers.wake()
+    gate.release.set()
+    workers.run_available()
+    workers.close()
+    assert runtime.calls == ["job-late"]
+
+
+def test_close_cancels_claim_between_repository_claim_and_registration() -> None:
+    jobs = JobRepository()
+    jobs.submit_request(
+        "job-race", _request(), caller_id="caller", idempotency_key="race", at=NOW
+    )
+    gate = _ClaimGate(jobs)
+    runtime = _Runtime(jobs)
+    workers = AcquisitionService(  # type: ignore[arg-type]
+        runtime, gate, concurrency=1, clock=lambda: NOW
+    )
+    workers.wake()
+    assert gate.claimed.wait(5)
+    closer = Thread(target=workers.close)
+    closer.start()
+    gate.release.set()
+    closer.join(5)
+    assert not closer.is_alive()
+    assert not runtime.calls
+    assert jobs.get("job-race").cancel_requested_at == NOW
+
+
+def test_claim_failure_marks_worker_unhealthy() -> None:
+    jobs = JobRepository()
+    gate = _ClaimGate(jobs, fail=True)
+    workers = AcquisitionService(  # type: ignore[arg-type]
+        _Runtime(jobs), gate, concurrency=1, clock=lambda: NOW
+    )
+    workers.run_available()
+    assert not workers.healthy
+    workers.close()

@@ -1,17 +1,22 @@
-"""Thin REST adapter over the public Runtime service."""
+"""Authenticated thin REST adapter over the public Runtime service."""
 
-# pylint: disable=duplicate-code,too-many-return-statements,too-many-statements
+# pylint: disable=duplicate-code,too-many-statements,too-many-return-statements
+# pylint: disable=broad-exception-caught
+# pylint: disable=too-many-locals
 
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable
-from dataclasses import replace
+import hashlib
+import hmac
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, replace
 
-from fastapi import FastAPI  # pylint: disable=import-error
-from fastapi import Request as HttpRequest  # pylint: disable=import-error
-from fastapi.concurrency import run_in_threadpool  # pylint: disable=import-error
-from fastapi.responses import JSONResponse  # pylint: disable=import-error
+from fastapi import FastAPI
+from fastapi import Request as HttpRequest
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from web_listening.artifact.model import ArtifactStoreError, StoredArtifact
 from web_listening.request.model import RequestValidationError
@@ -27,15 +32,25 @@ from web_listening.site_skill.validate import site_skill_from_mapping
 RuntimeProvider = Callable[[], RuntimeService]
 
 
+@dataclass(frozen=True, slots=True)
+class RestConfig:
+    """Non-secret HTTP boundary configuration."""
+
+    caller_id: str
+    token_sha256: str
+    binary_cap_bytes: int = 100 * 1024 * 1024
+    base64_cap_bytes: int = 1024 * 1024
+
+
 def _job_payload(job: Job) -> dict[str, object]:
-    result = None if job.result is None else job.result.to_dict()
     return {
         "job_id": job.job_id,
         "status": job.status.value,
         "submitted_at": job.submitted_at,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
-        "result": result,
+        "cancel_requested_at": job.cancel_requested_at,
+        "result": None if job.result is None else job.result.to_dict(),
         "failure_code": job.failure_code,
     }
 
@@ -51,135 +66,262 @@ def _artifact_payload(artifact: StoredArtifact) -> dict[str, object]:
     }
 
 
-def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
+def _error(status: int, code: str, message: str, **headers: str) -> JSONResponse:
     return JSONResponse(
-        status_code=status_code,
+        status_code=status,
         content={"error": SafeError(code, message).to_dict()},
+        headers=headers,
     )
 
 
-def _runtime_error_response(exc: Exception) -> JSONResponse:
-    if isinstance(exc, HandoffError):
-        if exc.code == "handoff.not_terminal":
-            return _error_response(409, exc.code, "Job is not terminal.")
-        if exc.code == "handoff.result_unavailable":
-            return _error_response(404, exc.code, "Result is unavailable.")
-        return _error_response(500, exc.code, "Handoff export failed.")
-    if isinstance(exc, JobStateError):
-        if exc.code == "job.not_found":
-            return _error_response(404, exc.code, "Resource was not found.")
-        if exc.code == "job.id_invalid":
-            return _error_response(422, exc.code, "Identifier is invalid.")
-    if isinstance(exc, ArtifactStoreError):
-        if exc.code == "artifact.not_found":
-            return _error_response(404, exc.code, "Resource was not found.")
-        if exc.code == "artifact.id_invalid":
-            return _error_response(422, exc.code, "Identifier is invalid.")
-    return _error_response(500, "runtime.failed", "Runtime request failed.")
+def _runtime_error(exc: Exception) -> JSONResponse:
+    code = getattr(exc, "code", "runtime.failed")
+    if isinstance(exc, JobStateError) and code == "job.not_found":
+        return _error(404, code, "Resource was not found.")
+    if isinstance(exc, ArtifactStoreError) and code == "artifact.not_found":
+        return _error(404, code, "Resource was not found.")
+    if code == "idempotency.conflict":
+        return _error(409, code, "Idempotency key conflicts with this request.")
+    if isinstance(exc, HandoffError) and code == "handoff.not_terminal":
+        return _error(409, code, "Job is not terminal.")
+    if isinstance(exc, HandoffError) and code == "handoff.result_unavailable":
+        return _error(404, code, "Resource was not found.")
+    if isinstance(exc, (JobStateError, ArtifactStoreError)) and code.endswith(
+        "invalid"
+    ):
+        return _error(422, code, "Identifier is invalid.")
+    return _error(500, "runtime.failed", "Runtime request failed.")
 
 
-def create_app(runtime_provider: RuntimeProvider) -> FastAPI:
-    """Create thin routes using an explicitly provided Runtime."""
+def create_app(
+    runtime_provider: RuntimeProvider,
+    config: RestConfig,
+    *,
+    wake: Callable[[], None] | None = None,
+    ready: Callable[[], bool] | None = None,
+) -> FastAPI:
+    """Create authenticated routes using an explicitly provided Runtime."""
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
-    @app.post("/v1/acquisitions", status_code=201)
+    def caller(http_request: HttpRequest) -> str | JSONResponse:
+        value = http_request.headers.get("authorization", "")
+        parts = value.split(" ")
+        valid = len(parts) == 2 and parts[0] == "Bearer" and bool(parts[1])
+        digest = hashlib.sha256(parts[1].encode()).hexdigest() if valid else "0" * 64
+        if not valid or not hmac.compare_digest(digest, config.token_sha256):
+            return _error(
+                401,
+                "authentication.invalid",
+                "Authentication is required.",
+                **{"WWW-Authenticate": "Bearer"},
+            )
+        return config.caller_id
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/ready")
+    def readiness() -> JSONResponse:
+        is_ready = ready is None or ready()
+        return JSONResponse(
+            status_code=200 if is_ready else 503,
+            content={"status": "ready" if is_ready else "unready"},
+        )
+
+    @app.post("/v1/acquisitions")
     async def acquire(http_request: HttpRequest) -> JSONResponse:
+        identity = caller(http_request)
+        if isinstance(identity, JSONResponse):
+            return identity
+        key = http_request.headers.get("idempotency-key")
+        if key is None:
+            return _error(422, "idempotency.required", "Idempotency-Key is required.")
         try:
-            payload = (await http_request.body()).decode("utf-8")
-            request = request_from_json(payload)
+            request = request_from_json((await http_request.body()).decode("utf-8"))
             if request.site_skill is not None:
                 request = replace(
-                    request,
-                    site_skill=site_skill_from_mapping(request.site_skill),
+                    request, site_skill=site_skill_from_mapping(request.site_skill)
                 )
         except UnicodeDecodeError:
-            return _error_response(422, "request.invalid_json", "Request is invalid.")
+            return _error(422, "request.invalid_json", "Request is invalid.")
         except (RequestValidationError, SiteSkillError) as exc:
-            return _error_response(422, exc.code, "Request is invalid.")
+            return _error(422, exc.code, "Request is invalid.")
         try:
-            runtime = runtime_provider()
-            job = await run_in_threadpool(runtime.run, request)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            return _runtime_error_response(exc)
-        status_code = {
-            JobStatus.REJECTED: 422,
-            JobStatus.FAILED: 500,
-        }.get(job.status, 201)
-        return JSONResponse(status_code=status_code, content=_job_payload(job))
+            job = runtime_provider().submit(
+                request, caller_id=identity, idempotency_key=key
+            )
+            if wake is not None:
+                try:
+                    wake()
+                except Exception:  # Durable submission remains authoritative.
+                    pass
+            return JSONResponse(status_code=202, content=_job_payload(job))
+        except Exception as exc:
+            return _runtime_error(exc)
 
-    @app.get("/v1/jobs/{run_id}")
-    def get_job(run_id: str) -> JSONResponse:
+    @app.get("/v1/jobs/{job_id}")
+    def get_job(job_id: str, http_request: HttpRequest) -> JSONResponse:
+        identity = caller(http_request)
+        if isinstance(identity, JSONResponse):
+            return identity
         try:
-            runtime = runtime_provider()
-            job = runtime.get_job(run_id)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            return _runtime_error_response(exc)
-        return JSONResponse(status_code=200, content=_job_payload(job))
+            return JSONResponse(
+                status_code=200,
+                content=_job_payload(
+                    runtime_provider().get_owned_job(job_id, identity)
+                ),
+            )
+        except Exception as exc:
+            return _runtime_error(exc)
+
+    @app.post("/v1/jobs/{job_id}/cancel")
+    def cancel(job_id: str, http_request: HttpRequest) -> JSONResponse:
+        identity = caller(http_request)
+        if isinstance(identity, JSONResponse):
+            return identity
+        try:
+            job = runtime_provider().cancel_owned(job_id, identity)
+            status = (
+                200
+                if job.status
+                in {
+                    JobStatus.COMPLETED,
+                    JobStatus.PARTIAL,
+                    JobStatus.FAILED,
+                    JobStatus.REJECTED,
+                }
+                else 202
+            )
+            return JSONResponse(status_code=status, content=_job_payload(job))
+        except Exception as exc:
+            return _runtime_error(exc)
 
     @app.get("/v1/jobs/{job_id}/handoff")
-    def get_handoff(job_id: str) -> JSONResponse:
+    def handoff(job_id: str, http_request: HttpRequest) -> JSONResponse:
+        identity = caller(http_request)
+        if isinstance(identity, JSONResponse):
+            return identity
         try:
-            runtime = runtime_provider()
-            handoff = runtime.get_handoff(job_id)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            return _runtime_error_response(exc)
-        return JSONResponse(status_code=200, content=handoff.to_dict())
+            return JSONResponse(
+                status_code=200,
+                content=runtime_provider()
+                .get_owned_handoff(job_id, identity)
+                .to_dict(),
+            )
+        except Exception as exc:
+            return _runtime_error(exc)
 
     @app.get("/v1/artifacts/{artifact_id}")
-    def read_artifact(artifact_id: str) -> JSONResponse:
+    def artifact(artifact_id: str, http_request: HttpRequest) -> JSONResponse:
+        identity = caller(http_request)
+        if isinstance(identity, JSONResponse):
+            return identity
+        context: AbstractContextManager = runtime_provider().open_owned_artifact(
+            artifact_id, identity
+        )
         try:
-            runtime = runtime_provider()
-            artifact = runtime.read_artifact(artifact_id)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            return _runtime_error_response(exc)
-        return JSONResponse(status_code=200, content=_artifact_payload(artifact))
-
-    @app.post("/v1/site-explorations", status_code=201)
-    async def site_explore(http_request: HttpRequest) -> JSONResponse:
-        try:
-            payload = (await http_request.body()).decode("utf-8")
-            request = request_from_json(payload)
-            if request.site_skill is not None:
-                request = replace(
-                    request,
-                    site_skill=site_skill_from_mapping(request.site_skill),
+            opened = context.__enter__()  # pylint: disable=unnecessary-dunder-call
+            if opened.size_bytes > config.base64_cap_bytes:
+                context.__exit__(None, None, None)
+                return _error(
+                    413, "artifact.too_large", "Artifact exceeds response limit."
                 )
-        except UnicodeDecodeError:
-            return _error_response(422, "request.invalid_json", "Request is invalid.")
-        except (RequestValidationError, SiteSkillError) as exc:
-            return _error_response(422, exc.code, "Request is invalid.")
-        try:
-            runtime = runtime_provider()
-            result = await run_in_threadpool(runtime.explore_site, request)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            return _runtime_error_response(exc)
-        status_code = {
-            "rejected": 422,
-            "failed": 500,
-        }.get(result.status.value, 201)
-        return JSONResponse(status_code=status_code, content=result.to_dict())
+            try:
+                content = opened.stream.read(opened.size_bytes + 1)
+            finally:
+                context.__exit__(None, None, None)
+            if len(content) != opened.size_bytes:
+                raise ArtifactStoreError("blob.corrupt")
+            stored = StoredArtifact(
+                opened.artifact_id,
+                opened.blob_sha256,
+                opened.size_bytes,
+                opened.mime_type,
+                content,
+            )
+            return JSONResponse(status_code=200, content=_artifact_payload(stored))
+        except Exception as exc:
+            return _runtime_error(exc)
 
-    @app.post("/v1/site-refreshes", status_code=201)
-    async def site_refresh(http_request: HttpRequest) -> JSONResponse:
+    @app.get("/v1/artifacts/{artifact_id}/content")
+    def artifact_content(artifact_id: str, http_request: HttpRequest):
+        identity = caller(http_request)
+        if isinstance(identity, JSONResponse):
+            return identity
+        if "range" in http_request.headers:
+            return _error(416, "range.unsupported", "Range requests are unsupported.")
+        context: AbstractContextManager = runtime_provider().open_owned_artifact(
+            artifact_id, identity
+        )
         try:
-            payload = (await http_request.body()).decode("utf-8")
-            request = site_refresh_request_from_json(payload)
+            opened = context.__enter__()  # pylint: disable=unnecessary-dunder-call
+            if opened.size_bytes > config.binary_cap_bytes:
+                context.__exit__(None, None, None)
+                return _error(
+                    413, "artifact.too_large", "Artifact exceeds response limit."
+                )
+        except Exception as exc:
+            return _runtime_error(exc)
+
+        def chunks() -> Iterator[bytes]:
+            try:
+                while chunk := opened.stream.read(1024 * 1024):
+                    yield chunk
+            finally:
+                context.__exit__(None, None, None)
+
+        headers = {
+            "Content-Length": str(opened.size_bytes),
+            "ETag": f'"{opened.blob_sha256}"',
+            "Digest": f"sha-256={opened.blob_sha256}",
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Type": opened.mime_type,
+        }
+        return StreamingResponse(chunks(), headers=headers)
+
+    async def synchronous(http_request: HttpRequest, refresh: bool) -> JSONResponse:
+        identity = caller(http_request)
+        if isinstance(identity, JSONResponse):
+            return identity
+        try:
+            raw = (await http_request.body()).decode("utf-8")
+            if refresh:
+                request = site_refresh_request_from_json(raw)
+            else:
+                request = request_from_json(raw)
+                if request.site_skill is not None:
+                    request = replace(
+                        request, site_skill=site_skill_from_mapping(request.site_skill)
+                    )
         except UnicodeDecodeError:
-            return _error_response(422, "request.invalid_json", "Request is invalid.")
-        except RequestValidationError as exc:
-            return _error_response(422, exc.code, "Request is invalid.")
+            return _error(422, "request.invalid_json", "Request is invalid.")
+        except (RequestValidationError, SiteSkillError) as exc:
+            return _error(422, exc.code, "Request is invalid.")
         try:
-            runtime = runtime_provider()
-            result = await run_in_threadpool(runtime.refresh_site, request)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            return _runtime_error_response(exc)
-        status_code = {
-            "rejected": 422,
-            "failed": 500,
-        }.get(result.status.value, 201)
-        return JSONResponse(status_code=status_code, content=result.to_dict())
+            if refresh:
+                result = await run_in_threadpool(
+                    runtime_provider().refresh_site_owned, request, identity
+                )
+            else:
+                result = await run_in_threadpool(
+                    runtime_provider().explore_site_owned, request, identity
+                )
+            status = {"rejected": 422, "failed": 500}.get(result.status.value, 201)
+            return JSONResponse(status_code=status, content=result.to_dict())
+        except Exception as exc:
+            return _runtime_error(exc)
+
+    @app.post("/v1/site-explorations")
+    async def site_explore(http_request: HttpRequest) -> JSONResponse:
+        return await synchronous(http_request, False)
+
+    @app.post("/v1/site-refreshes")
+    async def site_refresh(http_request: HttpRequest) -> JSONResponse:
+        return await synchronous(http_request, True)
 
     return app
 
 
-__all__ = ["RuntimeProvider", "create_app"]
+__all__ = ["RestConfig", "create_app"]
