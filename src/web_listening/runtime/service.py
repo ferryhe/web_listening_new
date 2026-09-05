@@ -444,7 +444,11 @@ def _execution_exception_result(
                 if execution_result.artifacts
                 else ResultStatus.FAILED
             ),
-            manifest=replace(execution_result.manifest, attempts=attempts),
+            manifest=replace(
+                execution_result.manifest,
+                generated_at=generated_at,
+                attempts=attempts,
+            ),
             site_skill_used=execution_result.site_skill_used,
             site_skill_update=execution_result.site_skill_update,
             attempts=attempts,

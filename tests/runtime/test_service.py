@@ -1757,6 +1757,116 @@ def test_persistent_cancellation_callback_exception_terminalizes_claim(
     store.close()
 
 
+def test_run_workflow_exception_with_sensitive_seed_still_terminalizes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, store, jobs = _service(tmp_path, _CountingTool(_successful_output()))
+    sensitive_url = f"{URL}?access_token=private-value"
+    request = replace(
+        _request(None),
+        scope=replace(_request(None).scope, seeds=(sensitive_url,)),
+    )
+    workflow_error = RuntimeError("deterministic workflow exception")
+
+    def fail_workflow(*_args, **_kwargs):
+        raise workflow_error
+
+    monkeypatch.setattr(service_module, "run_single_target", fail_workflow)
+
+    with pytest.raises(RuntimeError) as raised:
+        service.run(request)
+
+    assert raised.value is workflow_error
+    finished = jobs.get("job-1")
+    assert finished.status is JobStatus.FAILED
+    assert finished.failure_code == "runtime.workflow_failed"
+    assert finished.result is not None
+    assert finished.result.manifest.requested_url == "https://invalid.invalid/"
+    assert sensitive_url not in str(finished.result.to_dict())
+    store.close()
+
+
+def test_async_workflow_exception_with_path_like_seed_still_terminalizes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, store, jobs = _service(tmp_path, _CountingTool(_successful_output()))
+    path_like_url = f"{URL}?next=/root/private"
+    request = replace(
+        _request(None),
+        scope=replace(_request(None).scope, seeds=(path_like_url,)),
+    )
+    service.submit(request, caller_id="caller", idempotency_key="path-like")
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    workflow_error = RuntimeError("deterministic async workflow exception")
+
+    def fail_workflow(*_args, **_kwargs):
+        raise workflow_error
+
+    monkeypatch.setattr(service_module, "run_single_target", fail_workflow)
+    assert claim is not None
+
+    with pytest.raises(RuntimeError) as raised:
+        service.execute_submitted(claim.job.job_id, claim.request, lambda: False)
+
+    assert raised.value is workflow_error
+    finished = jobs.get(claim.job.job_id)
+    assert finished.status is JobStatus.FAILED
+    assert finished.failure_code == "runtime.workflow_failed"
+    assert finished.result is not None
+    assert finished.result.manifest.requested_url == "https://invalid.invalid/"
+    assert path_like_url not in str(finished.result.to_dict())
+    store.close()
+
+
+def test_async_exception_result_uses_terminalization_timestamp(tmp_path: Path) -> None:
+    tool = _CountingTool(
+        AcquisitionFailure(
+            WEB_HTTP_MANIFEST.tool_id,
+            WEB_HTTP_MANIFEST.version,
+            "gateway.timeout",
+            requests=1,
+            runtime_ms=7,
+        )
+    )
+    registry = Registry()
+    registry.register(WEB_HTTP_MANIFEST, tool)
+    store = ArtifactStore(tmp_path / "artifacts")
+    jobs = JobRepository()
+    times = iter(f"2026-08-25T20:00:{second:02d}Z" for second in range(60))
+    service = RuntimeService(
+        registry,
+        store,
+        jobs,
+        clock=lambda: next(times),
+        job_id_factory=lambda: "job-one",
+    )
+    service.submit(_request(_skill()), caller_id="caller", idempotency_key="timestamp")
+    claim = jobs.claim_next(
+        "worker", at="2026-08-25T20:00:01Z", lease_deadline="2026-08-25T20:01:00Z"
+    )
+    callback_error = RuntimeError("deterministic post-invocation callback failure")
+    checks = 0
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise callback_error
+        return False
+
+    assert claim is not None
+    with pytest.raises(RuntimeError) as raised:
+        service.execute_submitted(claim.job.job_id, claim.request, should_cancel)
+
+    assert raised.value is callback_error
+    finished = jobs.get(claim.job.job_id)
+    assert finished.status is JobStatus.FAILED
+    assert finished.result is not None
+    assert finished.result.manifest.generated_at == finished.finished_at
+    assert finished.failure_code == "runtime.workflow_failed"
+    store.close()
+
+
 def test_run_empty_seed_request_preserves_rejection_and_terminalizes(
     tmp_path: Path,
 ) -> None:

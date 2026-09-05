@@ -38,7 +38,7 @@ from web_listening.request.model import (
 from web_listening.request.scope import canonicalize_url
 from web_listening.request.validate import compile_access_policy, validate_request
 from web_listening.result.attempts import Attempt
-from web_listening.result.errors import SafeError
+from web_listening.result.errors import ResultValidationError, SafeError
 from web_listening.result.manifest import (
     Manifest,
     RedirectEvidence,
@@ -1744,15 +1744,26 @@ def terminal_failure_result(
             requested_url = canonicalize_url(request.scope.seeds[0])
         except RequestValidationError:
             pass
-    return _failure_result(
-        status=status,
-        run_id=run_id,
-        generated_at=generated_at,
-        requested_url=requested_url,
-        current_url=requested_url,
-        code=code,
-        message=message,
-    )
+    try:
+        return _failure_result(
+            status=status,
+            run_id=run_id,
+            generated_at=generated_at,
+            requested_url=requested_url,
+            current_url=requested_url,
+            code=code,
+            message=message,
+        )
+    except ResultValidationError:
+        return _failure_result(
+            status=status,
+            run_id=run_id,
+            generated_at=generated_at,
+            requested_url="https://invalid.invalid/",
+            current_url="https://invalid.invalid/",
+            code=code,
+            message=message,
+        )
 
 
 def _attempt(  # pylint: disable=too-many-arguments
