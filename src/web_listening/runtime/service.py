@@ -6,21 +6,36 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from web_listening.artifact.model import StoredArtifact
 from web_listening.artifact.store import ArtifactStore
-from web_listening.request.model import Request, RequestValidationError
+from web_listening.request.model import Budgets, Request, RequestValidationError
 from web_listening.request.site_refresh import SiteRefreshRequest
+from web_listening.request.validate import compile_access_policy
+from web_listening.result.errors import SafeError
 from web_listening.result.handoff import AcquisitionHandoff
+from web_listening.result.model import Result, ResultStatus
 from web_listening.result.site_explore import SiteExploreResult
 from web_listening.result.site_refresh import SiteRefreshResult
 from web_listening.runtime.handoff import project_handoff
-from web_listening.runtime.jobs import Job, JobRepository, JobStatus
+from web_listening.runtime.jobs import (
+    Job,
+    JobRepository,
+    JobStateError,
+    JobStatus,
+    canonical_request_facts,
+)
 from web_listening.runtime.site_explore import run_site_explore
 from web_listening.runtime.site_refresh import run_site_refresh
-from web_listening.runtime.workflow import run_single_target
+from web_listening.runtime.workflow import (
+    cancellation_check,
+    cancelled_result,
+    run_single_target,
+    terminal_failure_result,
+)
 from web_listening.tool_registry.acquisition.builtins.web_http import (
     WEB_HTTP_MANIFEST,
     WebHttpAcquisitionTool,
@@ -50,6 +65,7 @@ from web_listening.tool_registry.transform.builtins.simple_html_markdown import 
 )
 
 _OwnedResource = WebHttpAcquisitionTool | ArtifactStore | JobRepository
+_ADMISSION_MAXIMA = Budgets(100, 100 * 1024 * 1024, 600, 4)
 
 
 class RuntimeService:
@@ -123,18 +139,38 @@ class RuntimeService:
                 clock=self._clock,
             )
         except RequestValidationError as exc:
+            terminal_at = self._clock()
+            result = terminal_failure_result(
+                None,
+                status=ResultStatus.REJECTED,
+                run_id=job_id,
+                generated_at=terminal_at,
+                code=exc.code,
+                message="Runtime request was rejected.",
+            )
             return self._jobs.transition(
                 job_id,
                 JobStatus.REJECTED,
-                at=self._clock(),
+                at=terminal_at,
+                result=result,
                 failure_code=exc.code,
             )
         except Exception:  # pylint: disable=broad-exception-caught
             try:
+                terminal_at = self._clock()
+                result = terminal_failure_result(
+                    request,
+                    status=ResultStatus.FAILED,
+                    run_id=job_id,
+                    generated_at=terminal_at,
+                    code="runtime.workflow_failed",
+                    message="Runtime execution did not complete.",
+                )
                 self._jobs.transition(
                     job_id,
                     JobStatus.FAILED,
-                    at=self._clock(),
+                    at=terminal_at,
+                    result=result,
                     failure_code="runtime.workflow_failed",
                 )
             except Exception:  # pylint: disable=broad-exception-caught
@@ -160,6 +196,137 @@ class RuntimeService:
             result=result,
             failure_code=failure_code,
         )
+
+    def submit(self, request: Request, *, caller_id: str, idempotency_key: str) -> Job:
+        """Validate and durably submit one idempotent asynchronous acquisition."""
+        self._ensure_open()
+        canonical, _, _ = canonical_request_facts(request)
+        admitted = _admit(canonical)
+        return self._jobs.submit_request(
+            self._job_id_factory(),
+            canonical,
+            caller_id=caller_id,
+            idempotency_key=idempotency_key,
+            at=self._clock(),
+            execution_request=admitted,
+        )
+
+    def cancel(self, job_id: str) -> Job:
+        """Request cooperative cancellation without inventing a Job status."""
+        self._ensure_open()
+        return self._jobs.cancel(job_id, at=self._clock())
+
+    def execute_submitted(
+        self,
+        job_id: str,
+        request: Request,
+        should_cancel: Callable[[], bool],
+    ) -> Job:
+        """Execute one already-claimed persisted Request under its fencing token."""
+        self._ensure_open()
+        job = self._jobs.get(job_id)
+        if job.status is not JobStatus.RUNNING or job.claim_token is None:
+            raise JobStateError("job.not_claimed")
+        canonical, _, fingerprint = canonical_request_facts(request)
+        if fingerprint != job.execution_request_fingerprint:
+            raise JobStateError("job.request_mismatch")
+
+        callback_error: Exception | None = None
+
+        def cancellation() -> bool:
+            nonlocal callback_error
+            if callback_error is not None:
+                return True
+            try:
+                requested = should_cancel()
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                callback_error = exc
+                return True
+            return requested or self._jobs.get(job_id).cancel_requested_at is not None
+
+        result: Result | None = None
+        try:
+            with cancellation_check(cancellation):
+                result = run_single_target(
+                    canonical,
+                    self._registry,
+                    self._artifact_store,
+                    run_id=job_id,
+                    clock=self._clock,
+                )
+            if cancellation():
+                result = cancelled_result(result, generated_at=self._clock())
+            if callback_error is not None:
+                raise callback_error
+        except Exception:  # pylint: disable=broad-exception-caught
+            try:
+                self._terminalize_execution_exception(job, canonical, result)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            raise
+        try:
+            return self._jobs.transition(
+                job_id,
+                JobStatus(result.status.value),
+                at=self._clock(),
+                result=result,
+                failure_code=_failure_code(result),
+                claim_token=job.claim_token,
+            )
+        except JobStateError as exc:
+            if exc.code != "job.cancel_requested":
+                raise
+            result = cancelled_result(result, generated_at=self._clock())
+            return self._jobs.transition(
+                job_id,
+                JobStatus(result.status.value),
+                at=self._clock(),
+                result=result,
+                failure_code=_failure_code(result),
+                claim_token=job.claim_token,
+            )
+
+    def _terminalize_execution_exception(
+        self, job: Job, request: Request, execution_result: Result | None
+    ) -> None:
+        """Persist strict failure without re-entering a failed cancellation callback."""
+        cancelled = self._jobs.get(job.job_id).cancel_requested_at is not None
+        terminal_at = self._clock()
+        result = _execution_exception_result(
+            request,
+            job_id=job.job_id,
+            generated_at=terminal_at,
+            execution_result=execution_result,
+            cancelled=cancelled,
+        )
+        try:
+            self._jobs.transition(
+                job.job_id,
+                JobStatus(result.status.value),
+                at=terminal_at,
+                result=result,
+                failure_code=_failure_code(result),
+                claim_token=job.claim_token,
+            )
+        except JobStateError as exc:
+            if exc.code != "job.cancel_requested":
+                raise
+            terminal_at = self._clock()
+            result = _execution_exception_result(
+                request,
+                job_id=job.job_id,
+                generated_at=terminal_at,
+                execution_result=execution_result,
+                cancelled=True,
+            )
+            self._jobs.transition(
+                job.job_id,
+                JobStatus(result.status.value),
+                at=terminal_at,
+                result=result,
+                failure_code=_failure_code(result),
+                claim_token=job.claim_token,
+            )
 
     def get_job(self, job_id: str) -> Job:
         """Return one Job without adding Runtime-owned interpretation."""
@@ -226,6 +393,95 @@ def _utc_now() -> str:
 
 def _job_id() -> str:
     return f"job-{uuid.uuid4().hex}"
+
+
+def _admit(request: Request) -> Request:
+    limits = Budgets(
+        min(request.budgets.max_requests, _ADMISSION_MAXIMA.max_requests),
+        min(request.budgets.max_bytes, _ADMISSION_MAXIMA.max_bytes),
+        min(
+            request.budgets.max_runtime_seconds,
+            _ADMISSION_MAXIMA.max_runtime_seconds,
+        ),
+        min(
+            request.budgets.max_tool_attempts_per_target,
+            _ADMISSION_MAXIMA.max_tool_attempts_per_target,
+        ),
+    )
+    policy = compile_access_policy(request, budgets=limits)
+    return Request(
+        request.scope, request.site_skill, request.explore_all_tools, policy.budgets
+    )
+
+
+def _execution_exception_result(
+    request: Request,
+    *,
+    job_id: str,
+    generated_at: str,
+    execution_result: Result | None,
+    cancelled: bool,
+) -> Result:
+    if cancelled and execution_result is not None:
+        return cancelled_result(execution_result, generated_at=generated_at)
+    if execution_result is not None:
+        error = SafeError(
+            "runtime.workflow_failed",
+            "Runtime execution did not complete.",
+        )
+        attempts = tuple(
+            (
+                replace(attempt, error=error)
+                if attempt.error is not None
+                and attempt.error.code == "runtime.cancelled"
+                else attempt
+            )
+            for attempt in execution_result.attempts
+        )
+        return Result(
+            status=(
+                ResultStatus.PARTIAL
+                if execution_result.artifacts
+                else ResultStatus.FAILED
+            ),
+            manifest=replace(
+                execution_result.manifest,
+                generated_at=generated_at,
+                attempts=attempts,
+            ),
+            site_skill_used=execution_result.site_skill_used,
+            site_skill_update=execution_result.site_skill_update,
+            attempts=attempts,
+            errors=(error,),
+            usage=execution_result.usage,
+        )
+    code = "runtime.cancelled" if cancelled else "runtime.workflow_failed"
+    return terminal_failure_result(
+        request,
+        status=ResultStatus.FAILED,
+        run_id=job_id,
+        generated_at=generated_at,
+        code=code,
+        message=(
+            "Runtime execution was cancelled."
+            if cancelled
+            else "Runtime execution did not complete."
+        ),
+    )
+
+
+def _failure_code(result: Result) -> str | None:
+    errors = result.errors
+    if errors:
+        return errors[0].code
+    return next(
+        (
+            attempt.error.code
+            for attempt in result.attempts
+            if attempt.error is not None
+        ),
+        None,
+    )
 
 
 __all__ = ["RuntimeService"]
