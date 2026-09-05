@@ -1,26 +1,44 @@
 """Explicit in-memory or SQLite state for minimal Runtime Jobs."""
 
+# pylint: disable=duplicate-code,too-many-arguments,too-many-boolean-expressions
+# pylint: disable=too-many-lines
+# pylint: disable=too-many-instance-attributes,too-many-locals
 # pylint: disable=unidiomatic-typecheck
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import secrets
 import sqlite3
 import stat
 import threading
+import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qsl, unquote, urlsplit
 
+from web_listening.request.model import Request
+from web_listening.request.validate import request_from_mapping, validate_request
 from web_listening.result.errors import (
     ResultValidationError,
     SafeError,
+    ensure_safe_text,
     parse_utc_time,
     validate_text,
     validate_utc_time,
 )
 from web_listening.result.model import Result
+from web_listening.site_skill.model import SiteSkill, SiteSkillError
+from web_listening.site_skill.validate import (
+    site_skill_from_mapping,
+    site_skill_to_mapping,
+)
 
 
 class JobStateError(ValueError):
@@ -54,6 +72,26 @@ _TRANSITIONS = {
     JobStatus.SUBMITTED: frozenset({JobStatus.RUNNING}),
     JobStatus.RUNNING: _TERMINAL,
 }
+_SECRET_QUERY_KEYS = frozenset(
+    {
+        "auth",
+        "authorization",
+        "proxyauthorization",
+        "cookie",
+        "setcookie",
+        "token",
+        "accesstoken",
+        "refreshtoken",
+        "apikey",
+        "password",
+        "passwd",
+        "secret",
+        "clientsecret",
+        "privatekey",
+        "credential",
+        "sessionid",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +105,26 @@ class Job:
     finished_at: str | None = None
     result: Result | None = None
     failure_code: str | None = None
+    request_json: str | None = None
+    request_fingerprint: str | None = None
+    caller_id: str | None = None
+    idempotency_key: str | None = None
+    cancel_requested_at: str | None = None
+    worker_id: str | None = None
+    claim_token: str | None = None
+    claimed_at: str | None = None
+    lease_deadline: str | None = None
+    execution_request_json: str | None = None
+    execution_request_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobClaim:
+    """Opaque authority to execute and update one claimed Job."""
+
+    job: Job
+    request: Request
+    token: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,11 +205,306 @@ class JobRepository:
                     (identifier, job.status.value, timestamp, None, None, None, None),
                 )
                 self._insert_event(event)
+                persisted = self._validate_persisted_snapshot(job, (event,))
                 self._connection.execute("COMMIT")
-                return job
+                return persisted
             except BaseException:
                 self._rollback()
                 raise
+
+    def submit_request(
+        self,
+        job_id: str,
+        request: Request,
+        *,
+        caller_id: str,
+        idempotency_key: str,
+        at: str,
+        execution_request: Request | None = None,
+    ) -> Job:
+        """Atomically persist a canonical Request and its idempotency identity."""
+        identifier = _validate_job_id(job_id)
+        timestamp = _validate_time(at)
+        caller = _validate_boundary_text(caller_id, "caller.invalid", 256)
+        key = _validate_idempotency_key(idempotency_key)
+        canonical_request, request_json, fingerprint = canonical_request_facts(request)
+        canonical_execution, execution_json, execution_fingerprint = (
+            canonical_request_facts(
+                request if execution_request is None else execution_request
+            )
+        )
+        _validate_execution_authority(
+            canonical_request,
+            canonical_execution,
+            code="request.execution_authority_invalid",
+        )
+        job = Job(
+            identifier,
+            JobStatus.SUBMITTED,
+            timestamp,
+            request_json=request_json,
+            request_fingerprint=fingerprint,
+            caller_id=caller,
+            idempotency_key=key,
+            execution_request_json=execution_json,
+            execution_request_fingerprint=execution_fingerprint,
+        )
+        event = JobEvent(1, identifier, None, JobStatus.SUBMITTED, timestamp)
+        with self._lock:
+            self._ensure_open()
+            if self._connection is None:
+                existing = next(
+                    (
+                        item
+                        for item in self._jobs.values()
+                        if item.caller_id == caller and item.idempotency_key == key
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if existing.request_fingerprint != fingerprint:
+                        raise JobStateError("idempotency.conflict")
+                    return existing
+                if identifier in self._jobs:
+                    raise JobStateError("job.duplicate")
+                self._jobs[identifier] = job
+                self._events[identifier] = [event]
+                return job
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT * FROM jobs WHERE caller_id = ? AND idempotency_key = ?",
+                    (caller, key),
+                ).fetchone()
+                if row is not None:
+                    existing = self._require(row["job_id"])
+                    if existing.request_fingerprint != fingerprint:
+                        raise JobStateError("idempotency.conflict")
+                    self._connection.execute("COMMIT")
+                    return existing
+                if self._job_row(identifier) is not None:
+                    raise JobStateError("job.duplicate")
+                self._connection.execute(
+                    "INSERT INTO jobs (job_id,status,submitted_at,request_json,"
+                    "request_fingerprint,caller_id,idempotency_key,execution_request_json,"
+                    "execution_request_fingerprint) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        identifier,
+                        "submitted",
+                        timestamp,
+                        request_json,
+                        fingerprint,
+                        caller,
+                        key,
+                        execution_json,
+                        execution_fingerprint,
+                    ),
+                )
+                self._insert_event(event)
+                persisted = self._validate_persisted_snapshot(job, (event,))
+                self._connection.execute("COMMIT")
+                return persisted
+            except BaseException:
+                self._rollback()
+                raise
+
+    def request(self, job_id: str) -> Request:
+        """Read and revalidate the canonical Request owned by a submitted Job."""
+        job = self.get(job_id)
+        if job.request_json is None:
+            raise JobStateError("job.request_unavailable")
+        try:
+            return _request_from_json(job.request_json)
+        except (ValueError, TypeError) as exc:
+            raise JobStateError("job.persisted_invalid") from exc
+
+    def execution_request(self, job_id: str) -> Request:
+        """Read the separately persisted admitted Request used by workers."""
+        return self._execution_request(self.get(job_id))
+
+    @staticmethod
+    def _execution_request(job: Job) -> Request:
+        """Revalidate the admitted Request held by one Job snapshot."""
+        if job.execution_request_json is None:
+            if job.request_json is None:
+                raise JobStateError("job.request_unavailable")
+            request_json = job.request_json
+        else:
+            request_json = job.execution_request_json
+        try:
+            return _request_from_json(request_json)
+        except (ValueError, TypeError) as exc:
+            raise JobStateError("job.persisted_invalid") from exc
+
+    def claim_next(
+        self, worker_id: str, *, at: str, lease_deadline: str
+    ) -> JobClaim | None:
+        """Atomically claim the oldest submitted persisted Request."""
+        worker = _validate_boundary_text(worker_id, "worker.id_invalid", 128)
+        claimed_at = _validate_time(at)
+        deadline = _validate_time(lease_deadline)
+        if parse_utc_time(deadline) <= parse_utc_time(claimed_at):
+            raise JobStateError("job.lease_invalid")
+        token = secrets.token_hex(32)
+        with self._lock:
+            self._ensure_open()
+            candidates = (
+                sorted(
+                    (
+                        job
+                        for job in self._jobs.values()
+                        if job.status is JobStatus.SUBMITTED and job.request_json
+                    ),
+                    key=lambda item: (item.submitted_at, item.job_id),
+                )
+                if self._connection is None
+                else None
+            )
+            if candidates is not None:
+                if not candidates:
+                    return None
+                current = candidates[0]
+                request = self._execution_request(current)
+                updated = replace(
+                    _transition_snapshot(
+                        current, JobStatus.RUNNING, claimed_at, None, None
+                    ),
+                    worker_id=worker,
+                    claim_token=token,
+                    claimed_at=claimed_at,
+                    lease_deadline=deadline,
+                )
+                self._jobs[current.job_id] = updated
+                self._events[current.job_id].append(
+                    JobEvent(
+                        2,
+                        current.job_id,
+                        JobStatus.SUBMITTED,
+                        JobStatus.RUNNING,
+                        claimed_at,
+                    )
+                )
+                return JobClaim(updated, request, token)
+            try:
+                assert self._connection is not None
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT * FROM jobs WHERE status='submitted' AND request_json IS NOT NULL "
+                    "ORDER BY submitted_at, job_id LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    self._connection.execute("COMMIT")
+                    return None
+                current = _job_from_row(row)
+                request = self._execution_request(current)
+                updated = replace(
+                    _transition_snapshot(
+                        current, JobStatus.RUNNING, claimed_at, None, None
+                    ),
+                    worker_id=worker,
+                    claim_token=token,
+                    claimed_at=claimed_at,
+                    lease_deadline=deadline,
+                )
+                self._connection.execute(
+                    "UPDATE jobs SET status='running',started_at=?,worker_id=?,claim_token=?,"
+                    "claimed_at=?,lease_deadline=? WHERE job_id=? AND status='submitted'",
+                    (
+                        updated.started_at,
+                        updated.worker_id,
+                        updated.claim_token,
+                        updated.claimed_at,
+                        updated.lease_deadline,
+                        updated.job_id,
+                    ),
+                )
+                event = JobEvent(
+                    2,
+                    current.job_id,
+                    JobStatus.SUBMITTED,
+                    JobStatus.RUNNING,
+                    claimed_at,
+                )
+                self._insert_event(event)
+                claimed = self._validate_persisted_snapshot(
+                    updated, (*_expected_events(current), event)
+                )
+                self._connection.execute("COMMIT")
+                return JobClaim(claimed, request, token)
+            except BaseException:
+                self._rollback()
+                raise
+
+    def cancel(self, job_id: str, *, at: str) -> Job:
+        """Persist the first cancellation request while terminal state wins races."""
+        identifier = _validate_job_id(job_id)
+        timestamp = _validate_time(at)
+        with self._lock:
+            self._ensure_open()
+            if self._connection is None:
+                current = self._require(identifier)
+                if (
+                    current.status in _TERMINAL
+                    or current.cancel_requested_at is not None
+                ):
+                    return current
+                updated = replace(current, cancel_requested_at=timestamp)
+                self._jobs[identifier] = updated
+                return updated
+            try:
+                assert self._connection is not None
+                self._connection.execute("BEGIN IMMEDIATE")
+                current = self._require(identifier)
+                if (
+                    current.status not in _TERMINAL
+                    and current.cancel_requested_at is None
+                ):
+                    updated = replace(current, cancel_requested_at=timestamp)
+                    self._connection.execute(
+                        "UPDATE jobs SET cancel_requested_at=?"
+                        " WHERE job_id=? AND finished_at IS NULL",
+                        (timestamp, identifier),
+                    )
+                else:
+                    updated = current
+                persisted = self._validate_persisted_snapshot(
+                    updated, _expected_events(updated)
+                )
+                self._connection.execute("COMMIT")
+                return persisted
+            except BaseException:
+                self._rollback()
+                raise
+
+    def reconcile(self, *, at: str) -> tuple[Job, ...]:
+        """Fail-close abandoned running Jobs; submitted Jobs remain untouched."""
+        timestamp = _validate_time(at)
+        with self._lock:
+            self._ensure_open()
+            identifiers = (
+                [
+                    job.job_id
+                    for job in self._jobs.values()
+                    if job.status is JobStatus.RUNNING
+                ]
+                if self._connection is None
+                else [
+                    row[0]
+                    for row in self._connection.execute(
+                        "SELECT job_id FROM jobs WHERE status='running' ORDER BY job_id"
+                    )
+                ]
+            )
+            return tuple(
+                self.transition(
+                    identifier,
+                    JobStatus.FAILED,
+                    at=timestamp,
+                    failure_code="service.restart_interrupted",
+                    claim_token=self.get(identifier).claim_token,
+                )
+                for identifier in identifiers
+            )
 
     def transition(  # pylint: disable=too-many-branches
         self,
@@ -161,6 +514,7 @@ class JobRepository:
         at: str,
         result: Result | None = None,
         failure_code: str | None = None,
+        claim_token: str | None = None,
     ) -> Job:
         """Apply one legal transition; no other component may change state."""
         identifier = _validate_job_id(job_id)
@@ -173,6 +527,8 @@ class JobRepository:
             self._ensure_open()
             if self._connection is None:
                 current = self._require(identifier)
+                _require_claim(current, status, claim_token)
+                _require_cancellation_result(current, status, result, failure_code)
                 updated = _transition_snapshot(
                     current, status, timestamp, result, failure_code
                 )
@@ -191,6 +547,8 @@ class JobRepository:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
                 current = self._require(identifier)
+                _require_claim(current, status, claim_token)
+                _require_cancellation_result(current, status, result, failure_code)
                 updated = _transition_snapshot(
                     current, status, timestamp, result, failure_code
                 )
@@ -214,8 +572,11 @@ class JobRepository:
                     ),
                 )
                 self._insert_event(event)
+                persisted = self._validate_persisted_snapshot(
+                    updated, (*_expected_events(current), event)
+                )
                 self._connection.execute("COMMIT")
-                return updated
+                return persisted
             except BaseException:
                 self._rollback()
                 raise
@@ -270,8 +631,7 @@ class JobRepository:
     def _job_row(self, job_id: str) -> sqlite3.Row | None:
         assert self._connection is not None
         return self._connection.execute(
-            "SELECT job_id, status, submitted_at, started_at, finished_at,"
-            " result_json, failure_code FROM jobs WHERE job_id = ?",
+            "SELECT * FROM jobs WHERE job_id = ?",
             (job_id,),
         ).fetchone()
 
@@ -309,6 +669,15 @@ class JobRepository:
             raise JobStateError("job.persisted_invalid")
         return events
 
+    def _validate_persisted_snapshot(
+        self, expected_job: Job, expected_events: tuple[JobEvent, ...]
+    ) -> Job:
+        persisted_job = self._load_job(expected_job.job_id)
+        persisted_events = self._load_events(persisted_job)
+        if persisted_job != expected_job or persisted_events != expected_events:
+            raise JobStateError("job.persisted_invalid")
+        return persisted_job
+
     def _rollback(self) -> None:
         assert self._connection is not None
         if self._connection.in_transaction:
@@ -339,6 +708,29 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             PRIMARY KEY (job_id, sequence)
         );
         """)
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+    }
+    additions = {
+        "request_json": "TEXT",
+        "request_fingerprint": "TEXT",
+        "caller_id": "TEXT",
+        "idempotency_key": "TEXT",
+        "cancel_requested_at": "TEXT",
+        "worker_id": "TEXT",
+        "claim_token": "TEXT",
+        "claimed_at": "TEXT",
+        "lease_deadline": "TEXT",
+        "execution_request_json": "TEXT",
+        "execution_request_fingerprint": "TEXT",
+    }
+    for name, kind in additions.items():
+        if name not in columns:
+            connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {kind}")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS jobs_idempotency "
+        "ON jobs(caller_id,idempotency_key) WHERE caller_id IS NOT NULL"
+    )
 
 
 def _reject_symlink_chain(path: Path) -> None:
@@ -429,11 +821,12 @@ def _transition_snapshot(  # pylint: disable=too-many-branches
                 for value in result_times
             ):
                 raise JobStateError("job.time_invalid")
-        if status in {JobStatus.COMPLETED, JobStatus.PARTIAL} and result is None:
-            raise JobStateError("job.result_required")
         if result is None:
-            if failure_code is None:
-                raise JobStateError("job.failure_code_required")
+            if not (
+                status is JobStatus.FAILED
+                and failure_code == "service.restart_interrupted"
+            ):
+                raise JobStateError("job.result_required")
             _validate_failure_code(failure_code)
         elif failure_code != _result_failure_code(result):
             raise JobStateError("job.failure_code_mismatch")
@@ -450,6 +843,7 @@ def _transition_snapshot(  # pylint: disable=too-many-branches
 def _job_from_row(row: sqlite3.Row) -> Job:
     try:
         identifier = _validate_job_id(row["job_id"])
+        _validate_persisted_requests(row)
         status = JobStatus(row["status"])
         submitted_at = _validate_time(row["submitted_at"])
         started_at = _optional_time(row["started_at"])
@@ -466,13 +860,40 @@ def _job_from_row(row: sqlite3.Row) -> Job:
             finished_at,
             result,
             failure_code,
+            row["request_json"],
+            row["request_fingerprint"],
+            row["caller_id"],
+            row["idempotency_key"],
+            _optional_time(row["cancel_requested_at"]),
+            row["worker_id"],
+            row["claim_token"],
+            _optional_time(row["claimed_at"]),
+            _optional_time(row["lease_deadline"]),
+            row["execution_request_json"],
+            row["execution_request_fingerprint"],
         )
-        rebuilt = Job(identifier, JobStatus.SUBMITTED, submitted_at)
+        rebuilt = replace(
+            Job(identifier, JobStatus.SUBMITTED, submitted_at),
+            request_json=row["request_json"],
+            request_fingerprint=row["request_fingerprint"],
+            caller_id=row["caller_id"],
+            idempotency_key=row["idempotency_key"],
+            cancel_requested_at=_optional_time(row["cancel_requested_at"]),
+            execution_request_json=row["execution_request_json"],
+            execution_request_fingerprint=row["execution_request_fingerprint"],
+        )
         if status is not JobStatus.SUBMITTED:
             if started_at is None:
                 raise JobStateError("job.persisted_invalid")
             rebuilt = _transition_snapshot(
                 rebuilt, JobStatus.RUNNING, started_at, None, None
+            )
+            rebuilt = replace(
+                rebuilt,
+                worker_id=row["worker_id"],
+                claim_token=row["claim_token"],
+                claimed_at=_optional_time(row["claimed_at"]),
+                lease_deadline=_optional_time(row["lease_deadline"]),
             )
         if status in _TERMINAL:
             if finished_at is None:
@@ -591,4 +1012,220 @@ def _result_failure_code(result: Result) -> str | None:
     )
 
 
-__all__ = ["Job", "JobEvent", "JobRepository", "JobStateError", "JobStatus"]
+def _validate_boundary_text(value: object, code: str, maximum: int) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > maximum
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise JobStateError(code)
+    return value
+
+
+def _validate_idempotency_key(value: object) -> str:
+    if (
+        type(value) is not str
+        or not 1 <= len(value) <= 128
+        or any(not 32 <= ord(character) <= 126 for character in value)
+    ):
+        raise JobStateError("idempotency.key_invalid")
+    return value
+
+
+def _require_claim(job: Job, status: JobStatus, token: str | None) -> None:
+    if (
+        job.status is JobStatus.SUBMITTED
+        and status is JobStatus.RUNNING
+        and job.request_json is not None
+    ):
+        raise JobStateError("job.claim_required")
+    if job.claim_token is not None and token != job.claim_token:
+        raise JobStateError("job.claim_stale")
+
+
+def _require_cancellation_result(
+    job: Job,
+    status: JobStatus,
+    result: Result | None,
+    failure_code: str | None,
+) -> None:
+    if (
+        job.cancel_requested_at is not None
+        and status in _TERMINAL
+        and not (
+            status is JobStatus.FAILED
+            and result is None
+            and failure_code == "service.restart_interrupted"
+        )
+        and (
+            result is None
+            or not any(error.code == "runtime.cancelled" for error in result.errors)
+        )
+    ):
+        raise JobStateError("job.cancel_requested")
+
+
+def canonical_request_facts(request: Request) -> tuple[Request, str, str]:
+    """Validate and serialize the complete four-field Request canonically."""
+    canonical = validate_request(request)
+    skill = canonical.site_skill
+    try:
+        if isinstance(skill, SiteSkill):
+            skill_model = site_skill_from_mapping(site_skill_to_mapping(skill))
+            skill_mapping: object = site_skill_to_mapping(skill_model)
+            skill = skill_model
+        elif skill is None:
+            skill_mapping = None
+        else:
+            skill_model = site_skill_from_mapping(skill)
+            skill_mapping = site_skill_to_mapping(skill_model)
+            skill = skill_model
+    except SiteSkillError as exc:
+        raise JobStateError(exc.code) from exc
+    canonical = replace(
+        canonical,
+        scope=replace(
+            canonical.scope,
+            allowed_origins=tuple(sorted(canonical.scope.allowed_origins)),
+            include_paths=tuple(sorted(canonical.scope.include_paths)),
+            content_types=tuple(
+                sorted(canonical.scope.content_types, key=lambda item: item.value)
+            ),
+        ),
+        site_skill=skill,
+    )
+    mapping: dict[str, Any] = {
+        "scope": {
+            "seeds": list(canonical.scope.seeds),
+            "allowed_origins": list(canonical.scope.allowed_origins),
+            "include_paths": list(canonical.scope.include_paths),
+            "content_types": [item.value for item in canonical.scope.content_types],
+        },
+        "site_skill": skill_mapping,
+        "explore_all_tools": canonical.explore_all_tools,
+        "budgets": {
+            "max_requests": canonical.budgets.max_requests,
+            "max_bytes": canonical.budgets.max_bytes,
+            "max_runtime_seconds": canonical.budgets.max_runtime_seconds,
+            "max_tool_attempts_per_target": canonical.budgets.max_tool_attempts_per_target,
+        },
+    }
+    try:
+        _ensure_request_payload_safe(mapping)
+    except ResultValidationError as exc:
+        raise JobStateError("request.sensitive_data") from exc
+    payload = json.dumps(
+        mapping, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return canonical, payload, hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _request_from_json(payload: str) -> Request:
+    mapping = json.loads(payload)
+    request = request_from_mapping(mapping)
+    if request.site_skill is not None:
+        request = replace(
+            request, site_skill=site_skill_from_mapping(request.site_skill)
+        )
+    return request
+
+
+def _validate_execution_authority(
+    request: Request, execution: Request, *, code: str
+) -> None:
+    if replace(request, budgets=execution.budgets) != execution or any(
+        getattr(execution.budgets, name) > getattr(request.budgets, name)
+        for name in (
+            "max_requests",
+            "max_bytes",
+            "max_runtime_seconds",
+            "max_tool_attempts_per_target",
+        )
+    ):
+        raise JobStateError(code)
+
+
+def _ensure_request_payload_safe(value: object) -> None:
+    """Apply existing secret validation while allowing governed scope paths."""
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, str):
+        try:
+            ensure_safe_text(value)
+            if value.startswith(("http://", "https://")):
+                _ensure_query_safe(urlsplit(value).query)
+        except ResultValidationError as exc:
+            if exc.code != "result.absolute_path":
+                raise
+        return
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            _ensure_request_payload_safe(key)
+            _ensure_request_payload_safe(child)
+        return
+    if isinstance(value, (list, tuple)):
+        for child in value:
+            _ensure_request_payload_safe(child)
+        return
+    raise ResultValidationError("schema.invalid")
+
+
+def _ensure_query_safe(query: str) -> None:
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        normalized = key
+        for _unused in range(3):
+            decoded = unquote(normalized)
+            if decoded == normalized:
+                break
+            normalized = decoded
+        normalized = re.sub(
+            r"[^a-z0-9]",
+            "",
+            unicodedata.normalize("NFKC", normalized).casefold(),
+        )
+        if normalized in _SECRET_QUERY_KEYS:
+            raise ResultValidationError("result.sensitive_data")
+        ensure_safe_text(key)
+        ensure_safe_text(value)
+
+
+def _validate_persisted_requests(row: sqlite3.Row) -> None:
+    values = (
+        row["request_json"],
+        row["request_fingerprint"],
+        row["execution_request_json"],
+        row["execution_request_fingerprint"],
+        row["caller_id"],
+        row["idempotency_key"],
+    )
+    if all(value is None for value in values):
+        return
+    if any(type(value) is not str for value in values):
+        raise JobStateError("job.persisted_invalid")
+    request = _request_from_json(row["request_json"])
+    execution = _request_from_json(row["execution_request_json"])
+    _, request_json, fingerprint = canonical_request_facts(request)
+    _, execution_json, execution_fingerprint = canonical_request_facts(execution)
+    if (
+        request_json != row["request_json"]
+        or fingerprint != row["request_fingerprint"]
+        or execution_json != row["execution_request_json"]
+        or execution_fingerprint != row["execution_request_fingerprint"]
+    ):
+        raise JobStateError("job.persisted_invalid")
+    _validate_execution_authority(request, execution, code="job.persisted_invalid")
+    _validate_boundary_text(row["caller_id"], "job.persisted_invalid", 256)
+    _validate_idempotency_key(row["idempotency_key"])
+
+
+__all__ = [
+    "Job",
+    "JobClaim",
+    "JobEvent",
+    "JobRepository",
+    "JobStateError",
+    "JobStatus",
+    "canonical_request_facts",
+]

@@ -1,24 +1,29 @@
 """Minimal Runtime Job lifecycle tests."""
 
-# pylint: disable=missing-function-docstring,mixed-line-endings
+# pylint: disable=missing-function-docstring,mixed-line-endings,too-many-lines
 
 from __future__ import annotations
 
 import json
 import sqlite3
 import threading
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
 
+from web_listening.request.model import Budgets, ContentType, Request, Scope
 from web_listening.result.errors import parse_utc_time
 from web_listening.result.model import Result
 from web_listening.runtime.jobs import (
     JobRepository,
     JobStateError,
     JobStatus,
+    canonical_request_facts,
 )
+from web_listening.site_skill.model import SuccessChecks, ToolReference
+from web_listening.site_skill.update import create_candidate
+from web_listening.tool_registry.manifest import ToolCategory
 
 NOW = "2026-08-25T20:00:00Z"
 LATER = "2026-08-25T20:00:01Z"
@@ -52,6 +57,213 @@ def _terminal_facts(status: JobStatus) -> tuple[Result, str | None]:
     result = _result(status)
     failure_code = result.errors[0].code if result.errors else None
     return result, failure_code
+
+
+def _request() -> Request:
+    return Request(
+        Scope(
+            ("https://example.test/report",),
+            ("https://example.test",),
+            ("/report",),
+            (ContentType.HTML,),
+        ),
+        None,
+        False,
+        Budgets(2, 1000, 10, 1),
+    )
+
+
+def _site_skill():
+    request = _request()
+    return create_candidate(
+        site_key="example",
+        version=1,
+        previous=None,
+        scope=request.scope,
+        budgets=request.budgets,
+        tool=ToolReference(
+            "acquisition.web_http",
+            "1.0.0",
+            ToolCategory.ACQUISITION,
+            frozenset({"http_get"}),
+        ),
+        success_checks=SuccessChecks(("text/html",), 1),
+        verified_at=NOW,
+    ).skill
+
+
+# pylint: disable-next=too-many-return-statements
+def _invalid_execution_request(request: Request, difference: str) -> Request:
+    if difference in {
+        "max_requests",
+        "max_bytes",
+        "max_runtime_seconds",
+        "max_tool_attempts_per_target",
+    }:
+        return replace(
+            request,
+            budgets=replace(
+                request.budgets,
+                **{difference: getattr(request.budgets, difference) + 1},
+            ),
+        )
+    if difference == "seeds":
+        return replace(
+            request,
+            scope=replace(
+                request.scope,
+                seeds=(*request.scope.seeds, "https://example.test/report?part=2"),
+            ),
+        )
+    if difference == "allowed_origins":
+        return replace(
+            request,
+            scope=replace(
+                request.scope,
+                allowed_origins=(*request.scope.allowed_origins, "https://other.test"),
+            ),
+        )
+    if difference == "include_paths":
+        return replace(
+            request,
+            scope=replace(
+                request.scope, include_paths=(*request.scope.include_paths, "/other")
+            ),
+        )
+    if difference == "content_types":
+        return replace(
+            request,
+            scope=replace(
+                request.scope,
+                content_types=(*request.scope.content_types, ContentType.FILE),
+            ),
+        )
+    if difference == "site_skill":
+        return replace(request, site_skill=_site_skill())
+    if difference == "explore_all_tools":
+        return replace(request, explore_all_tools=True)
+    raise AssertionError(difference)
+
+
+def test_in_memory_persisted_request_must_be_claimed_to_enter_running() -> None:
+    repository = JobRepository()
+    submitted = repository.submit_request(
+        "job-one",
+        _request(),
+        caller_id="caller",
+        idempotency_key="key",
+        at=NOW,
+    )
+    events = repository.events(submitted.job_id)
+
+    for token in (None, "forged-token"):
+        with pytest.raises(JobStateError, match="^job.claim_required$"):
+            repository.transition(
+                submitted.job_id, JobStatus.RUNNING, at=LATER, claim_token=token
+            )
+
+    assert repository.get(submitted.job_id) == submitted
+    assert repository.events(submitted.job_id) == events
+
+
+def test_sqlite_persisted_request_must_be_claimed_to_enter_running(
+    tmp_path: Path,
+) -> None:
+    repository = JobRepository(tmp_path / "jobs.sqlite3")
+    submitted = repository.submit_request(
+        "job-one",
+        _request(),
+        caller_id="caller",
+        idempotency_key="key",
+        at=NOW,
+    )
+    events = repository.events(submitted.job_id)
+
+    for token in (None, "forged-token"):
+        with pytest.raises(JobStateError, match="^job.claim_required$"):
+            repository.transition(
+                submitted.job_id, JobStatus.RUNNING, at=LATER, claim_token=token
+            )
+
+    assert repository.get(submitted.job_id) == submitted
+    assert repository.events(submitted.job_id) == events
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_claim_installs_facts_and_only_matching_token_terminalizes(
+    tmp_path: Path, persistent: bool
+) -> None:
+    result, failure_code = _terminal_facts(JobStatus.FAILED)
+    repository = JobRepository(tmp_path / "jobs.sqlite3" if persistent else None)
+    repository.submit_request(
+        result.manifest.run_id,
+        _request(),
+        caller_id="caller",
+        idempotency_key="key",
+        at=RESULT_WINDOW_START,
+    )
+
+    claim = repository.claim_next(
+        "worker-one",
+        at=RESULT_WINDOW_START,
+        lease_deadline="2026-08-25T00:10:00Z",
+    )
+
+    assert claim is not None
+    assert claim.job.status is JobStatus.RUNNING
+    assert claim.job.worker_id == "worker-one"
+    assert claim.job.started_at == RESULT_WINDOW_START
+    assert claim.job.claimed_at == RESULT_WINDOW_START
+    assert claim.job.lease_deadline == "2026-08-25T00:10:00Z"
+    assert claim.job.claim_token == claim.token
+    assert len(claim.token) == 64
+    assert claim.request == _request()
+    running_events = repository.events(claim.job.job_id)
+
+    for token in (None, "stale-token"):
+        with pytest.raises(JobStateError, match="^job.claim_stale$"):
+            repository.transition(
+                claim.job.job_id,
+                JobStatus.FAILED,
+                at=RESULT_WINDOW_END,
+                result=result,
+                failure_code=failure_code,
+                claim_token=token,
+            )
+        assert repository.get(claim.job.job_id) == claim.job
+        assert repository.events(claim.job.job_id) == running_events
+
+    finished = repository.transition(
+        claim.job.job_id,
+        JobStatus.FAILED,
+        at=RESULT_WINDOW_END,
+        result=result,
+        failure_code=failure_code,
+        claim_token=claim.token,
+    )
+
+    assert finished.status is JobStatus.FAILED
+    assert repository.events(claim.job.job_id)[-1].status is JobStatus.FAILED
+
+
+def test_legacy_submit_remains_tokenless_transition_compatible() -> None:
+    result, failure_code = _terminal_facts(JobStatus.FAILED)
+    repository = JobRepository()
+    submitted = repository.submit(result.manifest.run_id, at=RESULT_WINDOW_START)
+
+    running = repository.transition(
+        submitted.job_id, JobStatus.RUNNING, at=RESULT_WINDOW_START
+    )
+    finished = repository.transition(
+        submitted.job_id,
+        JobStatus.FAILED,
+        at=RESULT_WINDOW_END,
+        result=result,
+        failure_code=failure_code,
+    )
+
+    assert running.claim_token is None
+    assert finished.status is JobStatus.FAILED
 
 
 @pytest.mark.parametrize(
@@ -197,27 +409,47 @@ def test_success_bearing_terminal_requires_result(terminal: JobStatus) -> None:
     assert error.value.code == "job.result_required"
 
 
-@pytest.mark.parametrize("terminal", [JobStatus.REJECTED, JobStatus.FAILED])
-def test_pre_result_failure_requires_a_safe_stable_code(
-    terminal: JobStatus,
+@pytest.mark.parametrize(
+    ("terminal", "failure_code"),
+    [
+        (JobStatus.REJECTED, "runtime.pre_result_failure"),
+        (JobStatus.FAILED, "runtime.pre_result_failure"),
+        (JobStatus.REJECTED, "service.restart_interrupted"),
+        (JobStatus.FAILED, "runtime.workflow_failed"),
+    ],
+)
+@pytest.mark.parametrize("persistent", [False, True])
+def test_only_restart_interruption_may_terminalize_without_result(
+    tmp_path: Path, terminal: JobStatus, failure_code: str, persistent: bool
 ) -> None:
-    repository = JobRepository()
+    repository = JobRepository(tmp_path / "jobs.sqlite3" if persistent else None)
     repository.submit("job-one", at=NOW)
     repository.transition("job-one", JobStatus.RUNNING, at=NOW)
 
-    with pytest.raises(JobStateError) as missing:
-        repository.transition("job-one", terminal, at=LATER)
-    with pytest.raises(JobStateError) as unsafe:
-        repository.transition(
-            "job-one", terminal, at=LATER, failure_code="PRIVATE ERROR"
-        )
+    with pytest.raises(JobStateError) as error:
+        repository.transition("job-one", terminal, at=LATER, failure_code=failure_code)
 
-    assert missing.value.code == "job.failure_code_required"
-    assert unsafe.value.code == "job.failure_code_invalid"
+    assert error.value.code == "job.result_required"
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_restart_interruption_is_the_only_resultless_terminal_state(
+    tmp_path: Path, persistent: bool
+) -> None:
+    repository = JobRepository(tmp_path / "jobs.sqlite3" if persistent else None)
+    repository.submit("job-one", at=NOW)
+    repository.transition("job-one", JobStatus.RUNNING, at=NOW)
+
     finished = repository.transition(
-        "job-one", terminal, at=LATER, failure_code="runtime.pre_result_failure"
+        "job-one",
+        JobStatus.FAILED,
+        at=LATER,
+        failure_code="service.restart_interrupted",
     )
-    assert finished.failure_code == "runtime.pre_result_failure"
+
+    assert finished.status is JobStatus.FAILED
+    assert finished.failure_code == "service.restart_interrupted"
+    assert finished.result is None
 
 
 @pytest.mark.parametrize("terminal", _TERMINALS)
@@ -379,7 +611,7 @@ def test_sqlite_repository_preserves_duplicate_not_found_and_transition_rules(
     reopened.close()
 
 
-def test_sqlite_repository_reopens_terminal_failure_without_result(
+def test_sqlite_repository_reopens_restart_interruption_without_result(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "jobs.sqlite3"
@@ -390,7 +622,7 @@ def test_sqlite_repository_reopens_terminal_failure_without_result(
         "job-one",
         JobStatus.FAILED,
         at=LATER,
-        failure_code="runtime.pre_result_failure",
+        failure_code="service.restart_interrupted",
     )
     first.close()
 
@@ -561,6 +793,1047 @@ def test_sqlite_repository_close_is_idempotent_and_rejects_future_operations(
         repository.get("job-one")
 
     assert error.value.code == "repository.closed"
+
+
+def test_request_submission_is_atomic_idempotent_and_caller_scoped(
+    tmp_path: Path,
+) -> None:
+    repository = JobRepository(tmp_path / "jobs.sqlite3")
+    first = repository.submit_request(
+        "job-one", _request(), caller_id="caller-a", idempotency_key="same-key", at=NOW
+    )
+    replay = repository.submit_request(
+        "job-other",
+        _request(),
+        caller_id="caller-a",
+        idempotency_key="same-key",
+        at=LATER,
+    )
+    isolated = repository.submit_request(
+        "job-two",
+        _request(),
+        caller_id="caller-b",
+        idempotency_key="same-key",
+        at=LATER,
+    )
+
+    assert replay == first
+    assert isolated.job_id == "job-two"
+    assert repository.request(first.job_id) == _request()
+    assert len(first.request_fingerprint or "") == 64
+
+    conflicting = replace(_request(), explore_all_tools=True)
+    with pytest.raises(JobStateError, match="idempotency.conflict"):
+        repository.submit_request(
+            "job-three",
+            conflicting,
+            caller_id="caller-a",
+            idempotency_key="same-key",
+            at=LATER,
+        )
+    assert repository.get("job-one") == first
+
+
+@pytest.mark.parametrize("persistent", [False, True], ids=("memory", "sqlite"))
+@pytest.mark.parametrize(
+    "difference",
+    [
+        "max_requests",
+        "max_bytes",
+        "max_runtime_seconds",
+        "max_tool_attempts_per_target",
+        "seeds",
+        "allowed_origins",
+        "include_paths",
+        "content_types",
+        "site_skill",
+        "explore_all_tools",
+    ],
+)
+def test_submit_rejects_execution_request_outside_original_authority_without_write(
+    tmp_path: Path, persistent: bool, difference: str
+) -> None:
+    database = tmp_path / f"invalid-{difference}.sqlite3"
+    repository = JobRepository(database if persistent else None)
+    original = _request()
+    execution = _invalid_execution_request(original, difference)
+
+    with pytest.raises(JobStateError, match="^request.execution_authority_invalid$"):
+        repository.submit_request(
+            "job-invalid",
+            original,
+            execution_request=execution,
+            caller_id="caller",
+            idempotency_key="key",
+            at=NOW,
+        )
+
+    with pytest.raises(JobStateError, match="^job.not_found$"):
+        repository.get("job-invalid")
+    with pytest.raises(JobStateError, match="^job.not_found$"):
+        repository.events("job-invalid")
+    assert (
+        repository.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+        is None
+    )
+    if persistent:
+        connection = sqlite3.connect(database)
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM job_events").fetchone()[0] == 0
+        connection.close()
+    repository.close()
+
+
+@pytest.mark.parametrize("persistent", [False, True], ids=("memory", "sqlite"))
+@pytest.mark.parametrize(
+    "difference",
+    [
+        "exact",
+        "canonical-ordering",
+        "max_requests",
+        "max_bytes",
+        "max_runtime_seconds",
+        "max_tool_attempts_per_target",
+    ],
+)
+def test_submit_accepts_equal_or_narrowed_execution_authority_and_claims_it(
+    tmp_path: Path, persistent: bool, difference: str
+) -> None:
+    database = tmp_path / f"accepted-{difference}.sqlite3"
+    original = Request(
+        Scope(
+            ("https://example.test/report",),
+            ("https://other.test", "https://example.test"),
+            ("/z/**", "/report"),
+            (ContentType.HTML, ContentType.FILE),
+        ),
+        None,
+        False,
+        Budgets(3, 2000, 20, 2),
+    )
+    execution = original
+    if difference == "canonical-ordering":
+        execution = replace(
+            original,
+            scope=replace(
+                original.scope,
+                allowed_origins=tuple(reversed(original.scope.allowed_origins)),
+                include_paths=tuple(reversed(original.scope.include_paths)),
+                content_types=tuple(reversed(original.scope.content_types)),
+            ),
+        )
+    elif difference != "exact":
+        execution = replace(
+            original,
+            budgets=replace(
+                original.budgets,
+                **{difference: getattr(original.budgets, difference) - 1},
+            ),
+        )
+    expected_original = canonical_request_facts(original)[0]
+    expected_execution = canonical_request_facts(execution)[0]
+    repository = JobRepository(database if persistent else None)
+    submitted = repository.submit_request(
+        "job-accepted",
+        original,
+        execution_request=execution,
+        caller_id="caller",
+        idempotency_key="key",
+        at=NOW,
+    )
+    if persistent:
+        repository.close()
+        repository = JobRepository(database)
+
+    assert repository.request(submitted.job_id) == expected_original
+    assert repository.execution_request(submitted.job_id) == expected_execution
+    claim = repository.claim_next(
+        "worker", at=LATER, lease_deadline="2026-08-25T20:01:00Z"
+    )
+    assert claim is not None
+    assert claim.request == expected_execution
+    assert claim.job.request_json == submitted.request_json
+    assert claim.job.execution_request_json == submitted.execution_request_json
+    repository.close()
+
+
+@pytest.mark.parametrize("persistent", [False, True], ids=("memory", "sqlite"))
+def test_invalid_execution_authority_cannot_replay_an_existing_idempotent_job(
+    tmp_path: Path, persistent: bool
+) -> None:
+    database = tmp_path / "duplicate-boundary.sqlite3"
+    repository = JobRepository(database if persistent else None)
+    original = _request()
+    first = repository.submit_request(
+        "job-one",
+        original,
+        caller_id="caller",
+        idempotency_key="key",
+        at=NOW,
+    )
+    first_events = repository.events(first.job_id)
+
+    with pytest.raises(JobStateError, match="^request.execution_authority_invalid$"):
+        repository.submit_request(
+            "job-two",
+            original,
+            execution_request=_invalid_execution_request(original, "max_requests"),
+            caller_id="caller",
+            idempotency_key="key",
+            at=LATER,
+        )
+
+    assert repository.get(first.job_id) == first
+    assert repository.events(first.job_id) == first_events
+    with pytest.raises(JobStateError, match="^job.not_found$"):
+        repository.get("job-two")
+    if persistent:
+        connection = sqlite3.connect(database)
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM job_events").fetchone()[0] == 1
+        connection.close()
+    repository.close()
+
+
+@pytest.mark.parametrize("persistent", [False, True], ids=("memory", "sqlite"))
+def test_concurrent_valid_and_invalid_duplicate_submission_persists_only_valid_job(
+    tmp_path: Path, persistent: bool
+) -> None:
+    database = tmp_path / "concurrent-boundary.sqlite3"
+    repository = JobRepository(database if persistent else None)
+    original = _request()
+    barrier = threading.Barrier(3)
+    outcomes: list[str] = []
+
+    def submit(job_id: str, execution: Request) -> None:
+        barrier.wait()
+        try:
+            repository.submit_request(
+                job_id,
+                original,
+                execution_request=execution,
+                caller_id="caller",
+                idempotency_key="key",
+                at=NOW,
+            )
+            outcomes.append("accepted")
+        except JobStateError as exc:
+            outcomes.append(exc.code)
+
+    threads = (
+        threading.Thread(target=submit, args=("job-valid", original)),
+        threading.Thread(
+            target=submit,
+            args=(
+                "job-invalid",
+                _invalid_execution_request(original, "max_requests"),
+            ),
+        ),
+    )
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(outcomes) == ["accepted", "request.execution_authority_invalid"]
+    assert repository.get("job-valid").status is JobStatus.SUBMITTED
+    with pytest.raises(JobStateError, match="^job.not_found$"):
+        repository.get("job-invalid")
+    assert len(repository.events("job-valid")) == 1
+    if persistent:
+        connection = sqlite3.connect(database)
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM job_events").fetchone()[0] == 1
+        connection.close()
+    claim = repository.claim_next(
+        "worker", at=LATER, lease_deadline="2026-08-25T20:01:00Z"
+    )
+    assert claim is not None and claim.request == original
+    repository.close()
+
+
+def test_reordered_set_like_scope_fields_replay_and_round_trip_canonically(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    request = replace(
+        _request(),
+        scope=Scope(
+            ("https://example.test/report",),
+            ("https://other.test", "https://example.test"),
+            ("/z/**", "/report"),
+            (ContentType.HTML, ContentType.FILE),
+        ),
+    )
+    reordered = replace(
+        request,
+        scope=replace(
+            request.scope,
+            allowed_origins=tuple(reversed(request.scope.allowed_origins)),
+            include_paths=tuple(reversed(request.scope.include_paths)),
+            content_types=tuple(reversed(request.scope.content_types)),
+        ),
+    )
+    repository = JobRepository(database)
+    first = repository.submit_request(
+        "job-one", request, caller_id="caller", idempotency_key="scope", at=NOW
+    )
+    replay = repository.submit_request(
+        "job-two", reordered, caller_id="caller", idempotency_key="scope", at=LATER
+    )
+
+    assert replay == first
+    assert repository.request(first.job_id).scope == Scope(
+        request.scope.seeds,
+        tuple(sorted(request.scope.allowed_origins)),
+        tuple(sorted(request.scope.include_paths)),
+        tuple(sorted(request.scope.content_types, key=lambda item: item.value)),
+    )
+    assert json.loads(first.request_json or "")["scope"] == {
+        "seeds": list(request.scope.seeds),
+        "allowed_origins": sorted(request.scope.allowed_origins),
+        "include_paths": sorted(request.scope.include_paths),
+        "content_types": sorted(item.value for item in request.scope.content_types),
+    }
+    repository.close()
+
+    reopened = JobRepository(database)
+    assert reopened.get(first.job_id).request_fingerprint == first.request_fingerprint
+    assert reopened.request(first.job_id).scope.seeds == request.scope.seeds
+
+
+@pytest.mark.parametrize("key", [" ", " key ", " " * 128, "!", "~"])
+def test_printable_ascii_idempotency_key_preserves_exact_identity(
+    tmp_path: Path, key: str
+) -> None:
+    repository = JobRepository(tmp_path / f"key-{len(key)}-{ord(key[0])}.sqlite3")
+    first = repository.submit_request(
+        "job-one", _request(), caller_id="caller", idempotency_key=key, at=NOW
+    )
+    replay = repository.submit_request(
+        "job-two", _request(), caller_id="caller", idempotency_key=key, at=LATER
+    )
+
+    assert replay == first
+    assert first.idempotency_key == key
+    assert repository.get(first.job_id).idempotency_key == key
+
+
+@pytest.mark.parametrize("key", ["", " " * 129, "\x1f", "\x7f", "é"])
+def test_idempotency_key_rejects_values_outside_exact_printable_ascii_domain(
+    tmp_path: Path, key: str
+) -> None:
+    database = tmp_path / f"invalid-{len(key)}-{ord(key[0]) if key else 0}.sqlite3"
+    repository = JobRepository(database)
+
+    with pytest.raises(JobStateError, match="^idempotency.key_invalid$"):
+        repository.submit_request(
+            "job-one", _request(), caller_id="caller", idempotency_key=key, at=NOW
+        )
+
+    connection = sqlite3.connect(database)
+    assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "access_token=private-value",
+        "api_key=private-value",
+        "credential=private-value",
+        "password=private-value",
+        "refresh%5Ftoken=private-value",
+        "authorization=Bearer%20private-value",
+    ],
+)
+def test_sensitive_request_payload_is_rejected_before_any_sqlite_write(
+    tmp_path: Path, query: str
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    repository = JobRepository(database)
+    request = _request()
+    request = replace(
+        request,
+        scope=replace(
+            request.scope,
+            seeds=(f"https://example.test/report?{query}",),
+        ),
+    )
+
+    with pytest.raises(JobStateError, match="^request.sensitive_data$"):
+        repository.submit_request(
+            "job-secret",
+            request,
+            caller_id="caller-a",
+            idempotency_key="key-a",
+            at=NOW,
+        )
+
+    connection = sqlite3.connect(database)
+    assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    assert connection.execute("SELECT COUNT(*) FROM job_events").fetchone()[0] == 0
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("tokenizer", "wordpiece"),
+        ("authorization_date", "2026-09-05"),
+        ("sessionidentifier", "public-record"),
+    ],
+)
+def test_safe_nearby_query_keys_persist_and_restart(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    request = _request()
+    request = replace(
+        request,
+        scope=replace(
+            request.scope,
+            seeds=(f"https://example.test/report?{key}={value}",),
+        ),
+    )
+    repository = JobRepository(database)
+    submitted = repository.submit_request(
+        "job-safe",
+        request,
+        caller_id="caller-a",
+        idempotency_key="key-a",
+        at=NOW,
+    )
+    repository.close()
+
+    reopened = JobRepository(database)
+    assert reopened.request(submitted.job_id) == request
+    claim = reopened.claim_next(
+        "worker-one", at=LATER, lease_deadline="2026-08-25T20:01:00Z"
+    )
+    assert claim is not None and claim.request == request
+
+
+def test_original_identity_and_narrowed_execution_are_distinct_durable_facts(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    original = replace(_request(), budgets=Budgets(101, 1000, 10, 1))
+    admitted = replace(original, budgets=Budgets(100, 1000, 10, 1))
+    repository = JobRepository(database)
+    submitted = repository.submit_request(
+        "job-one",
+        original,
+        execution_request=admitted,
+        caller_id="caller-a",
+        idempotency_key="key-a",
+        at=NOW,
+    )
+    repository.close()
+
+    reopened = JobRepository(database)
+    assert reopened.request(submitted.job_id) == original
+    claim = reopened.claim_next(
+        "worker-one", at=LATER, lease_deadline="2026-08-25T20:01:00Z"
+    )
+    assert claim is not None and claim.request == admitted
+    assert claim.job.request_fingerprint != claim.job.execution_request_fingerprint
+
+    with pytest.raises(JobStateError, match="^idempotency.conflict$"):
+        reopened.submit_request(
+            "job-two",
+            admitted,
+            execution_request=admitted,
+            caller_id="caller-a",
+            idempotency_key="key-a",
+            at=LATER,
+        )
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("request_fingerprint", "0" * 64),
+        ("execution_request_fingerprint", "0" * 64),
+        ("execution_request_json", "{}"),
+    ],
+)
+def test_persisted_request_json_and_fingerprints_cannot_diverge(
+    tmp_path: Path, column: str, value: str
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    repository = JobRepository(database)
+    repository.submit_request(
+        "job-one",
+        _request(),
+        caller_id="caller-a",
+        idempotency_key="key-a",
+        at=NOW,
+    )
+    repository.close()
+    connection = sqlite3.connect(database)
+    connection.execute(f"UPDATE jobs SET {column}=?", (value,))
+    connection.commit()
+    connection.close()
+
+    reopened = JobRepository(database)
+    with pytest.raises(JobStateError, match="^job.persisted_invalid$"):
+        reopened.get("job-one")
+
+
+def test_cancel_and_completed_terminalization_are_atomically_ordered(
+    tmp_path: Path,
+) -> None:
+    result = _result(JobStatus.COMPLETED)
+    job_id = result.manifest.run_id
+    first = JobRepository(tmp_path / "cancel-first.sqlite3")
+    first.submit_request(
+        job_id,
+        _request(),
+        caller_id="caller",
+        idempotency_key="key",
+        at=RESULT_WINDOW_START,
+    )
+    claim = first.claim_next(
+        "worker", at=RESULT_WINDOW_START, lease_deadline="2026-08-25T00:10:00Z"
+    )
+    assert claim is not None
+    second = JobRepository(tmp_path / "cancel-first.sqlite3")
+    second.cancel(job_id, at=RESULT_WINDOW_END)
+
+    with pytest.raises(JobStateError, match="^job.cancel_requested$"):
+        first.transition(
+            job_id,
+            JobStatus.COMPLETED,
+            at=RESULT_WINDOW_END,
+            result=result,
+            claim_token=claim.token,
+        )
+
+    first = JobRepository(tmp_path / "complete-first.sqlite3")
+    first.submit_request(
+        job_id,
+        _request(),
+        caller_id="caller",
+        idempotency_key="key",
+        at=RESULT_WINDOW_START,
+    )
+    claim = first.claim_next(
+        "worker", at=RESULT_WINDOW_START, lease_deadline="2026-08-25T00:10:00Z"
+    )
+    assert claim is not None
+    second = JobRepository(tmp_path / "complete-first.sqlite3")
+    completed = first.transition(
+        job_id,
+        JobStatus.COMPLETED,
+        at=RESULT_WINDOW_END,
+        result=result,
+        claim_token=claim.token,
+    )
+    cancelled = second.cancel(job_id, at=RESULT_WINDOW_END)
+
+    assert cancelled == completed
+    assert cancelled.cancel_requested_at is None
+
+
+@pytest.mark.parametrize(
+    "status",
+    [JobStatus.FAILED, JobStatus.PARTIAL, JobStatus.REJECTED],
+)
+def test_cancel_first_rejects_every_uncancelled_terminal_result(
+    tmp_path: Path, status: JobStatus
+) -> None:
+    result = _result(status)
+    job_id = result.manifest.run_id
+    database = tmp_path / f"cancel-first-{status.value}.sqlite3"
+    worker_repository = JobRepository(database)
+    worker_repository.submit_request(
+        job_id,
+        _request(),
+        caller_id="caller",
+        idempotency_key="key",
+        at=RESULT_WINDOW_START,
+    )
+    claim = worker_repository.claim_next(
+        "worker", at=RESULT_WINDOW_START, lease_deadline="2026-08-25T00:10:00Z"
+    )
+    assert claim is not None
+    cancellation_repository = JobRepository(database)
+    cancellation_repository.cancel(job_id, at=RESULT_WINDOW_END)
+    cancellation_repository.close()
+
+    with pytest.raises(JobStateError, match="^job.cancel_requested$"):
+        worker_repository.transition(
+            job_id,
+            status,
+            at=RESULT_WINDOW_END,
+            result=result,
+            failure_code=_terminal_facts(status)[1],
+            claim_token=claim.token,
+        )
+
+    assert worker_repository.get(job_id).status is JobStatus.RUNNING
+
+
+@pytest.mark.parametrize("persistent", [False, True], ids=("memory", "sqlite"))
+def test_claim_before_submission_is_rejected_without_mutation(
+    tmp_path: Path, persistent: bool
+) -> None:
+    database = tmp_path / "claim-before-submission.sqlite3"
+    repository = JobRepository(database if persistent else None)
+    submitted = repository.submit_request(
+        "job-one",
+        _request(),
+        caller_id="caller",
+        idempotency_key="key",
+        at=NOW,
+    )
+
+    with pytest.raises(JobStateError) as error:
+        repository.claim_next(
+            "worker",
+            at="2026-08-25T19:00:00Z",
+            lease_deadline="2026-08-25T19:01:00Z",
+        )
+
+    assert error.value.code == "job.time_invalid"
+    assert repository.get(submitted.job_id) == submitted
+    events = repository.events(submitted.job_id)
+    assert len(events) == 1
+    assert events[0].status is JobStatus.SUBMITTED
+    unclaimed = repository.get(submitted.job_id)
+    assert (
+        unclaimed.started_at,
+        unclaimed.worker_id,
+        unclaimed.claim_token,
+        unclaimed.claimed_at,
+        unclaimed.lease_deadline,
+    ) == (None, None, None, None, None)
+    if persistent:
+        connection = sqlite3.connect(database)
+        row = connection.execute(
+            "SELECT status,started_at,worker_id,claim_token,claimed_at,lease_deadline "
+            "FROM jobs WHERE job_id='job-one'"
+        ).fetchone()
+        event_count = connection.execute(
+            "SELECT COUNT(*) FROM job_events WHERE job_id='job-one'"
+        ).fetchone()[0]
+        connection.close()
+        assert row == ("submitted", None, None, None, None, None)
+        assert event_count == 1
+    repository.close()
+
+
+@pytest.mark.parametrize("persistent", [False, True], ids=("memory", "sqlite"))
+@pytest.mark.parametrize(
+    ("claimed_at", "lease_deadline", "code"),
+    [
+        ("not-a-time", "2026-08-25T20:00:02Z", "job.time_invalid"),
+        (LATER, "not-a-time", "job.time_invalid"),
+        (LATER, LATER, "job.lease_invalid"),
+        (LATER, NOW, "job.lease_invalid"),
+    ],
+    ids=("malformed-claim", "malformed-deadline", "equal-deadline", "past-deadline"),
+)
+def test_invalid_claim_time_boundaries_leave_submitted_job_unchanged(
+    tmp_path: Path,
+    persistent: bool,
+    claimed_at: str,
+    lease_deadline: str,
+    code: str,
+) -> None:
+    database = tmp_path / "invalid-claim-boundary.sqlite3"
+    repository = JobRepository(database if persistent else None)
+    submitted = repository.submit_request(
+        "job-one", _request(), caller_id="caller", idempotency_key="key", at=NOW
+    )
+
+    with pytest.raises(JobStateError, match=f"^{code}$"):
+        repository.claim_next("worker", at=claimed_at, lease_deadline=lease_deadline)
+
+    assert repository.get(submitted.job_id) == submitted
+    assert len(repository.events(submitted.job_id)) == 1
+    repository.close()
+
+
+@pytest.mark.parametrize("persistent", [False, True], ids=("memory", "sqlite"))
+@pytest.mark.parametrize(
+    ("claimed_at", "lease_deadline"),
+    [
+        (NOW, LATER),
+        (LATER, "2026-08-25T20:00:02Z"),
+    ],
+    ids=("at-submission", "after-submission"),
+)
+def test_valid_claim_time_boundaries_match_between_memory_and_sqlite(
+    tmp_path: Path, persistent: bool, claimed_at: str, lease_deadline: str
+) -> None:
+    database = tmp_path / "valid-claim-boundary.sqlite3"
+    repository = JobRepository(database if persistent else None)
+    repository.submit_request(
+        "job-one", _request(), caller_id="caller", idempotency_key="key", at=NOW
+    )
+
+    claim = repository.claim_next(
+        "worker", at=claimed_at, lease_deadline=lease_deadline
+    )
+
+    assert claim is not None
+    assert claim.job.status is JobStatus.RUNNING
+    assert claim.job.started_at == claimed_at
+    assert claim.job.claimed_at == claimed_at
+    assert claim.job.lease_deadline == lease_deadline
+    assert claim.job.worker_id == "worker"
+    assert claim.job.claim_token == claim.token
+    assert len(repository.events(claim.job.job_id)) == 2
+    repository.close()
+
+
+def test_invalid_sqlite_claim_releases_transaction_for_another_connection(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "multiple-connections.sqlite3"
+    first = JobRepository(database)
+    submitted = first.submit_request(
+        "job-one", _request(), caller_id="caller", idempotency_key="key", at=NOW
+    )
+    second = JobRepository(database)
+
+    with pytest.raises(JobStateError, match="^job.time_invalid$"):
+        first.claim_next(
+            "worker-invalid",
+            at="2026-08-25T19:00:00Z",
+            lease_deadline="2026-08-25T19:01:00Z",
+        )
+
+    assert second.get(submitted.job_id) == submitted
+    claim = second.claim_next("worker-valid", at=NOW, lease_deadline=LATER)
+    assert claim is not None
+    assert claim.job.status is JobStatus.RUNNING
+    assert claim.job.worker_id == "worker-valid"
+    assert len(second.events(submitted.job_id)) == 2
+    first.close()
+    second.close()
+
+
+def test_sqlite_claim_readback_error_rolls_back_update_and_event(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "claim-readback.sqlite3"
+    repository = JobRepository(database)
+    submitted = repository.submit_request(
+        "job-one", _request(), caller_id="caller", idempotency_key="key", at=NOW
+    )
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TRIGGER corrupt_claim AFTER UPDATE OF status ON jobs "
+        "WHEN NEW.status='running' BEGIN "
+        "UPDATE jobs SET started_at='not-a-time' WHERE job_id=NEW.job_id; END"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(JobStateError, match="^job.persisted_invalid$"):
+        repository.claim_next("worker", at=NOW, lease_deadline=LATER)
+
+    assert repository.get(submitted.job_id) == submitted
+    assert len(repository.events(submitted.job_id)) == 1
+    connection = sqlite3.connect(database)
+    row = connection.execute(
+        "SELECT status,started_at,worker_id,claim_token,claimed_at,lease_deadline "
+        "FROM jobs WHERE job_id='job-one'"
+    ).fetchone()
+    event_count = connection.execute(
+        "SELECT COUNT(*) FROM job_events WHERE job_id='job-one'"
+    ).fetchone()[0]
+    connection.close()
+    assert row == ("submitted", None, None, None, None, None)
+    assert event_count == 1
+    repository.close()
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        (
+            "CREATE TRIGGER replace_claim_token AFTER UPDATE OF status ON jobs "
+            "WHEN NEW.status='running' BEGIN UPDATE jobs SET "
+            "claim_token='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "
+            "WHERE job_id=NEW.job_id; END"
+        ),
+        (
+            "CREATE TRIGGER replace_worker AFTER UPDATE OF status ON jobs "
+            "WHEN NEW.status='running' BEGIN UPDATE jobs SET worker_id='other-worker' "
+            "WHERE job_id=NEW.job_id; END"
+        ),
+        (
+            "CREATE TRIGGER replace_claimed_at AFTER UPDATE OF status ON jobs "
+            "WHEN NEW.status='running' BEGIN UPDATE jobs SET "
+            "claimed_at='2026-08-25T20:00:01Z' WHERE job_id=NEW.job_id; END"
+        ),
+        (
+            "CREATE TRIGGER replace_lease AFTER UPDATE OF status ON jobs "
+            "WHEN NEW.status='running' BEGIN UPDATE jobs SET "
+            "lease_deadline='2026-08-25T20:02:00Z' WHERE job_id=NEW.job_id; END"
+        ),
+        (
+            "CREATE TRIGGER replace_running_event AFTER INSERT ON job_events "
+            "WHEN NEW.sequence=2 BEGIN UPDATE jobs SET "
+            "started_at='2026-08-25T20:00:01Z' WHERE job_id=NEW.job_id; "
+            "UPDATE job_events SET at='2026-08-25T20:00:01Z' "
+            "WHERE job_id=NEW.job_id AND sequence=NEW.sequence; END"
+        ),
+    ],
+    ids=("claim-token", "worker", "claimed-at", "lease-deadline", "event"),
+)
+def test_sqlite_claim_valid_but_different_readback_rolls_back_and_releases_lock(
+    tmp_path: Path, trigger: str
+) -> None:
+    database = tmp_path / "claim-equality.sqlite3"
+    repository = JobRepository(database)
+    submitted = repository.submit_request(
+        "job-one", _request(), caller_id="caller", idempotency_key="key", at=NOW
+    )
+    second = JobRepository(database)
+    connection = sqlite3.connect(database)
+    connection.execute(trigger)
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(JobStateError, match="^job.persisted_invalid$"):
+        repository.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+
+    assert repository.get(submitted.job_id) == submitted
+    assert second.get(submitted.job_id) == submitted
+    assert second.events(submitted.job_id) == repository.events(submitted.job_id)
+    connection = sqlite3.connect(database, timeout=0)
+    connection.execute("BEGIN IMMEDIATE")
+    row = connection.execute(
+        "SELECT status,started_at,worker_id,claim_token,claimed_at,lease_deadline "
+        "FROM jobs WHERE job_id='job-one'"
+    ).fetchone()
+    events = connection.execute(
+        "SELECT sequence,previous_status,status,at FROM job_events "
+        "WHERE job_id='job-one' ORDER BY sequence"
+    ).fetchall()
+    connection.execute(
+        "DROP TRIGGER "
+        + connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'"
+        ).fetchone()[0]
+    )
+    connection.commit()
+    connection.close()
+    assert row == ("submitted", None, None, None, None, None)
+    assert events == [(1, None, "submitted", NOW)]
+
+    claim = second.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    assert claim is not None
+    durable = repository.get(submitted.job_id)
+    assert claim.token == claim.job.claim_token == durable.claim_token
+    repository.close()
+    second.close()
+
+
+def test_sqlite_submit_request_readback_error_rolls_back_job_and_event(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "submit-request-readback.sqlite3"
+    repository = JobRepository(database)
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TRIGGER corrupt_submission AFTER INSERT ON jobs BEGIN "
+        "UPDATE jobs SET request_fingerprint='invalid' WHERE job_id=NEW.job_id; END"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(JobStateError, match="^job.persisted_invalid$"):
+        repository.submit_request(
+            "job-one",
+            _request(),
+            caller_id="caller",
+            idempotency_key="key",
+            at=NOW,
+        )
+
+    connection = sqlite3.connect(database, timeout=0)
+    connection.execute("BEGIN IMMEDIATE")
+    assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    assert connection.execute("SELECT COUNT(*) FROM job_events").fetchone()[0] == 0
+    connection.rollback()
+    connection.close()
+    repository.close()
+
+
+def test_sqlite_legacy_submit_readback_error_rolls_back_job_and_event(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "submit-readback.sqlite3"
+    repository = JobRepository(database)
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TRIGGER corrupt_submission AFTER INSERT ON jobs BEGIN "
+        "UPDATE jobs SET submitted_at='not-a-time' WHERE job_id=NEW.job_id; END"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(JobStateError, match="^job.persisted_invalid$"):
+        repository.submit("job-one", at=NOW)
+
+    connection = sqlite3.connect(database, timeout=0)
+    connection.execute("BEGIN IMMEDIATE")
+    assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    assert connection.execute("SELECT COUNT(*) FROM job_events").fetchone()[0] == 0
+    connection.rollback()
+    connection.close()
+    repository.close()
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        (
+            "CREATE TRIGGER corrupt_terminal_job AFTER UPDATE OF status ON jobs "
+            "WHEN NEW.status='failed' BEGIN "
+            "UPDATE jobs SET finished_at='not-a-time' WHERE job_id=NEW.job_id; END"
+        ),
+        (
+            "CREATE TRIGGER corrupt_terminal_event AFTER INSERT ON job_events "
+            "WHEN NEW.sequence=3 BEGIN "
+            "UPDATE job_events SET at='not-a-time' "
+            "WHERE job_id=NEW.job_id AND sequence=NEW.sequence; END"
+        ),
+    ],
+    ids=("job", "event"),
+)
+def test_sqlite_terminal_readback_error_restores_running_claim_and_events(
+    tmp_path: Path, trigger: str
+) -> None:
+    database = tmp_path / "terminal-readback.sqlite3"
+    repository = JobRepository(database)
+    repository.submit_request(
+        "job-one", _request(), caller_id="caller", idempotency_key="key", at=NOW
+    )
+    claim = repository.claim_next(
+        "worker", at=LATER, lease_deadline="2026-08-25T20:01:00Z"
+    )
+    assert claim is not None
+    running_events = repository.events(claim.job.job_id)
+    connection = sqlite3.connect(database)
+    connection.execute(trigger)
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(JobStateError, match="^job.persisted_invalid$"):
+        repository.transition(
+            claim.job.job_id,
+            JobStatus.FAILED,
+            at="2026-08-25T20:00:02Z",
+            failure_code="service.restart_interrupted",
+            claim_token=claim.token,
+        )
+
+    assert repository.get(claim.job.job_id) == claim.job
+    assert repository.events(claim.job.job_id) == running_events
+    connection = sqlite3.connect(database, timeout=0)
+    connection.execute("BEGIN IMMEDIATE")
+    row = connection.execute(
+        "SELECT status,finished_at,worker_id,claim_token,claimed_at,lease_deadline "
+        "FROM jobs WHERE job_id='job-one'"
+    ).fetchone()
+    event_count = connection.execute(
+        "SELECT COUNT(*) FROM job_events WHERE job_id='job-one'"
+    ).fetchone()[0]
+    connection.rollback()
+    connection.close()
+    assert row == (
+        "running",
+        None,
+        claim.job.worker_id,
+        claim.token,
+        claim.job.claimed_at,
+        claim.job.lease_deadline,
+    )
+    assert event_count == 2
+    repository.close()
+
+
+def test_sqlite_cancel_readback_error_restores_timestamp_and_releases_lock(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "cancel-readback.sqlite3"
+    repository = JobRepository(database)
+    repository.submit_request(
+        "job-one", _request(), caller_id="caller", idempotency_key="key", at=NOW
+    )
+    claim = repository.claim_next(
+        "worker", at=LATER, lease_deadline="2026-08-25T20:01:00Z"
+    )
+    assert claim is not None
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TRIGGER corrupt_cancellation AFTER UPDATE OF cancel_requested_at ON jobs "
+        "BEGIN UPDATE jobs SET cancel_requested_at='2026-08-25T20:00:09Z' "
+        "WHERE job_id=NEW.job_id; END"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(JobStateError, match="^job.persisted_invalid$"):
+        repository.cancel(claim.job.job_id, at="2026-08-25T20:00:02Z")
+
+    assert repository.get(claim.job.job_id) == claim.job
+    connection = sqlite3.connect(database, timeout=0)
+    connection.execute("BEGIN IMMEDIATE")
+    assert connection.execute(
+        "SELECT cancel_requested_at FROM jobs WHERE job_id='job-one'"
+    ).fetchone() == (None,)
+    connection.execute("DROP TRIGGER corrupt_cancellation")
+    connection.commit()
+    connection.close()
+
+    cancelled = repository.cancel(claim.job.job_id, at="2026-08-25T20:00:02Z")
+    repeated = repository.cancel(claim.job.job_id, at="2026-08-25T20:00:03Z")
+    terminal = repository.reconcile(at="2026-08-25T20:00:04Z")[0]
+
+    assert cancelled.cancel_requested_at == "2026-08-25T20:00:02Z"
+    assert repeated == cancelled
+    assert terminal.status is JobStatus.FAILED
+    assert repository.cancel(claim.job.job_id, at="2026-08-25T20:00:05Z") == terminal
+    repository.close()
+
+
+def test_claim_order_fencing_cancellation_and_restart_are_fail_closed(
+    tmp_path: Path,
+) -> None:
+    repository = JobRepository(tmp_path / "jobs.sqlite3")
+    repository.submit_request(
+        "job-b", _request(), caller_id="b", idempotency_key="b", at=NOW
+    )
+    repository.submit_request(
+        "job-a", _request(), caller_id="a", idempotency_key="a", at=NOW
+    )
+    claim = repository.claim_next(
+        "worker-one", at=LATER, lease_deadline="2026-08-25T20:01:00Z"
+    )
+    assert claim is not None and claim.job.job_id == "job-a"
+    with pytest.raises(JobStateError, match="job.claim_stale"):
+        repository.transition(
+            "job-a",
+            JobStatus.FAILED,
+            at=LATER,
+            failure_code="runtime.workflow_failed",
+            claim_token="stale",
+        )
+    cancelled = repository.cancel("job-a", at=LATER)
+    assert repository.cancel("job-a", at="2026-08-25T20:00:02Z") == cancelled
+    interrupted = repository.reconcile(at="2026-08-25T20:00:03Z")
+    assert interrupted[0].failure_code == "service.restart_interrupted"
+    assert repository.get("job-b").status is JobStatus.SUBMITTED
 
 
 def test_sqlite_database_symlink_is_rejected_without_mutating_target(

@@ -1,6 +1,7 @@
 """One governed single-target workflow connecting existing public modules."""
 
 # pylint: disable=duplicate-code,too-few-public-methods,too-many-lines,too-many-locals
+# pylint: disable=too-many-arguments,too-many-positional-arguments
 # pylint: disable=too-many-return-statements
 # pylint: disable=unidiomatic-typecheck
 
@@ -31,6 +32,7 @@ from web_listening.request.model import (
     ContentType,
     Request,
     RequestValidationError,
+    Scope,
     classify_mime_type,
 )
 from web_listening.request.scope import canonicalize_url
@@ -90,6 +92,19 @@ _INVOCATION_BUDGET_LIMITS: ContextVar[Budgets | None] = ContextVar(
 _PRIOR_TARGET_ATTEMPTS: ContextVar[tuple[Attempt, ...]] = ContextVar(
     "web_listening_prior_target_attempts", default=()
 )
+_CANCELLATION_CHECK: ContextVar[Callable[[], bool]] = ContextVar(
+    "web_listening_cancellation_check", default=lambda: False
+)
+
+
+@contextmanager
+def cancellation_check(check: Callable[[], bool]) -> Iterator[None]:
+    """Bind cooperative cancellation without changing the public workflow API."""
+    token = _CANCELLATION_CHECK.set(check)
+    try:
+        yield
+    finally:
+        _CANCELLATION_CHECK.reset(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +194,7 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
 ) -> Result:
     """Validate, resolve, run the controlled acquisition, and assemble a Result."""
     request = validate_request(request)
+    cancelled = _CANCELLATION_CHECK.get()
     requested_url = target_url or request.scope.seeds[0]
     if target_url is None and len(request.scope.seeds) != 1:
         return _failure_result(
@@ -307,6 +323,17 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
     last_tool_version = preferred_tool_version
     finished_at: str | None = None
     while True:
+        if cancelled():
+            return _failure_result(
+                status=ResultStatus.FAILED,
+                run_id=run_id,
+                generated_at=clock(),
+                requested_url=requested_url,
+                current_url=requested_url,
+                code="runtime.cancelled",
+                message="Runtime execution was cancelled.",
+                attempts=tuple(acquisition_attempts),
+            )
         selection = rank_eligible_tools(
             acquisition_manifests,
             EligibilityRequirements(category=ToolCategory.ACQUISITION),
@@ -490,6 +517,20 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
             )
         )
         output = acquisition if isinstance(acquisition, AcquisitionOutput) else None
+        redirects = (
+            ()
+            if output is None
+            else tuple(
+                RedirectEvidence(
+                    order=index,
+                    from_url=redirect.from_url,
+                    to_url=redirect.to_url,
+                    http_status=redirect.status_code,
+                    decision="followed",
+                )
+                for index, redirect in enumerate(output.redirects)
+            )
+        )
         attempt = _attempt(
             run_id=run_id,
             attempt_id=_ordered_attempt_id(
@@ -523,6 +564,16 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
         remaining_bytes = max(0, remaining_bytes - attempt.bytes_received)
         remaining_runtime_ms = max(0, remaining_runtime_ms - attempt.runtime_ms)
         remaining_tool_attempts -= 1
+        if cancelled():
+            return _cancelled_before_commit(
+                run_id,
+                finished_at,
+                requested_url,
+                acquisition,
+                tuple(acquisition_attempts),
+                site_skill,
+                redirects,
+            )
         if attempt.outcome == "succeeded":
             break
         assert error is not None and failure_code is not None
@@ -543,17 +594,17 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
             )
     assert isinstance(acquisition, AcquisitionOutput)
     assert finished_at is not None
-    redirects = tuple(
-        RedirectEvidence(
-            order=index,
-            from_url=redirect.from_url,
-            to_url=redirect.to_url,
-            http_status=redirect.status_code,
-            decision="followed",
-        )
-        for index, redirect in enumerate(acquisition.redirects)
-    )
     attempt = acquisition_attempts[-1]
+    if cancelled():
+        return _cancelled_before_commit(
+            run_id,
+            finished_at,
+            requested_url,
+            acquisition,
+            tuple(acquisition_attempts),
+            site_skill,
+            redirects,
+        )
     # The public Store boundary rolls back before propagating commit failures.
     try:
         observation = artifact_store.commit_observation(
@@ -605,6 +656,17 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
             redirects=redirects,
             attempts=tuple(acquisition_attempts[:-1]) + (attempt,),
         )
+    if cancelled():
+        return _cancelled_after_source(
+            run_id,
+            finished_at,
+            requested_url,
+            acquisition,
+            observation,
+            tuple(acquisition_attempts),
+            site_skill,
+            redirects,
+        )
     transformed = _transform_stored_source(
         registry,
         artifact_store,
@@ -620,6 +682,7 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
             - sum(item.runtime_ms for item in acquisition_attempts)
         ),
         attempt_order=len(acquisition_attempts),
+        should_cancel=cancelled,
     )
     attempts = tuple(acquisition_attempts) + (
         () if transformed.attempt is None else (transformed.attempt,)
@@ -647,6 +710,7 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
         status=(
             ResultStatus.PARTIAL
             if any(item.outcome != "succeeded" for item in attempts)
+            or any(error.code == "runtime.cancelled" for error in transformed.errors)
             else ResultStatus.COMPLETED
         ),
         manifest=manifest,
@@ -1159,6 +1223,7 @@ def _transform_stored_source(  # pylint: disable=too-many-arguments
     tool_attempts_remaining: int,
     runtime_ms_remaining: int,
     attempt_order: int,
+    should_cancel: Callable[[], bool],
 ) -> _TransformResult:
     """Invoke at most one eligible generic Transform over stored HTML."""
     if tool_attempts_remaining <= 0 or runtime_ms_remaining <= 0:
@@ -1174,6 +1239,13 @@ def _transform_stored_source(  # pylint: disable=too-many-arguments
     )
     if not manifests:
         return _TransformResult()
+    if should_cancel():
+        return _TransformResult(
+            errors=(
+                SafeError("runtime.cancelled", "Runtime execution was cancelled."),
+            ),
+            completed_at=clock(),
+        )
     manifest = manifests[0]
     started_at = clock()
     invocation_started_ns = time.monotonic_ns()
@@ -1217,6 +1289,32 @@ def _transform_stored_source(  # pylint: disable=too-many-arguments
             attempt_order=attempt_order,
         )
     assert isinstance(transformed, TransformOutput)
+    if should_cancel():
+        return _TransformResult(
+            attempt=_attempt(
+                run_id=run_id,
+                attempt_id=_ordered_attempt_id(run_id, "transform", attempt_order),
+                order=attempt_order,
+                outcome="failed",
+                requested_url=source.observation.source_url,
+                started_at=started_at,
+                finished_at=finished_at,
+                tool_id=transformed.tool_id,
+                tool_version=transformed.tool_version,
+                final_url=None,
+                http_status=None,
+                error=SafeError(
+                    "runtime.cancelled", "Runtime execution was cancelled."
+                ),
+                requests=0,
+                bytes_received=0,
+                runtime_ms=transformed.runtime_ms,
+            ),
+            errors=(
+                SafeError("runtime.cancelled", "Runtime execution was cancelled."),
+            ),
+            completed_at=finished_at,
+        )
     if transformed.runtime_ms > runtime_ms_remaining:
         return _transform_failure_result(
             source,
@@ -1274,6 +1372,31 @@ def _transform_stored_source(  # pylint: disable=too-many-arguments
             code=code,
             runtime_ms=transformed.runtime_ms,
             attempt_order=attempt_order,
+        )
+    if should_cancel():
+        return _TransformResult(
+            attempt=_attempt(
+                run_id=run_id,
+                attempt_id=_ordered_attempt_id(run_id, "transform", attempt_order),
+                order=attempt_order,
+                outcome="succeeded",
+                requested_url=source.observation.source_url,
+                started_at=started_at,
+                finished_at=finished_at,
+                tool_id=transformed.tool_id,
+                tool_version=transformed.tool_version,
+                final_url=None,
+                http_status=None,
+                error=None,
+                requests=0,
+                bytes_received=0,
+                runtime_ms=transformed.runtime_ms,
+            ),
+            observation=derived,
+            errors=(
+                SafeError("runtime.cancelled", "Runtime execution was cancelled."),
+            ),
+            completed_at=finished_at,
         )
     return _TransformResult(
         attempt=_attempt(
@@ -1480,6 +1603,155 @@ def _failure_result(  # pylint: disable=too-many-arguments
         attempts=attempts,
         errors=(error,),
         usage=usage,
+    )
+
+
+def _cancelled_before_commit(
+    run_id: str,
+    generated_at: str,
+    requested_url: str,
+    acquisition: AcquisitionOutput | AcquisitionFailure,
+    attempts: tuple[Attempt, ...],
+    site_skill: SiteSkillEvidence | None,
+    redirects: tuple[RedirectEvidence, ...],
+) -> Result:
+    """Discard uncommitted output and retain exact consumed usage evidence."""
+    error = SafeError("runtime.cancelled", "Runtime execution was cancelled.")
+    last = attempts[-1]
+    failed = (
+        last
+        if last.outcome != "succeeded"
+        else _attempt(
+            run_id=run_id,
+            attempt_id=last.attempt_id,
+            order=last.order,
+            outcome="failed",
+            requested_url=last.requested_url,
+            started_at=last.started_at,
+            finished_at=last.finished_at,
+            tool_id=last.tool_id,
+            tool_version=last.tool_version,
+            final_url=(
+                acquisition.final_url
+                if isinstance(acquisition, AcquisitionOutput)
+                else None
+            ),
+            http_status=(
+                acquisition.status_code
+                if isinstance(acquisition, AcquisitionOutput)
+                else None
+            ),
+            error=error,
+            requests=last.requests,
+            bytes_received=last.bytes_received,
+            runtime_ms=last.runtime_ms,
+        )
+    )
+    return _failure_result(
+        status=ResultStatus.FAILED,
+        run_id=run_id,
+        generated_at=generated_at,
+        requested_url=requested_url,
+        current_url=(
+            acquisition.final_url
+            if isinstance(acquisition, AcquisitionOutput)
+            else requested_url
+        ),
+        code=error.code,
+        message=error.message,
+        tool_id=last.tool_id,
+        tool_version=last.tool_version,
+        site_skill=site_skill,
+        redirects=redirects,
+        attempts=attempts[:-1] + (failed,),
+    )
+
+
+def _cancelled_after_source(
+    run_id: str,
+    generated_at: str,
+    requested_url: str,
+    acquisition: AcquisitionOutput,
+    observation: StoredObservation,
+    attempts: tuple[Attempt, ...],
+    site_skill: SiteSkillEvidence | None,
+    redirects: tuple[RedirectEvidence, ...],
+) -> Result:
+    """Preserve committed source evidence while stopping subsequent work."""
+    error = SafeError("runtime.cancelled", "Runtime execution was cancelled.")
+    usage = _usage(attempts)
+    manifest = manifest_from_observations(
+        run_id=run_id,
+        generated_at=generated_at,
+        requested_url=requested_url,
+        current_url=acquisition.final_url,
+        final_url=acquisition.final_url,
+        http_status=acquisition.status_code,
+        tool_id=acquisition.tool_id,
+        tool_version=acquisition.tool_version,
+        redirects=redirects,
+        site_skill=site_skill,
+        attempts=attempts,
+        observations=(observation,),
+        usage=usage,
+    )
+    return Result(
+        status=ResultStatus.PARTIAL,
+        manifest=manifest,
+        site_skill_used=site_skill,
+        site_skill_update=None,
+        attempts=attempts,
+        errors=(error,),
+        usage=usage,
+    )
+
+
+def cancelled_result(result: Result, *, generated_at: str) -> Result:
+    """Convert finalization-time cancellation without discarding committed evidence."""
+    if any(error.code == "runtime.cancelled" for error in result.errors):
+        return result
+    error = SafeError("runtime.cancelled", "Runtime execution was cancelled.")
+    manifest = replace(result.manifest, generated_at=generated_at)
+    return Result(
+        status=(ResultStatus.PARTIAL if result.artifacts else ResultStatus.FAILED),
+        manifest=manifest,
+        site_skill_used=result.site_skill_used,
+        site_skill_update=result.site_skill_update,
+        attempts=result.attempts,
+        errors=(error,),
+        usage=result.usage,
+    )
+
+
+def terminal_failure_result(
+    request: object,
+    *,
+    status: ResultStatus,
+    run_id: str,
+    generated_at: str,
+    code: str,
+    message: str,
+) -> Result:
+    """Build strict terminal evidence when execution produced no Result."""
+    requested_url = "https://invalid.invalid/"
+    if (
+        isinstance(request, Request)
+        and isinstance(request.scope, Scope)
+        and isinstance(request.scope.seeds, (tuple, list))
+        and request.scope.seeds
+    ):
+        try:
+            requested_url = canonicalize_url(request.scope.seeds[0])
+        except RequestValidationError:
+            pass
+    return _failure_result(
+        status=status,
+        run_id=run_id,
+        generated_at=generated_at,
+        requested_url=requested_url,
+        current_url=requested_url,
+        code=code,
+        message=message,
     )
 
 

@@ -52,7 +52,15 @@ from web_listening.tool_registry.protocols.acquisition import (
     AcquisitionOutput,
     AcquisitionRedirect,
 )
+from web_listening.tool_registry.protocols.transform import (
+    TransformFailure,
+    TransformOutput,
+)
 from web_listening.tool_registry.registry import Registry
+from web_listening.tool_registry.transform.builtins.simple_html_markdown import (
+    SIMPLE_HTML_MARKDOWN_MANIFEST,
+    SimpleHtmlMarkdownTransform,
+)
 
 EXTERNAL_TRANSFORM_SOURCE = (
     Path(__file__).parents[1] / "fixtures/tools/external_transform/1.0.0"
@@ -928,7 +936,8 @@ def test_invalid_attempt_time_is_failed_before_artifact_commit(
     ]
     failed = jobs.get("job-one")
     assert failed.failure_code == "runtime.workflow_failed"
-    assert failed.result is None
+    assert failed.result is not None
+    assert [error.code for error in failed.result.errors] == ["runtime.workflow_failed"]
     with pytest.raises(ArtifactStoreError) as missing:
         store.read_blob(hashlib.sha256(BODY).hexdigest())
     assert missing.value.code == "blob.not_found"
@@ -1348,3 +1357,1131 @@ def test_open_owned_resources_are_closed_once(tmp_path: Path) -> None:
         jobs.get("job-one")
     assert store_error.value.code == "repository.closed"
     assert jobs_error.value.code == "repository.closed"
+
+
+def test_submit_claim_execute_and_idempotent_replay_use_persisted_request(
+    tmp_path: Path,
+) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+    request = _request(_skill())
+    submitted = service.submit(request, caller_id="caller-one", idempotency_key="key-1")
+    replay = service.submit(request, caller_id="caller-one", idempotency_key="key-1")
+    claim = jobs.claim_next("worker-one", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+
+    assert replay.job_id == submitted.job_id
+    assert claim is not None and claim.request == request
+    finished = service.execute_submitted(claim.job.job_id, claim.request, lambda: False)
+    assert finished.status is JobStatus.COMPLETED
+    assert tool.calls == 1
+    assert len(finished.result.artifacts) == 1  # type: ignore[union-attr]
+    store.close()
+
+
+def test_submission_identity_precedes_admission_narrowing(tmp_path: Path) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+    request_101 = replace(
+        _request(_skill()),
+        budgets=Budgets(101, 2 * 1024 * 1024, 30, 1),
+    )
+    request_100 = replace(
+        request_101, budgets=replace(request_101.budgets, max_requests=100)
+    )
+
+    submitted = service.submit(
+        request_101, caller_id="caller-one", idempotency_key="budget-key"
+    )
+    with pytest.raises(JobStateError, match="^idempotency.conflict$"):
+        service.submit(
+            request_100, caller_id="caller-one", idempotency_key="budget-key"
+        )
+    claim = jobs.claim_next("worker-one", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+
+    assert (
+        submitted.request_json is not None
+        and '"max_requests":101' in submitted.request_json
+    )
+    assert claim is not None and claim.request.budgets.max_requests == 100
+    store.close()
+
+
+def test_canonical_equivalent_request_replays_before_admission(tmp_path: Path) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, _jobs = _service(tmp_path, tool)
+    request = _request(_skill())
+    equivalent = replace(
+        request,
+        scope=replace(
+            request.scope,
+            seeds=("HTTPS://EXAMPLE.TEST:443/report",),
+            allowed_origins=("HTTPS://EXAMPLE.TEST:443",),
+        ),
+    )
+
+    first = service.submit(request, caller_id="caller-one", idempotency_key="same")
+    replay = service.submit(equivalent, caller_id="caller-one", idempotency_key="same")
+
+    assert replay == first
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("tokenizer", "wordpiece"),
+        ("authorization_date", "2026-09-05"),
+        ("sessionidentifier", "public-record"),
+    ],
+)
+def test_safe_nearby_query_keys_execute_after_restart(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    target = f"{URL}?{key}={value}"
+    output = replace(_successful_output(), requested_url=target, final_url=target)
+    tool = _CountingTool(output)
+    service, store, jobs = _service(tmp_path, tool)
+    request = replace(
+        _request(None),
+        scope=replace(_request(None).scope, seeds=(target,)),
+    )
+    service.submit(request, caller_id="caller", idempotency_key=key)
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+
+    assert claim is not None
+    finished = service.execute_submitted(claim.job.job_id, claim.request, lambda: False)
+    assert finished.status is JobStatus.COMPLETED
+    assert tool.calls == 1
+    store.close()
+
+
+def test_cancel_before_execution_has_zero_tool_calls_and_strict_failed_result(
+    tmp_path: Path,
+) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+    submitted = service.submit(
+        _request(_skill()), caller_id="caller-one", idempotency_key="key-1"
+    )
+    service.cancel(submitted.job_id)
+    claim = jobs.claim_next("worker-one", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    assert claim is not None
+
+    finished = service.execute_submitted(claim.job.job_id, claim.request, lambda: False)
+
+    assert finished.status is JobStatus.FAILED
+    assert finished.failure_code == "runtime.cancelled"
+    assert finished.result is not None
+    assert finished.result.usage.requests == 0
+    assert not finished.result.artifacts
+    assert tool.calls == 0
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("acquisition", "fault", "expected_top_error", "expected_attempt_error"),
+    [
+        (
+            AcquisitionFailure(
+                WEB_HTTP_MANIFEST.tool_id,
+                WEB_HTTP_MANIFEST.version,
+                "gateway.timeout",
+                requests=1,
+                runtime_ms=7,
+            ),
+            "durable-cancel",
+            "runtime.cancelled",
+            "gateway.timeout",
+        ),
+        (
+            AcquisitionFailure(
+                WEB_HTTP_MANIFEST.tool_id,
+                WEB_HTTP_MANIFEST.version,
+                "gateway.timeout",
+                requests=1,
+                runtime_ms=7,
+            ),
+            "callback-error",
+            "runtime.workflow_failed",
+            "gateway.timeout",
+        ),
+        (
+            _successful_output(),
+            "callback-error",
+            "runtime.workflow_failed",
+            "runtime.workflow_failed",
+        ),
+    ],
+    ids=("failed-durable-cancel", "failed-callback-error", "success-control"),
+)
+# pylint: disable-next=too-many-locals
+def test_post_invocation_fault_preserves_genuine_attempt_error_and_usage(
+    tmp_path: Path,
+    acquisition: AcquisitionOutput | AcquisitionFailure,
+    fault: str,
+    expected_top_error: str,
+    expected_attempt_error: str,
+) -> None:
+    primary = _CountingTool(acquisition)
+    alternate_manifest = replace(WEB_HTTP_MANIFEST, tool_id="acquisition.alternate")
+    alternate = _CountingTool(
+        replace(_successful_output(), tool_id=alternate_manifest.tool_id),
+        manifest=alternate_manifest,
+    )
+    registry = Registry()
+    registry.register(WEB_HTTP_MANIFEST, primary)
+    registry.register(alternate_manifest, alternate)
+    store = ArtifactStore(tmp_path / "artifacts")
+    jobs = JobRepository(tmp_path / "jobs.sqlite3")
+    service = RuntimeService(
+        registry,
+        store,
+        jobs,
+        clock=lambda: NOW,
+        job_id_factory=lambda: "job-one",
+    )
+    submitted = service.submit(
+        _request(
+            _skill(max_tool_attempts=2),
+            explore_all_tools=True,
+            max_tool_attempts=2,
+        ),
+        caller_id="caller",
+        idempotency_key=fault,
+    )
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    callback_error = RuntimeError("deterministic post-invocation callback failure")
+    checks = 0
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        if checks != 2:
+            return False
+        if fault == "durable-cancel":
+            service.cancel(submitted.job_id)
+            return True
+        raise callback_error
+
+    assert claim is not None
+    if fault == "callback-error":
+        with pytest.raises(RuntimeError) as raised:
+            service.execute_submitted(claim.job.job_id, claim.request, should_cancel)
+        assert raised.value is callback_error
+        finished = jobs.get(claim.job.job_id)
+        assert checks == 2
+    else:
+        finished = service.execute_submitted(
+            claim.job.job_id, claim.request, should_cancel
+        )
+        assert checks == 3
+
+    assert finished.status is JobStatus.FAILED
+    assert finished.failure_code == expected_top_error
+    assert finished.result is not None
+    assert [error.code for error in finished.result.errors] == [expected_top_error]
+    assert len(finished.result.attempts) == 1
+    assert finished.result.attempts[0].error is not None
+    assert finished.result.attempts[0].error.code == expected_attempt_error
+    assert finished.result.usage.to_dict() == {
+        "requests": 1,
+        "bytes_received": (
+            0 if isinstance(acquisition, AcquisitionFailure) else len(BODY)
+        ),
+        "runtime_ms": 7,
+        "tool_attempts": 1,
+    }
+    assert finished.result.manifest.attempts == finished.result.attempts
+    assert finished.result.manifest.usage == finished.result.usage
+    assert primary.calls == 1
+    assert alternate.calls == 0
+    store.close()
+    jobs.close()
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected_top_error"),
+    [
+        ("durable-cancel", "runtime.cancelled"),
+        ("callback-error", "runtime.workflow_failed"),
+    ],
+)
+# pylint: disable-next=too-many-locals,too-many-statements
+def test_redirected_success_post_invocation_fault_preserves_terminal_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+    expected_top_error: str,
+) -> None:
+    intermediate_url = "https://example.test/intermediate"
+    final_url = "https://example.test/final"
+    acquisition = replace(
+        _successful_output(),
+        final_url=final_url,
+        redirects=(
+            AcquisitionRedirect(URL, intermediate_url, 301),
+            AcquisitionRedirect(intermediate_url, final_url, 302),
+        ),
+    )
+    primary = _CountingTool(acquisition)
+    alternate_manifest = replace(WEB_HTTP_MANIFEST, tool_id="acquisition.alternate")
+    alternate = _CountingTool(
+        replace(_successful_output(), tool_id=alternate_manifest.tool_id),
+        manifest=alternate_manifest,
+    )
+    registry = Registry()
+    registry.register(WEB_HTTP_MANIFEST, primary)
+    registry.register(alternate_manifest, alternate)
+    store = ArtifactStore(tmp_path / "artifacts")
+    jobs = JobRepository(tmp_path / "jobs.sqlite3")
+    service = RuntimeService(
+        registry,
+        store,
+        jobs,
+        clock=lambda: NOW,
+        job_id_factory=lambda: "job-one",
+    )
+    submitted = service.submit(
+        _request(
+            _skill(max_tool_attempts=2),
+            explore_all_tools=True,
+            max_tool_attempts=2,
+        ),
+        caller_id="caller",
+        idempotency_key=f"redirect-{fault}",
+    )
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    callback_error = RuntimeError("deterministic redirected callback failure")
+    checks = 0
+    commits = 0
+    commit_observation = store.commit_observation
+
+    def count_commit(proposal: object):
+        nonlocal commits
+        commits += 1
+        return commit_observation(proposal)  # type: ignore[arg-type]
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        if checks != 2:
+            return False
+        if fault == "durable-cancel":
+            service.cancel(submitted.job_id)
+            return True
+        raise callback_error
+
+    monkeypatch.setattr(store, "commit_observation", count_commit)
+    assert claim is not None
+    if fault == "callback-error":
+        with pytest.raises(RuntimeError) as raised:
+            service.execute_submitted(claim.job.job_id, claim.request, should_cancel)
+        assert raised.value is callback_error
+        finished = jobs.get(claim.job.job_id)
+        assert checks == 2
+    else:
+        finished = service.execute_submitted(
+            claim.job.job_id, claim.request, should_cancel
+        )
+        assert checks == 3
+
+    assert finished.status is JobStatus.FAILED
+    assert finished.failure_code == expected_top_error
+    assert finished.result is not None
+    assert [error.code for error in finished.result.errors] == [expected_top_error]
+    manifest = finished.result.manifest
+    assert manifest.requested_url == URL
+    assert manifest.current_url == final_url
+    assert manifest.final_url is None
+    assert tuple(
+        (redirect.order, redirect.from_url, redirect.to_url, redirect.http_status)
+        for redirect in manifest.redirects
+    ) == (
+        (0, URL, intermediate_url, 301),
+        (1, intermediate_url, final_url, 302),
+    )
+    assert len(finished.result.attempts) == 1
+    attempt = finished.result.attempts[0]
+    assert attempt.requested_url == URL
+    assert attempt.final_url == final_url
+    assert attempt.http_status == 200
+    assert attempt.error is not None
+    assert attempt.error.code == expected_top_error
+    assert finished.result.usage.to_dict() == {
+        "requests": 3,
+        "bytes_received": len(BODY),
+        "runtime_ms": 7,
+        "tool_attempts": 1,
+    }
+    assert manifest.attempts == finished.result.attempts
+    assert manifest.usage == finished.result.usage
+    assert not finished.result.artifacts
+    assert primary.calls == 1
+    assert alternate.calls == 0
+    assert commits == 0
+    store.close()
+    jobs.close()
+
+
+def test_persistent_cancellation_callback_exception_terminalizes_claim(
+    tmp_path: Path,
+) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+    service.submit(_request(_skill()), caller_id="caller", idempotency_key="callback")
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    callback_error = RuntimeError("deterministic cancellation callback exception")
+    checks = 0
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        raise callback_error
+
+    assert claim is not None
+    with pytest.raises(RuntimeError) as raised:
+        service.execute_submitted(claim.job.job_id, claim.request, should_cancel)
+
+    assert raised.value is callback_error
+    assert checks == 1
+    finished = jobs.get(claim.job.job_id)
+    assert finished.status is JobStatus.FAILED
+    assert finished.failure_code == "runtime.workflow_failed"
+    assert finished.result is not None
+    assert [error.code for error in finished.result.errors] == [
+        "runtime.workflow_failed"
+    ]
+    assert not finished.result.artifacts
+    assert finished.result.usage.requests == 0
+    assert tool.calls == 0
+    store.close()
+
+
+def test_run_empty_seed_request_preserves_rejection_and_terminalizes(
+    tmp_path: Path,
+) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+    request = replace(_request(None), scope=replace(_request(None).scope, seeds=()))
+
+    finished = service.run(request)
+
+    assert finished.status is JobStatus.REJECTED
+    assert finished.failure_code == "scope.empty_seeds"
+    assert finished.result is not None
+    assert [error.code for error in finished.result.errors] == ["scope.empty_seeds"]
+    assert finished.result.manifest.requested_url == "https://invalid.invalid/"
+    assert tool.calls == 0
+    assert jobs.get(finished.job_id) == finished
+    store.close()
+
+
+@pytest.mark.parametrize(
+    (
+        "checkpoint",
+        "expected_status",
+        "expected_roles",
+        "expected_attempts",
+        "expected_usage",
+        "expected_tool_calls",
+        "expected_transform_calls",
+    ),
+    [
+        (1, JobStatus.FAILED, (), (), (0, 0, 0, 0), 0, 0),
+        (
+            2,
+            JobStatus.FAILED,
+            (),
+            (("failed", "runtime.workflow_failed"),),
+            (1, 49, 7, 1),
+            1,
+            0,
+        ),
+        (
+            3,
+            JobStatus.FAILED,
+            (),
+            (("failed", "runtime.workflow_failed"),),
+            (1, 49, 7, 1),
+            1,
+            0,
+        ),
+        (
+            4,
+            JobStatus.PARTIAL,
+            ("source",),
+            (("succeeded", None),),
+            (1, 49, 7, 1),
+            1,
+            0,
+        ),
+        (
+            5,
+            JobStatus.PARTIAL,
+            ("source",),
+            (("succeeded", None),),
+            (1, 49, 7, 1),
+            1,
+            0,
+        ),
+        (
+            6,
+            JobStatus.PARTIAL,
+            ("source",),
+            (("succeeded", None), ("failed", "runtime.workflow_failed")),
+            (1, 49, 18, 2),
+            1,
+            1,
+        ),
+        (
+            7,
+            JobStatus.PARTIAL,
+            ("source", "derived"),
+            (("succeeded", None), ("succeeded", None)),
+            (1, 49, 18, 2),
+            1,
+            1,
+        ),
+        (
+            8,
+            JobStatus.PARTIAL,
+            ("source", "derived"),
+            (("succeeded", None), ("succeeded", None)),
+            (1, 49, 18, 2),
+            1,
+            1,
+        ),
+    ],
+    ids=(
+        "before-acquisition",
+        "after-acquisition",
+        "before-source-commit",
+        "after-source-commit",
+        "before-transform",
+        "after-transform",
+        "after-derived-commit",
+        "after-workflow",
+    ),
+)
+# pylint: disable-next=too-many-locals,too-many-arguments,too-many-positional-arguments
+def test_callback_exception_preserves_exact_committed_evidence_without_cancel(
+    tmp_path: Path,
+    checkpoint: int,
+    expected_status: JobStatus,
+    expected_roles: tuple[str, ...],
+    expected_attempts: tuple[tuple[str, str | None], ...],
+    expected_usage: tuple[int, int, int, int],
+    expected_tool_calls: int,
+    expected_transform_calls: int,
+) -> None:
+    transform_body = b"<html><body>one two three four five</body></html>"
+    markdown_body = b"one two three four five\n"
+    tool = _CountingTool(
+        replace(
+            _successful_output(),
+            body=transform_body,
+            sha256=hashlib.sha256(transform_body).hexdigest(),
+            bytes_received=len(transform_body),
+        )
+    )
+    service, store, jobs = _service(tmp_path, tool)
+
+    class CountingTransform(SimpleHtmlMarkdownTransform):
+        calls = 0
+
+        def transform(self, tool_input) -> TransformOutput:
+            self.calls += 1
+            transformed = super().transform(tool_input)
+            assert isinstance(transformed, TransformOutput)
+            return replace(transformed, runtime_ms=11)
+
+    transform = CountingTransform()
+    service._registry.register(  # pylint: disable=protected-access
+        SIMPLE_HTML_MARKDOWN_MANIFEST, transform
+    )
+    service.submit(
+        _request(_skill(max_tool_attempts=2), max_tool_attempts=2),
+        caller_id="caller",
+        idempotency_key=f"late-{checkpoint}",
+    )
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    callback_error = RuntimeError(f"callback failed at checkpoint {checkpoint}")
+    checks = 0
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        if checks == checkpoint:
+            raise callback_error
+        return False
+
+    assert claim is not None
+    with pytest.raises(RuntimeError) as raised:
+        service.execute_submitted(claim.job.job_id, claim.request, should_cancel)
+
+    assert raised.value is callback_error
+    assert checks == checkpoint
+    finished = jobs.get(claim.job.job_id)
+    assert finished.status is expected_status
+    assert finished.failure_code == "runtime.workflow_failed"
+    assert finished.result is not None
+    assert (
+        tuple(artifact.role for artifact in finished.result.artifacts) == expected_roles
+    )
+    assert [error.code for error in finished.result.errors] == [
+        "runtime.workflow_failed"
+    ]
+    assert (
+        tuple(
+            (
+                attempt.outcome,
+                None if attempt.error is None else attempt.error.code,
+            )
+            for attempt in finished.result.attempts
+        )
+        == expected_attempts
+    )
+    assert (
+        finished.result.usage.requests,
+        finished.result.usage.bytes_received,
+        finished.result.usage.runtime_ms,
+        finished.result.usage.tool_attempts,
+    ) == expected_usage
+    assert finished.result.manifest.attempts == finished.result.attempts
+    assert finished.result.manifest.usage == finished.result.usage
+    observations = tuple(
+        store.get_observation(artifact.observation_id)
+        for artifact in finished.result.artifacts
+    )
+    expected_contents = {
+        (): (),
+        ("source",): (transform_body,),
+        ("source", "derived"): (transform_body, markdown_body),
+    }
+    assert tuple(observation.content for observation in observations) == (
+        expected_contents[expected_roles]
+    )
+    assert tuple(observation.artifact.role.value for observation in observations) == (
+        expected_roles
+    )
+    assert tuple(len(observation.lineage) for observation in observations) == (
+        {
+            (): (),
+            ("source",): (0,),
+            ("source", "derived"): (
+                0,
+                1,
+            ),
+        }[expected_roles]
+    )
+    if len(observations) == 2:
+        assert observations[1].lineage[0].source_observation_id == (
+            observations[0].observation.observation_id
+        )
+        assert observations[1].lineage[0].source_artifact_id == (
+            observations[0].artifact.artifact_id
+        )
+    assert (tool.calls, transform.calls) == (
+        expected_tool_calls,
+        expected_transform_calls,
+    )
+    assert jobs.get(claim.job.job_id) == finished
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("malformed_request", "expected_code", "rejected_values"),
+    [
+        (object(), "request.invalid", ()),
+        (replace(_request(None), scope=None), "scope.invalid", ()),
+        (replace(_request(None), scope=object()), "scope.invalid", ()),
+        (
+            replace(
+                _request(None),
+                scope=replace(_request(None).scope, seeds=(object(),)),
+            ),
+            "scope.url_invalid",
+            (),
+        ),
+        (
+            replace(_request(None), scope=replace(_request(None).scope, seeds=("",))),
+            "scope.url_invalid",
+            (),
+        ),
+        (
+            replace(
+                _request(None),
+                scope=replace(_request(None).scope, seeds=("not-a-url",)),
+            ),
+            "scope.url_invalid",
+            ("not-a-url",),
+        ),
+        (
+            replace(
+                _request(None),
+                scope=replace(
+                    _request(None).scope,
+                    seeds=("https://example.test/report?next=/root/private",),
+                ),
+                budgets=None,
+            ),
+            "budget.invalid",
+            ("/root/private",),
+        ),
+        (
+            replace(
+                _request(None),
+                scope=replace(
+                    _request(None).scope,
+                    seeds=("https://example.test/report?token=private-value",),
+                ),
+                budgets=None,
+            ),
+            "budget.invalid",
+            ("token", "private-value"),
+        ),
+        (
+            replace(
+                _request(None),
+                scope=replace(
+                    _request(None).scope,
+                    seeds=(
+                        "https://example.test/report?refresh%5Ftoken=private-value",
+                    ),
+                ),
+                budgets=None,
+            ),
+            "budget.invalid",
+            ("refresh%5Ftoken", "refresh_token", "private-value"),
+        ),
+    ],
+    ids=(
+        "non-request",
+        "scope-none",
+        "scope-object",
+        "seed-object",
+        "seed-empty",
+        "seed-invalid-url",
+        "absolute-path-query",
+        "sensitive-query",
+        "encoded-sensitive-query",
+    ),
+)
+def test_run_malformed_request_returns_strict_terminal_rejection(
+    tmp_path: Path,
+    malformed_request: object,
+    expected_code: str,
+    rejected_values: tuple[str, ...],
+) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+
+    finished = service.run(malformed_request)  # type: ignore[arg-type]
+
+    assert finished.status is JobStatus.REJECTED
+    assert finished.failure_code == expected_code
+    assert finished.result is not None
+    assert finished.result.status.value == "rejected"
+    assert [error.code for error in finished.result.errors] == [expected_code]
+    assert finished.result.manifest.requested_url == "https://invalid.invalid/"
+    assert finished.result.manifest.current_url == "https://invalid.invalid/"
+    assert not finished.result.artifacts
+    assert finished.result.usage.to_dict() == {
+        "requests": 0,
+        "bytes_received": 0,
+        "runtime_ms": 0,
+        "tool_attempts": 0,
+    }
+    persisted_result = str(finished.result.to_dict())
+    assert all(value not in persisted_result for value in rejected_values)
+    assert tool.calls == 0
+    assert jobs.get(finished.job_id) == finished
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "expected_artifacts"),
+    [(4, 1), (6, 1), (7, 2), (8, 2)],
+    ids=("source-commit", "post-transform", "derived-commit", "post-workflow"),
+)
+def test_persisting_callback_exception_preserves_committed_cancellation_evidence(
+    tmp_path: Path, checkpoint: int, expected_artifacts: int
+) -> None:
+    transform_body = b"<html><body>one two three four five</body></html>"
+    tool = _CountingTool(
+        replace(
+            _successful_output(),
+            body=transform_body,
+            sha256=hashlib.sha256(transform_body).hexdigest(),
+            bytes_received=len(transform_body),
+        )
+    )
+    service, store, jobs = _service(tmp_path, tool)
+    service._registry.register(  # pylint: disable=protected-access
+        SIMPLE_HTML_MARKDOWN_MANIFEST, SimpleHtmlMarkdownTransform()
+    )
+    submitted = service.submit(
+        _request(_skill(max_tool_attempts=2), max_tool_attempts=2),
+        caller_id="caller",
+        idempotency_key=f"callback-{checkpoint}",
+    )
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    callback_error = RuntimeError(f"callback failed at checkpoint {checkpoint}")
+    checks = 0
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        if checks == checkpoint:
+            service.cancel(submitted.job_id)
+            raise callback_error
+        return False
+
+    assert claim is not None
+    with pytest.raises(RuntimeError) as raised:
+        service.execute_submitted(claim.job.job_id, claim.request, should_cancel)
+
+    assert raised.value is callback_error
+    assert checks == checkpoint
+    finished = jobs.get(claim.job.job_id)
+    assert finished.status is JobStatus.PARTIAL
+    assert finished.failure_code == "runtime.cancelled"
+    assert finished.result is not None
+    assert len(finished.result.artifacts) == expected_artifacts
+    assert [error.code for error in finished.result.errors] == ["runtime.cancelled"]
+    assert tool.calls == 1
+    store.close()
+
+
+def test_late_callback_exception_cancel_race_preserves_committed_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+    service.submit(_request(_skill()), caller_id="caller", idempotency_key="late-race")
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    callback_error = RuntimeError("deterministic late callback exception")
+    checks = 0
+    transition = jobs.transition
+    injected = False
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        if checks >= 5:
+            raise callback_error
+        return False
+
+    def cancel_before_partial(job_id, status, **kwargs):
+        nonlocal injected
+        if status is JobStatus.PARTIAL and not injected:
+            injected = True
+            jobs.cancel(job_id, at=NOW)
+        return transition(job_id, status, **kwargs)
+
+    monkeypatch.setattr(jobs, "transition", cancel_before_partial)
+    assert claim is not None
+    with pytest.raises(RuntimeError) as raised:
+        service.execute_submitted(claim.job.job_id, claim.request, should_cancel)
+
+    assert raised.value is callback_error
+    assert checks == 5
+    assert injected
+    finished = jobs.get(claim.job.job_id)
+    assert finished.status is JobStatus.PARTIAL
+    assert finished.failure_code == "runtime.cancelled"
+    assert finished.result is not None and len(finished.result.artifacts) == 1
+    assert [error.code for error in finished.result.errors] == ["runtime.cancelled"]
+    assert tool.calls == 1
+    store.close()
+
+
+def test_cancel_before_workflow_exception_persists_strict_cancelled_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool = _CountingTool(_successful_output())
+    registry = Registry()
+    registry.register(WEB_HTTP_MANIFEST, tool)
+    store = ArtifactStore(tmp_path / "artifacts")
+    database = tmp_path / "jobs.sqlite3"
+    jobs = JobRepository(database)
+    cancellation_repository = JobRepository(database)
+    service = RuntimeService(
+        registry,
+        store,
+        jobs,
+        clock=lambda: NOW,
+        job_id_factory=lambda: "job-one",
+    )
+    service.submit(_request(_skill()), caller_id="caller", idempotency_key="race")
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    workflow_error = RuntimeError("deterministic workflow exception")
+
+    def cancel_then_raise(*_args, **_kwargs):
+        assert claim is not None
+        cancellation_repository.cancel(claim.job.job_id, at=NOW)
+        raise workflow_error
+
+    monkeypatch.setattr(service_module, "run_single_target", cancel_then_raise)
+    assert claim is not None
+    with pytest.raises(RuntimeError) as raised:
+        service.execute_submitted(claim.job.job_id, claim.request, lambda: False)
+
+    assert raised.value is workflow_error
+    finished = jobs.get(claim.job.job_id)
+    assert finished.status is JobStatus.FAILED
+    assert finished.failure_code == "runtime.cancelled"
+    assert finished.result is not None
+    assert [error.code for error in finished.result.errors] == ["runtime.cancelled"]
+    assert not finished.result.artifacts
+    assert finished.result.usage.to_dict() == {
+        "requests": 0,
+        "bytes_received": 0,
+        "runtime_ms": 0,
+        "tool_attempts": 0,
+    }
+    assert tool.calls == 0
+    cancellation_repository.close()
+    jobs.close()
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "expected_status", "expected_artifacts"),
+    [
+        (1, JobStatus.FAILED, 0),
+        (2, JobStatus.FAILED, 0),
+        (3, JobStatus.FAILED, 0),
+        (4, JobStatus.PARTIAL, 1),
+    ],
+)
+def test_cooperative_cancellation_preserves_only_committed_source_evidence(
+    tmp_path: Path,
+    checkpoint: int,
+    expected_status: JobStatus,
+    expected_artifacts: int,
+) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+    service.submit(
+        _request(_skill()),
+        caller_id="caller-one",
+        idempotency_key=f"key-{checkpoint}",
+    )
+    claim = jobs.claim_next("worker-one", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    checks = 0
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= checkpoint
+
+    assert claim is not None
+    finished = service.execute_submitted(claim.job.job_id, claim.request, should_cancel)
+
+    assert finished.status is expected_status
+    assert finished.failure_code == "runtime.cancelled"
+    assert finished.result is not None
+    assert len(finished.result.artifacts) == expected_artifacts
+    assert tool.calls == (0 if checkpoint == 1 else 1)
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "artifact_count", "transform_calls"),
+    [(5, 1, 0), (7, 2, 1)],
+)
+def test_transform_boundary_cancellation_is_partial_and_preserves_evidence(
+    tmp_path: Path,
+    checkpoint: int,
+    artifact_count: int,
+    transform_calls: int,
+) -> None:
+    transform_body = b"<html><body>one two three four five</body></html>"
+    tool = _CountingTool(
+        replace(
+            _successful_output(),
+            body=transform_body,
+            sha256=hashlib.sha256(transform_body).hexdigest(),
+            bytes_received=len(transform_body),
+        )
+    )
+    service, store, jobs = _service(tmp_path, tool)
+
+    class CountingTransform(SimpleHtmlMarkdownTransform):
+        calls = 0
+
+        def transform(self, tool_input):
+            self.calls += 1
+            return super().transform(tool_input)
+
+    transform = CountingTransform()
+    service._registry.register(  # pylint: disable=protected-access
+        SIMPLE_HTML_MARKDOWN_MANIFEST, transform
+    )
+    service.submit(
+        _request(_skill(max_tool_attempts=2), max_tool_attempts=2),
+        caller_id="caller",
+        idempotency_key=f"transform-{checkpoint}",
+    )
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    checks = 0
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= checkpoint
+
+    assert claim is not None
+    finished = service.execute_submitted(claim.job.job_id, claim.request, should_cancel)
+
+    assert finished.status is JobStatus.PARTIAL
+    assert finished.failure_code == "runtime.cancelled"
+    assert finished.result is not None
+    assert len(finished.result.artifacts) == artifact_count
+    assert transform.calls == transform_calls
+    if transform_calls:
+        assert finished.result.attempts[-1].outcome == "succeeded"
+    store.close()
+
+
+def test_cancel_committing_before_completed_transition_forces_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+    service.submit(_request(_skill()), caller_id="caller", idempotency_key="race")
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    transition = jobs.transition
+    injected = False
+
+    def cancel_before_completed(job_id, status, **kwargs):
+        nonlocal injected
+        if status is JobStatus.COMPLETED and not injected:
+            injected = True
+            jobs.cancel(job_id, at=NOW)
+        return transition(job_id, status, **kwargs)
+
+    monkeypatch.setattr(jobs, "transition", cancel_before_completed)
+    assert claim is not None
+    finished = service.execute_submitted(claim.job.job_id, claim.request, lambda: False)
+
+    assert injected
+    assert finished.status is JobStatus.PARTIAL
+    assert finished.failure_code == "runtime.cancelled"
+    assert finished.result is not None and len(finished.result.artifacts) == 1
+    store.close()
+
+
+def test_cancel_committing_before_failed_transition_forces_cancelled_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool = _CountingTool(
+        AcquisitionFailure(
+            WEB_HTTP_MANIFEST.tool_id,
+            WEB_HTTP_MANIFEST.version,
+            "gateway.timeout",
+        )
+    )
+    service, store, jobs = _service(tmp_path, tool)
+    service.submit(_request(_skill()), caller_id="caller", idempotency_key="race")
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    transition = jobs.transition
+    injected = False
+
+    def cancel_before_failed(job_id, status, **kwargs):
+        nonlocal injected
+        if status is JobStatus.FAILED and not injected:
+            injected = True
+            jobs.cancel(job_id, at=NOW)
+        return transition(job_id, status, **kwargs)
+
+    monkeypatch.setattr(jobs, "transition", cancel_before_failed)
+    assert claim is not None
+    finished = service.execute_submitted(claim.job.job_id, claim.request, lambda: False)
+
+    assert injected
+    assert finished.status is JobStatus.FAILED
+    assert finished.failure_code == "runtime.cancelled"
+    assert finished.result is not None and not finished.result.artifacts
+    assert [error.code for error in finished.result.errors] == ["runtime.cancelled"]
+    store.close()
+
+
+def test_cancel_committing_before_partial_transition_preserves_source_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingTransform(SimpleHtmlMarkdownTransform):
+        def transform(self, tool_input):
+            del tool_input
+            return TransformFailure(
+                SIMPLE_HTML_MARKDOWN_MANIFEST.tool_id,
+                SIMPLE_HTML_MARKDOWN_MANIFEST.version,
+                "transform.failed",
+            )
+
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+    service._registry.register(  # pylint: disable=protected-access
+        SIMPLE_HTML_MARKDOWN_MANIFEST, FailingTransform()
+    )
+    service.submit(
+        _request(_skill(max_tool_attempts=2), max_tool_attempts=2),
+        caller_id="caller",
+        idempotency_key="race",
+    )
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    transition = jobs.transition
+    injected = False
+
+    def cancel_before_partial(job_id, status, **kwargs):
+        nonlocal injected
+        if status is JobStatus.PARTIAL and not injected:
+            injected = True
+            jobs.cancel(job_id, at=NOW)
+        return transition(job_id, status, **kwargs)
+
+    monkeypatch.setattr(jobs, "transition", cancel_before_partial)
+    assert claim is not None
+    finished = service.execute_submitted(claim.job.job_id, claim.request, lambda: False)
+
+    assert injected
+    assert finished.status is JobStatus.PARTIAL
+    assert finished.failure_code == "runtime.cancelled"
+    assert finished.result is not None and len(finished.result.artifacts) == 1
+    assert [error.code for error in finished.result.errors] == ["runtime.cancelled"]
+    store.close()
+
+
+def test_cancel_committing_before_rejected_transition_forces_cancelled_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool = _CountingTool(_successful_output())
+    service, store, jobs = _service(tmp_path, tool)
+    request = replace(
+        _request(None),
+        scope=replace(_request(None).scope, seeds=(URL, f"{URL}/other")),
+    )
+    service.submit(request, caller_id="caller", idempotency_key="race")
+    claim = jobs.claim_next("worker", at=NOW, lease_deadline="2026-08-25T20:01:00Z")
+    transition = jobs.transition
+    injected = False
+
+    def cancel_before_rejected(job_id, status, **kwargs):
+        nonlocal injected
+        if status is JobStatus.REJECTED and not injected:
+            injected = True
+            jobs.cancel(job_id, at=NOW)
+        return transition(job_id, status, **kwargs)
+
+    monkeypatch.setattr(jobs, "transition", cancel_before_rejected)
+    assert claim is not None
+    finished = service.execute_submitted(claim.job.job_id, claim.request, lambda: False)
+
+    assert injected
+    assert finished.status is JobStatus.FAILED
+    assert finished.failure_code == "runtime.cancelled"
+    assert finished.result is not None and not finished.result.artifacts
+    assert [error.code for error in finished.result.errors] == ["runtime.cancelled"]
+    assert tool.calls == 0
+    store.close()
