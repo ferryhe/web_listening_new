@@ -1112,7 +1112,8 @@ def test_required_file_goal_reaches_pdf_beyond_ordinary_discovery_bound(
     root = "https://example.test/"
     pdf_url = f"{root}z-report.pdf"
     body = (
-        "".join(f"<a href=p{index:03}>" for index in range(249))
+        "<p>Report index</p>"
+        + "".join(f"<a href=p{index:03}>" for index in range(249))
         + "<a href=z-report.pdf>"
     ).encode()
     acquisition = _Acquisition(
@@ -2002,6 +2003,11 @@ def test_slow_discovery_consumes_runtime_and_stops_candidates(
 def test_slow_successful_discovery_exhausts_budget_before_identity_terminal(
     tmp_path: Path, monkeypatch
 ) -> None:
+    # Exact-budget assertions need both acquisition and discovery clocks frozen.
+    monkeypatch.setattr(
+        "web_listening.runtime.workflow._elapsed_runtime_ms",
+        lambda _started_ns, _finished_ns=None: 0,
+    )
     request = Request(
         Scope(
             ("https://example.test/",),
@@ -2042,6 +2048,11 @@ def test_slow_successful_discovery_exhausts_budget_before_identity_terminal(
 def test_slow_failed_discovery_exhausts_budget_with_failure_evidence(
     tmp_path: Path, monkeypatch
 ) -> None:
+    # Exact-budget assertions need both acquisition and discovery clocks frozen.
+    monkeypatch.setattr(
+        "web_listening.runtime.workflow._elapsed_runtime_ms",
+        lambda _started_ns, _finished_ns=None: 0,
+    )
     acquisition = _Acquisition({"https://example.test/": b"source page"})
     registry = Registry()
     registry.register(HTML_LINKS_MANIFEST, _FailingDiscovery())
@@ -2726,7 +2737,7 @@ def test_candidate_body_must_pass_actual_stored_success_checks(tmp_path: Path) -
     assert result.status is ResultStatus.PARTIAL
     assert result.exploration_complete is True
     assert result.site_skill_candidate is None
-    assert "runtime.quality_minimum_words" in {error.code for error in result.errors}
+    assert "acquisition.empty" in {error.code for error in result.errors}
     assert acquisition.targets == ["https://example.test/", "https://example.test/a"]
     store.close()
 
@@ -2810,10 +2821,10 @@ def test_empty_stored_seed_cannot_create_replayable_candidate(tmp_path: Path) ->
         clock=lambda: NOW,
     )
 
-    assert result.status is ResultStatus.PARTIAL
-    assert result.exploration_complete is True
+    assert result.status is ResultStatus.FAILED
+    assert result.exploration_complete is False
     assert result.site_skill_candidate is None
-    assert "runtime.quality_minimum_words" in {error.code for error in result.errors}
+    assert "acquisition.empty" in {error.code for error in result.errors}
     store.close()
 
 

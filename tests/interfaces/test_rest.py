@@ -402,14 +402,18 @@ def _client(runtime: FakeRuntime) -> TestClient:
     return client
 
 
-def test_app_exposes_exactly_the_six_readme_routes_and_disables_docs(
-    runtime: FakeRuntime,
-) -> None:
+def test_exact_readme_routes_and_disabled_docs(runtime: FakeRuntime) -> None:
     app = _app(lambda: runtime)
-
     observed = {(route.path, tuple(sorted(route.methods))) for route in app.routes}
     assert observed == {
         ("/v1/acquisitions", ("POST",)),
+        ("/v1/retrieval-methods/query", ("POST",)),
+        ("/v1/retrievals/http", ("POST",)),
+        ("/v1/retrievals/browser", ("POST",)),
+        ("/v1/retrievals/cloak", ("POST",)),
+        ("/v1/retrievals/file", ("POST",)),
+        ("/v1/retrievals/alternate", ("POST",)),
+        ("/v1/retrievals", ("POST",)),
         ("/health", ("GET",)),
         ("/ready", ("GET",)),
         ("/v1/jobs/{job_id}", ("GET",)),

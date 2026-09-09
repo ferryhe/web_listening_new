@@ -22,6 +22,11 @@ from web_listening.request.site_batch import site_batch_request_from_mapping
 from web_listening.request.validate import request_from_mapping
 from web_listening.result.errors import SafeError
 from web_listening.runtime.jobs import Job, SiteBatch
+from web_listening.runtime.retrieval import (
+    METHOD_CATALOG_SCHEMA,
+    OPERATIONS,
+    retrieval_response_schema,
+)
 from web_listening.runtime.service import RuntimeService
 from web_listening.site_skill.model import SiteSkillError
 from web_listening.site_skill.validate import (
@@ -515,6 +520,52 @@ _TOOLS = (
         outputSchema=_output_schema(_SITE_SKILL_SCHEMA),
     ),
 )
+_RETRIEVAL_TOOLS = tuple(
+    types.Tool(
+        name="web_listening_" + name.replace("-", "_"),
+        description=(
+            "Governed retrieval returns UNRESOLVED for unavailable content. "
+            "Candidates require complete Requests."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "request": next(
+                    t.inputSchema for t in _TOOLS if t.name == "web_listening_acquire"
+                ),
+                **(
+                    {
+                        "alternates": {
+                            "type": "array",
+                            "items": next(
+                                t.inputSchema
+                                for t in _TOOLS
+                                if t.name == "web_listening_acquire"
+                            ),
+                        }
+                    }
+                    if name == "retrieve"
+                    else {}
+                ),
+                **(
+                    {"primary_job_id": {"type": "string"}}
+                    if name == "retrieve-alternate"
+                    else {}
+                ),
+            },
+            "required": ["request"]
+            + (["primary_job_id"] if name == "retrieve-alternate" else []),
+            "additionalProperties": False,
+        },
+        outputSchema=_output_schema(
+            METHOD_CATALOG_SCHEMA
+            if name == "retrieval-methods"
+            else retrieval_response_schema(_JOB_SCHEMA)
+        ),
+    )
+    for name in OPERATIONS
+)
+_TOOLS += _RETRIEVAL_TOOLS
 _TOOL_NAMES = frozenset(tool.name for tool in _TOOLS)
 
 
@@ -590,7 +641,7 @@ def _single_string_argument(
     return arguments[name]  # type: ignore[return-value]
 
 
-async def _call_tool(
+async def _call_tool(  # pylint: disable=too-many-branches
     runtime_provider: RuntimeProvider,
     name: str,
     arguments: Mapping[str, object],
@@ -598,6 +649,13 @@ async def _call_tool(
     if name not in _TOOL_NAMES:
         return _error_result("mcp.tool_not_found", "Tool was not found.")
     try:
+        operation = name.removeprefix("web_listening_").replace("_", "-")
+        if operation in OPERATIONS:
+            return await anyio.to_thread.run_sync(
+                lambda: runtime_provider().retrieval_operation(
+                    operation, dict(arguments)
+                )
+            )
         if name == "web_listening_validate_site_skill":
             if set(arguments) != {"site_skill"}:
                 raise SiteSkillError("site_skill.invalid")

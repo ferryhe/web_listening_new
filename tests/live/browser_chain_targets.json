@@ -1,0 +1,146 @@
+{
+  "schema_version": "browser-chain-targets.v1",
+  "source_catalog": "tests/live/catalog/smoke_site_catalog.json",
+  "source_catalog_sha256": "fdd7ba84b83c06d7cf032b50162dd03afbba7632cf8037c1d137cc64f8bdca0c",
+  "source_catalog_sha256_basis": "lf_normalized_bytes",
+  "targets": [
+    {
+      "site_key": "ipcc",
+      "target_url": "https://www.ipcc.ch/",
+      "catalog_row": {
+        "site_key": "ipcc",
+        "display_name": "Intergovernmental Panel on Climate Change",
+        "urls": {
+          "homepage": "https://www.ipcc.ch/",
+          "monitor": "https://www.ipcc.ch/",
+          "document": null,
+          "tree_seed": null
+        },
+        "allowed_origins": [
+          "https://www.ipcc.ch"
+        ],
+        "historical_classification": {
+          "expectation": "pass_http",
+          "website_status": "sheet",
+          "priority": true,
+          "smoke_required": true,
+          "js_heavy_candidate": false
+        },
+        "evidence_thresholds": {
+          "monitor_min_words": 300,
+          "document_min_words": null,
+          "document_min_links": null
+        },
+        "site_skill_case": "ipcc",
+        "site_skill_digest": "sha256:65886846062d93ebe8e4d9edef63c1c65fc37774749d731db086ed3a408b97be",
+        "provenance": {
+          "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+          "old_path": "config/smoke_site_catalog.json",
+          "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+          "old_site_key": "ipcc"
+        },
+        "tree_include_paths": [],
+        "tool_facts": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ],
+          "recipe_id": "catalog-http"
+        }
+      },
+      "allowed_origins": [
+        "https://www.ipcc.ch"
+      ],
+      "include_paths": [
+        "/**"
+      ],
+      "content_types": [
+        "html",
+        "file"
+      ],
+      "expected": {
+        "nonempty_html": true,
+        "sha256_recomputable": true,
+        "minimum_words": 300,
+        "retrieval_outcomes": [
+          "FETCHED"
+        ]
+      }
+    },
+    {
+      "site_key": "tnfd",
+      "target_url": "https://tnfd.global/news/",
+      "catalog_row": {
+        "site_key": "tnfd",
+        "display_name": "Taskforce on Nature-related Financial Disclosures",
+        "urls": {
+          "homepage": "https://tnfd.global/",
+          "monitor": "https://tnfd.global/news/",
+          "document": null,
+          "tree_seed": null
+        },
+        "allowed_origins": [
+          "https://tnfd.global"
+        ],
+        "historical_classification": {
+          "expectation": "pass_http_limited",
+          "website_status": "sheet",
+          "priority": true,
+          "smoke_required": false,
+          "js_heavy_candidate": true
+        },
+        "evidence_thresholds": {
+          "monitor_min_words": 3,
+          "document_min_words": null,
+          "document_min_links": null
+        },
+        "site_skill_case": "tnfd",
+        "site_skill_digest": "sha256:ae1ae58703f633c30c4c23bcd0dba1eb090efd70ee7e4a94aa011fd9ce902b20",
+        "provenance": {
+          "old_commit": "9fe9ea53104dd008086dfa0e86c35c50b75f4ce5",
+          "old_path": "config/smoke_site_catalog.json",
+          "old_blob": "e50b2c0d29e1b3c5df6473409c1a33ad4ffee4c4",
+          "old_site_key": "tnfd"
+        },
+        "tree_include_paths": [],
+        "tool_facts": {
+          "tool_id": "acquisition.web_http",
+          "version": "1.0.0",
+          "category": "acquisition",
+          "capabilities": [
+            "http_get"
+          ]
+        }
+      },
+      "allowed_origins": [
+        "https://tnfd.global"
+      ],
+      "include_paths": [
+        "/**"
+      ],
+      "content_types": [
+        "html",
+        "file"
+      ],
+      "expected": {
+        "nonempty_html": true,
+        "sha256_recomputable": true,
+        "minimum_words": 3,
+        "retrieval_outcomes": [
+          "FETCHED",
+          "UNRESOLVED/CLOUDFLARE_BLOCKED"
+        ]
+      }
+    }
+  ],
+  "limits": {
+    "targets": 2,
+    "requests": 36,
+    "bytes": 16777216,
+    "seconds": 120,
+    "concurrency": 1,
+    "retry": 0
+  }
+}

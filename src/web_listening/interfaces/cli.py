@@ -21,6 +21,7 @@ from web_listening.request.site_refresh import site_refresh_request_from_json
 from web_listening.request.url_fetch import UrlFetchRequest
 from web_listening.request.validate import request_from_json
 from web_listening.runtime.jobs import Job, JobStatus, SiteBatch, UrlFetchJob
+from web_listening.runtime.retrieval import OPERATIONS
 from web_listening.runtime.service import RuntimeService
 from web_listening.site_skill.model import SiteSkillError
 from web_listening.site_skill.validate import site_skill_from_mapping
@@ -48,6 +49,24 @@ def _parser() -> argparse.ArgumentParser:
         metavar="{acquire,site-explore,site-refresh,get-job,get-handoff,read-artifact}",
     )
 
+    for operation in OPERATIONS:
+        retrieval = commands.add_parser(
+            operation,
+            help="Governed retrieval; expected unavailable content returns UNRESOLVED.",
+        )
+        retrieval.add_argument(
+            "--request", required=True, type=Path, help="Full Request JSON file."
+        )
+        retrieval.add_argument("--output", required=True, type=Path)
+        retrieval.add_argument("--json", action="store_true")
+        if operation == "retrieve":
+            retrieval.add_argument(
+                "--alternates",
+                type=Path,
+                help="JSON array of complete caller-authorized Requests.",
+            )
+        if operation == "retrieve-alternate":
+            retrieval.add_argument("--primary-job-id", required=True)
     acquire = commands.add_parser("acquire", help="Submit one validated Request file.")
     acquire.add_argument("--request", required=True, type=Path)
     acquire.add_argument("--site-skill", type=Path)
@@ -280,7 +299,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Parse CLI input, call one RuntimeService method, and emit its contract."""
     args = _parser().parse_args(argv)
     try:
-        if args.command == "acquire":
+        if args.command in OPERATIONS:
+            envelope = {"request": _load_json(args.request)}
+            if args.command == "retrieve" and args.alternates:
+                envelope["alternates"] = _load_json(args.alternates)
+            if args.command == "retrieve-alternate":
+                envelope["primary_job_id"] = args.primary_job_id
+            payload = _run_with_runtime(
+                args.output,
+                lambda runtime: runtime.retrieval_operation(args.command, envelope),
+            )
+        elif args.command == "acquire":
             request = _load_request(args.request, args.site_skill)
             payload = _run_with_runtime(
                 args.output, lambda runtime: _job_payload(runtime.run(request))

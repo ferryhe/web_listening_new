@@ -17,6 +17,7 @@ import pytest
 
 import web_listening.runtime.service as service_module
 import web_listening.runtime.workflow as workflow_module
+from tests.live.test_browser_chain_live import record
 from web_listening.artifact.model import (
     ArtifactStoreError,
     Observation,
@@ -2760,3 +2761,98 @@ def test_issue101_historical_v1_job_reopens_without_new_evidence(tmp_path):
     reopened = JobRepository(database)
     assert reopened.get(payload["manifest"]["run_id"]).result.to_dict() == payload
     reopened.close()
+
+
+def test_claimed_batch_propagates_current_cancellation_to_acquisition(
+    tmp_path: Path,
+) -> None:
+    """Browser resource reads must see cancellation within the current child."""
+    observed = []
+
+    class Tool:
+        manifest = WEB_HTTP_MANIFEST
+
+        def acquire(self, _input):
+            service.cancel_batch(submitted.batch_id)
+            # Inspect the shared cancellation seam, without replacing its behavior.
+            # pylint: disable=protected-access
+            observed.append(workflow_module._CANCELLATION_CHECK.get()())
+            return AcquisitionFailure(
+                WEB_HTTP_MANIFEST.tool_id,
+                WEB_HTTP_MANIFEST.version,
+                "runtime.cancelled",
+            )
+
+    service, store, jobs = _service(tmp_path, Tool())
+    submitted = service.submit_batch(
+        SiteBatchRequest(SiteBatchPhase.FIRST, _batch_parent(), ()),
+        caller_id="caller",
+        idempotency_key="cancel-in-child",
+    )
+    assert jobs.claim_next_batch(at=NOW) is not None
+    try:
+        terminal = service.execute_submitted_batch(submitted.batch_id)
+        assert observed == [True]
+        assert terminal.result.stop_reason == "cancelled"
+        assert terminal.result.usage.requests == 0
+    finally:
+        store.close()
+        jobs.close()
+
+
+@pytest.mark.parametrize("state", ["completed", "failed", "submitted"])
+def test_live_recorder_serializes_real_public_job_and_strict_result(tmp_path, state):
+    transport = _Transport(
+        TimeoutError("offline fixture failure")
+        if state == "failed"
+        else _Response(200, BODY, Content_Type="text/html")
+    )
+    tool = WebHttpAcquisitionTool(lambda: transport, resolver=_resolver)
+    service, store, jobs = _service(tmp_path, tool)
+    try:
+        if state == "submitted":
+            job = service.submit(
+                _request(_skill()),
+                caller_id="offline-test",
+                idempotency_key="record-test",
+            )
+        else:
+            job = service.run(_request(_skill()))
+        job = service.get_job(job.job_id)
+        assert job.status.value == state
+        record(tmp_path, "offline-record", [job], [], extra={"offline": True})
+        payload = json.loads(
+            (tmp_path / "browser-validation/offline-record.json").read_bytes()
+        )
+        assert len(payload["jobs"]) == 1
+        saved = payload["jobs"][0]
+        assert set(saved) == {
+            "job_id",
+            "status",
+            "submitted_at",
+            "started_at",
+            "finished_at",
+            "result",
+            "failure_code",
+        }
+        assert saved["job_id"] == job.job_id
+        assert saved["status"] == state
+        assert saved["submitted_at"] == job.submitted_at
+        assert saved["started_at"] == job.started_at
+        assert saved["finished_at"] == job.finished_at
+        assert saved["failure_code"] == job.failure_code
+        if job.result is None:
+            assert saved["result"] is None
+        else:
+            assert Result.from_dict(saved["result"]) == job.result
+            if state == "completed":
+                assert saved["result"]["artifacts"]
+            else:
+                assert saved["result"]["errors"][0]["code"] == "gateway.timeout"
+        assert payload["scenario"] == "offline-record"
+        assert payload["extra"] == {"offline": True}
+    finally:
+        service.close()
+        store.close()
+        jobs.close()
+        tool.close()

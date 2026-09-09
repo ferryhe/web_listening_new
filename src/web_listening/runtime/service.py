@@ -1,15 +1,17 @@
 """Minimal service boundary for one governed Runtime execution."""
 
 # pylint: disable=too-few-public-methods,too-many-arguments,too-many-instance-attributes
-# pylint: disable=too-many-public-methods
+# pylint: disable=too-many-public-methods,too-many-lines,unidiomatic-typecheck
 
 from __future__ import annotations
 
+import math
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from web_listening.artifact.model import (
@@ -18,14 +20,20 @@ from web_listening.artifact.model import (
     VerifiedArtifactStream,
 )
 from web_listening.artifact.store import ArtifactStore
-from web_listening.request.model import Budgets, Request, RequestValidationError
+from web_listening.request.model import (
+    Budgets,
+    ContentType,
+    Request,
+    RequestValidationError,
+)
+from web_listening.request.scope import canonicalize_url
 from web_listening.request.site_batch import (
     SiteBatchRequest,
     validate_site_batch_request,
 )
 from web_listening.request.site_refresh import SiteRefreshRequest
 from web_listening.request.url_fetch import UrlFetchRequest, url_fetch_request_from_json
-from web_listening.request.validate import compile_access_policy
+from web_listening.request.validate import compile_access_policy, request_from_mapping
 from web_listening.result.errors import SafeError
 from web_listening.result.handoff import AcquisitionHandoff
 from web_listening.result.model import Result, ResultStatus
@@ -41,6 +49,14 @@ from web_listening.runtime.jobs import (
     UrlFetchJob,
     canonical_request_facts,
 )
+from web_listening.runtime.retrieval import (
+    METHOD_TO_TOOL,
+    OPERATIONS,
+    job_payload,
+    method_catalog,
+    project_retrieval,
+    retrieval_error_code,
+)
 from web_listening.runtime.site_batch import run_site_batch
 from web_listening.runtime.site_explore import run_site_explore
 from web_listening.runtime.site_refresh import run_site_refresh
@@ -48,12 +64,13 @@ from web_listening.runtime.url_fetch import run_url_fetch
 from web_listening.runtime.workflow import (
     cancellation_check,
     cancelled_result,
+    retrieval_execution,
     run_single_target,
     terminal_failure_result,
 )
+from web_listening.site_skill.validate import site_skill_from_mapping
 from web_listening.tool_registry.acquisition.builtins.web_http import (
     WEB_HTTP_MANIFEST,
-    WebHttpAcquisitionTool,
 )
 from web_listening.tool_registry.discovery.builtins.html_links import (
     HTML_FILE_LINKS_MANIFEST,
@@ -76,6 +93,13 @@ from web_listening.tool_registry.discovery.builtins.sitemap import (
 from web_listening.tool_registry.lifecycle import ToolLifecycle
 from web_listening.tool_registry.manifest import ToolCategory
 from web_listening.tool_registry.registry import Registry
+from web_listening.tool_registry.runners.browser_acquisition import (
+    GovernedHttpAcquisitionTool as WebHttpAcquisitionTool,
+)
+from web_listening.tool_registry.runners.browser_acquisition import (
+    browser_catalog_exclusions,
+    installed_browser_tools,
+)
 from web_listening.tool_registry.runners.in_process import PinnedHttpTransport
 from web_listening.tool_registry.runners.subprocess import SubprocessTransformTool
 from web_listening.tool_registry.transform.builtins.simple_html_markdown import (
@@ -110,7 +134,7 @@ class RuntimeService:
         self._owned_resources: tuple[_OwnedResource, ...] = ()
 
     @classmethod
-    def open(
+    def open(  # pylint: disable=too-many-locals
         cls, data_dir: str | Path, *, admission_maxima: Budgets = _ADMISSION_MAXIMA
     ) -> RuntimeService:
         """Open the one current built-in Runtime composition in a data directory."""
@@ -122,6 +146,17 @@ class RuntimeService:
             resources.append(tool)
             registry = Registry()
             registry.register(WEB_HTTP_MANIFEST, tool)
+            for browser in installed_browser_tools(
+                root, transport_factory=PinnedHttpTransport
+            ):
+                resources.append(browser)
+                registry.register(browser.manifest, browser)
+            active_ids = {
+                item.tool_id
+                for item in registry.query(category=ToolCategory.ACQUISITION)
+            }
+            for manifest, reason in browser_catalog_exclusions(root, active_ids):
+                registry.declare_unavailable(manifest, reason)
             file_discovery = HtmlFileLinksDiscoveryTool()
             registry.register(HTML_FILE_LINKS_MANIFEST, file_discovery)
             discovery = HtmlLinksDiscoveryTool()
@@ -223,6 +258,217 @@ class RuntimeService:
             failure_code=failure_code,
         )
 
+    def retrieval_operation(self, operation, payload, *, caller_id="local"):
+        """One strict operation envelope shared by CLI, REST and MCP."""
+
+        if operation not in OPERATIONS or type(payload) is not dict:
+            raise RequestValidationError("retrieval.operation_invalid")
+        fields = {"request"}
+        if operation == "retrieve":
+            fields.add("alternates")
+        if operation == "retrieve-alternate":
+            fields.add("primary_job_id")
+        required = fields - {"alternates"}
+        if not required <= set(payload) or set(payload) - fields:
+            raise RequestValidationError("retrieval.envelope_invalid")
+
+        def parse(value):
+            result = request_from_mapping(value)
+            if result.site_skill is not None:
+                result = replace(
+                    result, site_skill=site_skill_from_mapping(result.site_skill)
+                )
+            return result
+
+        request = parse(payload["request"])
+        if operation == "retrieval-methods":
+            return self.retrieval_methods(request)
+        if operation == "retrieve-alternate":
+            return self.retrieve_alternate(
+                request, primary_job_id=payload["primary_job_id"], caller_id=caller_id
+            )
+        if operation == "retrieve":
+            values = payload.get("alternates", [])
+            if type(values) is not list:
+                raise RequestValidationError("retrieval.alternates_invalid")
+            return self.retrieve(
+                request, alternates=tuple(parse(v) for v in values), caller_id=caller_id
+            )
+        return getattr(self, operation.replace("-", "_"))(request, caller_id=caller_id)
+
+    def retrieval_methods(self, request: Request) -> dict:
+        """Discover current method eligibility without target I/O."""
+
+        self._ensure_open()
+        canonical, _, _ = canonical_request_facts(request)
+        admitted = _admit(canonical, self._admission_maxima)
+        return {"methods": method_catalog(admitted, self._registry)}
+
+    def retrieve_http(self, request: Request, **options):
+        """Execute only eligible HTTP HTML acquisition."""
+        return self.retrieve(request, method="HTTP", **options)
+
+    def retrieve_browser(self, request: Request, **options):
+        """Execute only eligible ordinary Browser acquisition."""
+        return self.retrieve(request, method="BROWSER", **options)
+
+    def retrieve_cloak(self, request: Request, **options):
+        """Execute only eligible Cloak acquisition; never infer permission."""
+        return self.retrieve(request, method="CLOAK", **options)
+
+    def retrieve_file(self, request: Request, **options):
+        """Execute only HTTP file acquisition under the declared content types."""
+        return self.retrieve(request, method="FILE", **options)
+
+    def retrieve_alternate(
+        self, request: Request, *, primary_job_id: str, caller_id="local"
+    ):
+        """Re-admit a complete caller-discovered Request with primary provenance."""
+        primary = self.get_owned_job(primary_job_id, caller_id)
+        if primary.result is None:
+            raise JobStateError("retrieval.primary_not_terminal")
+        return self.retrieve(request, caller_id=caller_id, primary=primary)
+
+    def retrieve(  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
+        self,
+        request: Request,
+        *,
+        method=None,
+        alternates=(),
+        caller_id="local",
+        primary=None,
+    ):
+        """Run a bounded operation through the existing Job/workflow authority."""
+
+        self._ensure_open()
+        if method is not None and (
+            type(method) is not str
+            or method not in {"HTTP", "BROWSER", "CLOAK", "FILE"}
+        ):
+            raise RequestValidationError("retrieval.method_invalid")
+        if primary is not None:
+            primary = self.get_owned_job(primary.job_id, caller_id)
+            if primary.result is None or primary.result.artifacts:
+                raise RequestValidationError("retrieval.unresolved_primary_required")
+        if method is not None and alternates:
+            raise RequestValidationError("retrieval.exact_method_alternates")
+        canonical = [
+            canonical_request_facts(value)[0] for value in (request, *alternates)
+        ]
+        admitted = [_admit(value, self._admission_maxima) for value in canonical]
+        if any(len(value.scope.seeds) != 1 for value in admitted):
+            raise RequestValidationError("retrieval.single_target_required")
+
+        if method == "FILE" and ContentType.FILE not in admitted[0].scope.content_types:
+            raise RequestValidationError("retrieval.file_request_required")
+        if (
+            method in {"HTTP", "BROWSER", "CLOAK"}
+            and ContentType.HTML not in admitted[0].scope.content_types
+        ):
+            raise RequestValidationError("retrieval.html_request_required")
+        targets = [canonicalize_url(value.scope.seeds[0]) for value in admitted]
+        if len(set(targets)) != len(targets):
+            raise RequestValidationError("retrieval.duplicate_candidate")
+        budget = admitted[0].budgets
+        deadline = time.monotonic() + budget.max_runtime_seconds
+        remaining_requests, remaining_bytes = budget.max_requests, budget.max_bytes
+        remaining_attempts = budget.max_tool_attempts_per_target
+        jobs = []
+        execution = admitted[0]
+        for original, execution in zip(canonical, admitted):
+            seconds = min(
+                execution.budgets.max_runtime_seconds,
+                math.ceil(deadline - time.monotonic()),
+            )
+            if (
+                min(remaining_requests, remaining_bytes, remaining_attempts, seconds)
+                <= 0
+            ):
+                break
+            limits = Budgets(
+                min(remaining_requests, execution.budgets.max_requests),
+                min(remaining_bytes, execution.budgets.max_bytes),
+                seconds,
+                min(remaining_attempts, execution.budgets.max_tool_attempts_per_target),
+            )
+            execution = replace(execution, budgets=limits)
+            if method == "FILE":
+                execution = replace(
+                    execution,
+                    scope=replace(execution.scope, content_types=(ContentType.FILE,)),
+                )
+            identifier = self._job_id_factory()
+            now = self._clock()
+            lease = (
+                datetime.fromisoformat(now.replace("Z", "+00:00"))
+                + timedelta(seconds=seconds + 30)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            claim = self._jobs.submit_and_claim(
+                identifier,
+                original,
+                caller_id=caller_id,
+                idempotency_key="retrieval-" + identifier,
+                worker_id="retrieval-inline",
+                at=now,
+                lease_deadline=lease,
+                execution_request=execution,
+            )
+            if isinstance(claim, Job):
+                raise JobStateError("retrieval.operation_replayed")
+            candidates = None if method is None else frozenset({METHOD_TO_TOOL[method]})
+            with retrieval_execution(
+                candidates,
+                deadline,
+                limits,
+                content_type=(
+                    {"FILE": ContentType.FILE, "HTTP": ContentType.HTML}.get(method)
+                ),
+            ):
+                job = self.execute_submitted(
+                    claim.job.job_id, claim.request, lambda: False
+                )
+            jobs.append(job)
+            usage = job.result.usage
+            remaining_requests -= usage.requests
+            remaining_bytes -= usage.bytes_received
+            remaining_attempts -= usage.tool_attempts
+            if job.result.artifacts or not _retrieval_allows_alternate(job):
+                break
+        if not jobs:
+            raise RequestValidationError("retrieval.budget_exhausted")
+        catalog = self.retrieval_methods(execution)["methods"]
+        if (
+            min(
+                remaining_requests,
+                remaining_bytes,
+                remaining_attempts,
+                deadline - time.monotonic(),
+            )
+            <= 0
+        ):
+            catalog = [dict(item, eligible=False) for item in catalog]
+        all_jobs = ([primary] if primary is not None else []) + jobs
+        code = retrieval_error_code(jobs[-1].result)
+        if code:
+            if jobs[-1].result.status is ResultStatus.REJECTED:
+                raise RequestValidationError(code)
+            raise JobStateError(code)
+        state = project_retrieval(all_jobs, catalog)
+        provenance = [
+            {
+                "primary_job_id": all_jobs[0].job_id,
+                "candidate_job_id": j.job_id,
+                "primary_url": all_jobs[0].result.manifest.requested_url,
+                "candidate_url": j.result.manifest.requested_url,
+            }
+            for j in all_jobs[1:]
+        ]
+        return {
+            "jobs": [job_payload(j) for j in all_jobs],
+            "retrieval": state.to_dict(),
+            "provenance": provenance,
+        }
+
     def submit(self, request: Request, *, caller_id: str, idempotency_key: str) -> Job:
         """Validate and durably submit one idempotent asynchronous acquisition."""
         self._ensure_open()
@@ -315,25 +561,28 @@ class RuntimeService:
         prior = self._jobs.url_fetch_checkpoints(job_id)
         prior_discovery = self._jobs.url_fetch_discovery_checkpoints(job_id)
         try:
-            result = run_url_fetch(
-                request,
-                self._registry,
-                self._artifact_store,
-                run_id=job_id,
-                clock=self._clock,
-                completed_results=prior,
-                completed_discovery=prior_discovery,
-                checkpoint=lambda order, item: self._jobs.checkpoint_url_fetch(
-                    job_id, order, item
-                ),
-                checkpoint_discovery=lambda order, item: (
-                    self._jobs.checkpoint_url_fetch_discovery(job_id, order, item)
-                ),
-                should_cancel=lambda: self._jobs.get_url_fetch(
-                    job_id
-                ).cancel_requested_at
-                is not None,
-            )
+            with cancellation_check(
+                lambda: self._jobs.get_url_fetch(job_id).cancel_requested_at is not None
+            ):
+                result = run_url_fetch(
+                    request,
+                    self._registry,
+                    self._artifact_store,
+                    run_id=job_id,
+                    clock=self._clock,
+                    completed_results=prior,
+                    completed_discovery=prior_discovery,
+                    checkpoint=lambda order, item: self._jobs.checkpoint_url_fetch(
+                        job_id, order, item
+                    ),
+                    checkpoint_discovery=lambda order, item: (
+                        self._jobs.checkpoint_url_fetch_discovery(job_id, order, item)
+                    ),
+                    should_cancel=lambda: self._jobs.get_url_fetch(
+                        job_id
+                    ).cancel_requested_at
+                    is not None,
+                )
             return self._jobs.finish_url_fetch(
                 job_id,
                 at=self._clock(),
@@ -358,7 +607,7 @@ class RuntimeService:
         return batch
 
     def cancel_batch(self, batch_id: str) -> SiteBatch:
-        """Request cancellation at the next safe child boundary."""
+        """Request cancellation through acquisition and child boundaries."""
         self._ensure_open()
         return self._jobs.cancel_batch(batch_id, at=self._clock())
 
@@ -385,17 +634,22 @@ class RuntimeService:
             self._grant_target_results(batch.caller_id or "", result.target_results)
 
         try:
-            result = run_site_batch(
-                request,
-                self._registry,
-                self._artifact_store,
-                run_id=batch_id,
-                clock=self._clock,
-                completed_results=prior,
-                checkpoint=persist,
-                should_cancel=lambda: self._jobs.get_batch(batch_id).cancel_requested_at
-                is not None,
-            )
+            with cancellation_check(
+                lambda: self._jobs.get_batch(batch_id).cancel_requested_at is not None
+            ):
+                result = run_site_batch(
+                    request,
+                    self._registry,
+                    self._artifact_store,
+                    run_id=batch_id,
+                    clock=self._clock,
+                    completed_results=prior,
+                    checkpoint=persist,
+                    should_cancel=lambda: self._jobs.get_batch(
+                        batch_id
+                    ).cancel_requested_at
+                    is not None,
+                )
             return self._jobs.finish_batch(batch_id, at=self._clock(), result=result)
         except Exception:  # pylint: disable=broad-exception-caught
             return self._jobs.finish_batch(
@@ -761,3 +1015,19 @@ def _failure_code(result: Result) -> str | None:
 
 
 __all__ = ["RuntimeService"]
+
+
+def _retrieval_allows_alternate(job):
+    """Expected site failures may use candidates; terminal authority stops."""
+    codes = [
+        a.error.code for a in job.result.attempts if a.error and a.outcome != "skipped"
+    ]
+    return retrieval_error_code(job.result) is None and not any(
+        code
+        in {
+            "acquisition.auth_required",
+            "acquisition.permission_denied",
+            "acquisition.interaction_required",
+        }
+        for code in codes
+    )

@@ -32,9 +32,12 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from tests.integration import test_browser_acquisition as browser_tests
+from tests.tool_registry.test_access_gateway import FakeResponse
 from web_listening.request.model import Budgets, ContentType, Request, Scope
 from web_listening.tool_registry.eligibility import EligibilityRequirements
 from web_listening.tool_registry.lifecycle import ToolLifecycle, ToolLifecycleError
@@ -457,6 +460,27 @@ def test_generic_lifecycle_and_authorization_only_cannot_qualify(
     registry = Registry()
     registry.register(manifest, _ExternalAcquisition(runtime))
     assert not registry.eligible(EligibilityRequirements(ToolCategory.ACQUISITION))
+
+
+def test_parent_qualification_can_activate_only_its_installed_identity(tmp_path):
+    lifecycle, manifest, command = _installed(tmp_path)
+    boundary = NetworkBoundary(
+        kind="controlled_proxy",
+        allowed_origins=(ORIGIN,),
+        proxy_server="http://proxy.test:8080",
+        browser_profile_home=str(_profile_home(tmp_path)),
+        observation_reader=_proxy_observation_reader(command),
+    )
+    runtime = _runtime(manifest, command, "offline-authorized", boundary)
+    report = runtime.qualify(_request())
+    assert report.qualified
+    with pytest.raises(ToolLifecycleError, match="lifecycle.qualification_invalid"):
+        lifecycle.activate_qualified(runtime, replace(report))
+    state = lifecycle.activate_qualified(runtime, report)
+    assert state.active and state.qualified
+    lifecycle.disable(ToolCategory.ACQUISITION, TOOL_ID, VERSION)
+    with pytest.raises(ToolLifecycleError, match="lifecycle.not_activatable"):
+        lifecycle.activate_qualified(runtime, report)
 
 
 @pytest.mark.parametrize(
@@ -1423,3 +1447,142 @@ def test_adapter_has_no_policy_storage_or_second_browser_authority() -> None:
         assert token.casefold() not in text.casefold()
     assert all(OLD_COMMIT in row[0] for row in MIGRATION)
     assert len(MIGRATION) == 6
+
+
+@pytest.mark.parametrize(
+    "changed", ("paths", "content_types", "exploration", "attempts")
+)
+def test_qualified_runtime_binds_the_complete_request(
+    tmp_path: Path, changed: str
+) -> None:
+    """Equal targets/origins/network limits do not authorize a different Request."""
+    _lifecycle, manifest, command = _installed(tmp_path)
+    runtime = _runtime(manifest, command, "offline-authorized", _boundary(command))
+    original = _request()
+    assert runtime.qualify(original).qualified
+    request = original.request
+    if changed == "paths":
+        request = replace(
+            request, scope=replace(request.scope, include_paths=("/page",))
+        )
+    elif changed == "content_types":
+        request = replace(
+            request,
+            scope=replace(
+                request.scope, content_types=(ContentType.HTML, ContentType.FILE)
+            ),
+        )
+    elif changed == "exploration":
+        request = replace(request, explore_all_tools=True)
+    else:
+        request = replace(
+            request, budgets=replace(request.budgets, max_tool_attempts_per_target=2)
+        )
+    result = runtime.invoke(AcquisitionInput(request, original.target_url))
+    assert isinstance(result, AcquisitionFailure)
+    assert result.code == "isolated_runtime.qualification_required"
+    assert result.requests == 0
+
+
+@pytest.mark.parametrize(
+    "name,version", [("playwright", "1.0.0"), ("cloakbrowser", "0.5.9")]
+)
+@pytest.mark.parametrize("case", ["navigation", "multi-hop", "resource"])
+def test_parent_redirect_replay_never_uses_native_followup(
+    tmp_path, monkeypatch, name, version, case
+):
+    browser_tests.offline_adapter_io(monkeypatch, tmp_path)
+    browser_tests.fake_install(tmp_path, name, version)
+    transports = []
+    origin = browser_tests.ORIGIN
+
+    def transport():
+        value = browser_tests.bridge()[1]
+        value.scripts[origin + "/browser"] = value.scripts[origin + "/"]
+        value.scripts[origin + "/"] = [
+            FakeResponse(
+                302,
+                location=origin + ("/middle" if case == "multi-hop" else "/browser"),
+            )
+        ]
+        if case == "multi-hop":
+            value.scripts[origin + "/middle"] = [
+                FakeResponse(307, location=origin + "/browser")
+            ]
+        if case == "resource":
+            value.scripts[origin + "/final.js"] = value.scripts[origin + "/app.js"]
+            value.scripts[origin + "/app.js"] = [
+                FakeResponse(302, location=origin + "/final.js")
+            ]
+        transports.append(value)
+        return value
+
+    monkeypatch.setattr(browser_tests.service_module, "PinnedHttpTransport", transport)
+    monkeypatch.setattr(
+        browser_tests.in_process,
+        "_resolve_public_addresses",
+        lambda *_args: ("93.184.216.34",),
+    )
+    runtime = browser_tests.service_module.RuntimeService.open(tmp_path / "data")
+    try:
+        job = runtime.run(browser_tests.request(12))
+        attempts = [
+            item
+            for item in job.result.attempts
+            if item.outcome != "skipped" and item.tool_id.startswith("acquisition.")
+        ]
+        assert [item.tool_id for item in attempts] == [
+            "acquisition.web_http",
+            "acquisition." + name,
+        ]
+        assert attempts[0].error.code == "acquisition.script_only"
+        assert attempts[1].outcome == "succeeded", attempts[1].error
+        assert attempts[1].final_url == origin + "/browser"
+        assert job.result.artifacts
+        assert job.result.usage.requests == sum(
+            len(item.requests) for item in transports
+        )
+        expected = [origin + "/robots.txt", origin + "/"]
+        if case == "multi-hop":
+            expected.append(origin + "/middle")
+        expected.append(origin + "/browser")
+        assert [item[0] for item in transports[0].requests] == expected
+        expected.append(origin + "/app.js")
+        if case == "resource":
+            expected.append(origin + "/final.js")
+        expected.append(origin + "/data.json")
+        assert [item[0] for item in transports[1].requests] == expected
+        assert len(expected) == len(set(expected))
+        assert all(item.closed == 1 for item in transports)
+        source = next(item for item in job.result.artifacts if item.role == "source")
+        assert (
+            hashlib.sha256(
+                runtime.read_artifact(source.artifact_id).content
+            ).hexdigest()
+            == source.sha256
+        )
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize(
+    "engine,version", [("playwright", "1.0.0"), ("cloakbrowser", "0.5.9")]
+)
+@pytest.mark.parametrize("now", [17.0, 17.000244140625, 16.999755859375])
+def test_redirect_render_respects_exact_remaining_deadline(engine, version, now):
+    adapter = runpy.run_path(str(ROOT / "tools/browser" / engine / version / "tool.py"))
+    wait = adapter["_wait_for_redirect_render"]
+    wait.__globals__["time"] = SimpleNamespace(monotonic=lambda: now)
+    calls = []
+    page = SimpleNamespace(
+        wait_for_load_state=lambda state, **kwargs: calls.append((state, kwargs))
+    )
+    remaining = 1000 - (now - 16.0) * 1000
+    if remaining <= 0:
+        with pytest.raises(TimeoutError):
+            wait(page, ["redirect"], 1000, 16.0)
+        assert not calls
+    else:
+        wait(page, ["redirect"], 1000, 16.0)
+        assert 0 < remaining < 1
+        assert calls == [("networkidle", {"timeout": remaining})]

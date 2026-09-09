@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from web_listening.tool_registry.manifest import (
     HealthStatus,
@@ -15,6 +15,18 @@ from web_listening.tool_registry.manifest import (
     capability_is_valid,
     validate_tool_id,
 )
+
+DEFAULT_ACQUISITION_ORDER = (
+    "acquisition.web_http",
+    "acquisition.playwright",
+    "acquisition.cloakbrowser",
+)
+
+
+def _rank_key(manifest: ToolManifest) -> tuple[int, str, str]:
+    order = DEFAULT_ACQUISITION_ORDER
+    rank = order.index(manifest.tool_id) if manifest.tool_id in order else len(order)
+    return rank, manifest.tool_id, manifest.version
 
 
 def _nonnegative_int(value: int) -> bool:
@@ -161,7 +173,7 @@ def evaluate_eligibility(  # pylint: disable=too-many-branches
     )
 
 
-def rank_eligible_tools(  # pylint: disable=too-many-arguments
+def rank_eligible_tools(  # pylint: disable=too-many-arguments,too-many-locals
     manifests: tuple[ToolManifest, ...],
     requirements: EligibilityRequirements,
     facts: EligibilityFacts,
@@ -169,8 +181,9 @@ def rank_eligible_tools(  # pylint: disable=too-many-arguments
     preferred_tool_id: str,
     include_alternates: bool,
     attempted_tool_ids: frozenset[str] = frozenset(),
+    catalog_decisions: tuple[EligibilityDecision, ...] = (),
 ) -> EligibilitySelection:
-    """Filter and rank metadata only; never invoke or hard-code a tool chain."""
+    """Own the default Acquisition order, subject to eligibility and preference."""
     requirements = _rebuild_requirements(requirements)
     facts = _rebuild_facts(facts)
     if (
@@ -189,7 +202,7 @@ def rank_eligible_tools(  # pylint: disable=too-many-arguments
             validate_tool_id(tool_id)
     except ToolRegistryError as exc:
         raise ToolRegistryError("eligibility.selection_invalid") from exc
-    ordered = tuple(sorted(manifests, key=lambda item: (item.tool_id, item.version)))
+    ordered = tuple(sorted(manifests, key=_rank_key))
     if len({manifest.tool_id for manifest in ordered}) != len(ordered):
         raise ToolRegistryError("eligibility.selection_invalid")
     remaining = tuple(
@@ -202,6 +215,30 @@ def rank_eligible_tools(  # pylint: disable=too-many-arguments
     decisions = tuple(
         evaluate_eligibility(manifest, requirements, facts) for manifest in remaining
     )
+    exclusions = {item.tool_id: item for item in catalog_decisions if not item.eligible}
+    decisions = tuple(
+        (
+            replace(
+                item,
+                eligible=False,
+                reasons=tuple(
+                    dict.fromkeys(exclusions[item.tool_id].reasons + item.reasons)
+                ),
+            )
+            if item.tool_id in exclusions
+            else item
+        )
+        for item in decisions
+    )
+    if include_alternates and requirements.category is ToolCategory.ACQUISITION:
+        known_ids = {item.tool_id for item in decisions} | attempted_tool_ids
+        decisions += tuple(
+            item
+            for item in catalog_decisions
+            if not item.eligible
+            and item.tool_id not in known_ids
+            and item.tool_id in DEFAULT_ACQUISITION_ORDER
+        )
     eligible_by_id = {decision.tool_id: decision.eligible for decision in decisions}
     eligible = tuple(
         manifest for manifest in remaining if eligible_by_id[manifest.tool_id]
@@ -312,24 +349,51 @@ _CONTINUABLE_ACQUISITION_FAILURES = frozenset(
         "gateway.tls",
         "gateway.transport",
         "gateway.server_error",
-        "runner.nonzero_exit",
-        "runner.startup_error",
         "runner.timeout",
         "web_http.failure",
+        "browser.resource_failed",
+        "browser.navigation_failed",
+        "browser.navigation_timeout",
     }
 )
 _CONTINUABLE_QUALITY_FAILURES = frozenset(
     {
         "runtime.quality_mime_mismatch",
         "runtime.quality_minimum_words",
+        "acquisition.empty",
+        "acquisition.script_only",
+        "acquisition.challenge",
+        "acquisition.error_page",
     }
 )
 
 
-def acquisition_failure_allows_switch(code: str) -> bool:
+def acquisition_failure_is_operational(code: str) -> bool:
+    """Separate broken execution infrastructure from expected target failures."""
+    if code == "runner.timeout":
+        return False
+    if code.startswith(("runner.", "isolated_runtime.", "lifecycle.", "registry.")):
+        return True
+    if code.startswith("runtime."):
+        return code not in _CONTINUABLE_QUALITY_FAILURES
+    if code.startswith("browser."):
+        return code not in {
+            "browser.resource_failed",
+            "browser.navigation_failed",
+            "browser.navigation_timeout",
+            "browser.html_required",
+        }
+    return False
+
+
+def acquisition_failure_allows_switch(code: str, tool_id: str | None = None) -> bool:
     """Return whether a stable technical or quality failure permits switching."""
     if type(code) is not str:
         return False
+    if acquisition_failure_is_operational(code):
+        return False
+    if code == "acquisition.cloudflare_blocked":
+        return tool_id == "acquisition.web_http"
     return code in (_CONTINUABLE_ACQUISITION_FAILURES | _CONTINUABLE_QUALITY_FAILURES)
 
 
@@ -339,6 +403,14 @@ __all__ = [
     "EligibilityRequirements",
     "EligibilitySelection",
     "acquisition_failure_allows_switch",
+    "acquisition_failure_is_operational",
     "evaluate_eligibility",
     "rank_eligible_tools",
 ]
+
+
+def acquisition_followup_candidates(manifests, code, tool_id):
+    """HTTP Cloudflare authorizes only an eligible ordinary browser follow-up."""
+    if code == "acquisition.cloudflare_blocked" and tool_id == "acquisition.web_http":
+        return tuple(m for m in manifests if m.tool_id == "acquisition.playwright")
+    return manifests

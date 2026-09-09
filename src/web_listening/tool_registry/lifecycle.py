@@ -48,6 +48,10 @@ from web_listening.tool_registry.protocols.transform import (
     TransformInput,
     TransformOutput,
 )
+from web_listening.tool_registry.runners.isolated_runtime import (
+    IsolatedRuntime,
+    IsolationQualification,
+)
 from web_listening.tool_registry.runners.subprocess import SubprocessRunner
 
 _EXTERNAL_PROTOCOL = "web-listening-external-tool.v1"
@@ -191,6 +195,43 @@ class ToolLifecycle:  # pylint: disable=too-many-public-methods
             raise ToolLifecycleError("lifecycle.not_activatable")
         self._write_active(category, tool_id, version)
         return self.inspect(category, tool_id, version)
+
+    def activate_qualified(
+        self, runtime: IsolatedRuntime, report: IsolationQualification
+    ) -> ToolVersionState:
+        """Atomically qualify then activate an exact parent-verified install.
+
+        Runtime still requires fresh Request/target/network qualification at
+        execution. Neither a serialized report nor external self-report grants
+        eligibility here; the issuing parent runtime must validate this report.
+        """
+        if (
+            type(runtime) is not IsolatedRuntime
+            or type(report) is not IsolationQualification
+        ):
+            raise ToolLifecycleError("lifecycle.qualification_invalid")
+        manifest = report.manifest
+        if (
+            type(manifest) is not ToolManifest
+            or manifest.category is not ToolCategory.ACQUISITION
+        ):
+            raise ToolLifecycleError("lifecycle.qualification_invalid")
+        installed = self._read_installed(
+            manifest.category, manifest.tool_id, manifest.version
+        )
+        state = self._read_state(installed.directory)
+        if state["disabled"] or state["broken"]:
+            raise ToolLifecycleError("lifecycle.not_activatable")
+        if not runtime.validates_installation(
+            report,
+            installed.manifest,
+            _installed_command(installed),
+            installed.directory,
+        ):
+            raise ToolLifecycleError("lifecycle.qualification_invalid")
+        state.update(qualified=True, failure_code=None)
+        self._write_state(installed.directory, state)
+        return self.activate(manifest.category, manifest.tool_id, manifest.version)
 
     def disable(
         self, category: ToolCategory, tool_id: str, version: str

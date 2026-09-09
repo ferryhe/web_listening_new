@@ -436,13 +436,31 @@ valid rules for another user-agent are valid unrestricted observations. All actu
 robots reads and redirects consume the same budget. The existing origin cache is
 local to one Gateway lifecycle; a new invocation does not reuse unknown state.
 
-Fallback is not a hard-coded chain such as:
+Registry owns the default public HTML acquisition order:
 
 ```text
 HTTP → Playwright → CloakBrowser
 ```
 
-The Registry first removes ineligible tools, then ranks the remaining tools by capability, verified site history, reliability, cost, and risk.
+A valid Site Skill's verified tool runs first. If the Request permits exploration,
+Registry then tries the remaining eligible defaults in the order above, at most
+once each. With `explore_all_tools=false`, only the existing HTTP default or the
+Site Skill's tool runs. Installed, active, healthy, qualified, capability, scope
+and remaining-budget checks remain authoritative; missing browsers produce
+stable skipped reasons and do not prevent HTTP from working.
+
+Empty content, recognized passive challenge templates and technical failures may
+permit switching. Robots/scope/network-boundary rejection, cancellation, total
+budget exhaustion, explicit authentication and interactive challenges stop it.
+All readers share deterministic content validity checks and Site Skill quality
+requirements. Browser navigation and required script/resource reads go through
+one parent Gateway per attempt, under the remaining Request budget. Rendered
+HTML size has a separate manifest output limit; Usage records measured network
+bytes.
+
+See [browser installation and validation](tools/browser/README.md) for the frozen
+Playwright/CloakBrowser runtimes, lifecycle commands, migration mapping and
+separate offline, real fixture and fixed public validation gates.
 
 ## 10. External Tool Integration
 
@@ -876,3 +894,73 @@ gets its own bounded ledger, saved recipes recover through the same governed
 single-site path, and successful HTML, Markdown, or download evidence remains
 deliverable even when discovery coverage is incomplete. Coverage reports what was
 proved; it does not decide whether verified Current pages are usable.
+
+### Structured retrieval for people and agents
+
+`retrieve` runs the currently authorized acquisition flow and stops at the first
+valid Artifact. `retrieve-http`, `retrieve-browser`, `retrieve-cloak`, and
+`retrieve-file` restrict execution to one method. Method selection never adds
+scope, content permission, robots permission, attempts, bytes or time. Browser
+methods still require Request exploration permission or an eligible preferred
+Site Skill; `explore_all_tools=false` alone never grants browser access.
+
+```bash
+web-listening retrieval-methods --request request.json --output ./data --json
+web-listening retrieve --request request.json --output ./data --json
+web-listening retrieve-browser --request request.json --output ./data --json
+web-listening retrieve-file --request file-request.json --output ./data --json
+web-listening retrieve-alternate --primary-job-id JOB_ID --request candidate-request.json --output ./data --json
+web-listening retrieve --request request.json --alternates candidates.json --output ./data --json
+```
+
+`candidates.json` is an array of complete, independently authorized Requests.
+The program does not search, rank sources or trust an “official” label. Alternate
+URLs pass the same admission, robots, scope and Gateway checks as primary URLs.
+Only committed Artifacts can supply content or citations; search snippets cannot.
+One-shot alternates share the original operation's remaining budgets and absolute
+deadline. A separate `retrieve-alternate` call is a new explicit authorization,
+linked to the caller's existing primary Job.
+
+All commands accept a full Request file. The equivalent REST JSON envelope is
+`{"request": <full Request>}`; `retrieve` also accepts `"alternates": [...]`, and
+`retrieve-alternate` requires `"primary_job_id"`. REST uses the authenticated
+caller; local CLI/MCP retrieval uses the local caller identity. Runtime owns the
+single implementation and persists ordinary caller-owned Jobs atomically claimed
+before the background worker can see them. No method selector is added to Request
+or stored as a second queue payload.
+
+| CLI | REST POST | MCP tool |
+| --- | --- | --- |
+| retrieval-methods | /v1/retrieval-methods/query | web_listening_retrieval_methods |
+| retrieve-http | /v1/retrievals/http | web_listening_retrieve_http |
+| retrieve-browser | /v1/retrievals/browser | web_listening_retrieve_browser |
+| retrieve-cloak | /v1/retrievals/cloak | web_listening_retrieve_cloak |
+| retrieve-file | /v1/retrievals/file | web_listening_retrieve_file |
+| retrieve-alternate | /v1/retrievals/alternate | web_listening_retrieve_alternate |
+| retrieve | /v1/retrievals | web_listening_retrieve |
+
+Execution responses contain existing `jobs`/Result payloads, a strict
+`retrieval-state.v1` projection, and primary/candidate `provenance`. The projection
+separates `outcome` (`FETCHED` or `UNRESOLVED`), `reason`, the actually used `method`,
+and the independent `fallback_used` fact. Attempt and Artifact references and
+Usage are recomputed from those Results. Discovery advertises current eligibility
+without contacting the target. Next actions have stable IDs and CLI/REST/MCP
+names; `discover_official_alternates` is inert guidance for the caller's own
+external discovery, not an implemented search provider.
+
+A parent-recognized Cloudflare rejection can lead from HTTP to ordinary Playwright
+once when authorized and eligible. Continued Browser blocking returns
+`UNRESOLVED/CLOUDFLARE_BLOCKED`; it does not automatically invoke Cloak, rotate
+identities or solve challenges. Classification never reads an extra rejected
+response body. Ordinary authentication and permission denial remain distinct.
+Expected retrieval outcomes return CLI exit 0 and normal REST/MCP responses;
+input, policy, budget, cancellation and infrastructure failures remain failures.
+The underlying failed acquisition Result is retained and no blocked page becomes
+an Artifact. Existing acquire, fetch-url and site commands retain their contracts.
+
+The frozen public acceptance still requires IPCC content. TNFD may instead produce
+an evidenced Cloudflare `UNRESOLVED` outcome through the retrieval interface.
+The frozen URL, origins and quality requirements are unchanged. Controlled live
+fixtures additionally exercise retrieval, file acquisition and caller-supplied
+alternates; real browser/public validation requires a fresh explicit manager-owned
+window and data directory.

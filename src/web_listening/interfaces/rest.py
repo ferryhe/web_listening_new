@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
@@ -33,6 +34,7 @@ from web_listening.runtime.jobs import (
     SiteBatch,
     UrlFetchJob,
 )
+from web_listening.runtime.retrieval import OPERATIONS
 from web_listening.runtime.service import RuntimeService
 from web_listening.site_skill.model import SiteSkillError
 from web_listening.site_skill.validate import site_skill_from_mapping
@@ -170,6 +172,32 @@ def create_app(
             status_code=200 if is_ready else 503,
             content={"status": "ready" if is_ready else "unready"},
         )
+
+    def retrieval_endpoint(operation):
+        async def endpoint(http_request: HttpRequest):
+            identity = caller(http_request)
+            if isinstance(identity, JSONResponse):
+                return identity
+            try:
+                body = json.loads((await http_request.body()).decode("utf-8"))
+                payload = await run_in_threadpool(
+                    runtime_provider().retrieval_operation,
+                    operation,
+                    body,
+                    caller_id=identity,
+                )
+                return JSONResponse(status_code=200, content=payload)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return _error(422, "request.invalid_json", "Request is invalid.")
+            except (RequestValidationError, SiteSkillError) as exc:
+                return _error(422, exc.code, "Request is invalid.")
+            except Exception as exc:
+                return _runtime_error(exc)
+
+        return endpoint
+
+    for operation, path in OPERATIONS.items():
+        app.add_api_route(path, retrieval_endpoint(operation), methods=["POST"])
 
     @app.post("/v1/acquisitions")
     async def acquire(http_request: HttpRequest) -> JSONResponse:

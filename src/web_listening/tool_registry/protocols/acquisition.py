@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol, runtime_checkable
+from weakref import WeakValueDictionary
 
 from web_listening.artifact.identity import validate_mime_type as validate_artifact_mime
 from web_listening.artifact.model import ArtifactStoreError
@@ -179,11 +180,16 @@ class AcquisitionOutput:  # pylint: disable=too-many-instance-attributes
             if usage_explicit and self.bytes_received is not None
             else minimum_bytes
         )
+        # Only the parent bridge constructs this internal subtype. The external
+        # wire decoder still constructs AcquisitionOutput with legacy inference.
+        measured_rendering = (
+            type(self) is ParentMeasuredAcquisitionOutput and usage_explicit
+        )
         if (
             type(requests) is not int
             or requests < minimum_requests
             or type(bytes_received) is not int
-            or bytes_received < minimum_bytes
+            or bytes_received < (0 if measured_rendering else minimum_bytes)
         ):
             raise ToolRegistryError("protocol.usage_invalid")
         object.__setattr__(self, "requests", requests)
@@ -199,6 +205,37 @@ class AcquisitionOutput:  # pylint: disable=too-many-instance-attributes
             "_inferred_bytes",
             None if usage_explicit else bytes_received,
         )
+
+
+class ParentMeasuredAcquisitionOutput(
+    AcquisitionOutput
+):  # pylint: disable=too-few-public-methods
+    """Internal parent-measured rendering; no added fields or wire authority.
+
+    Rendered HTML can exceed the sum of downloaded response bodies. The parent
+    network bridge replaces inferred usage with its own Gateway measurements.
+    External subprocesses cannot select this type through the wire protocol.
+    """
+
+    __slots__ = ("__weakref__",)
+
+
+_PARENT_MEASUREMENTS: WeakValueDictionary[int, ParentMeasuredAcquisitionOutput] = (
+    WeakValueDictionary()
+)
+
+
+def _record_parent_measurement(output: ParentMeasuredAcquisitionOutput):
+    """Retain parent provenance in memory, outside all adapter wire fields."""
+    _PARENT_MEASUREMENTS[id(output)] = output
+    return output
+
+
+def rebuild_parent_measurement(output: ParentMeasuredAcquisitionOutput):
+    """Revalidate only outputs issued by the parent bridge, never self-reports."""
+    if _PARENT_MEASUREMENTS.get(id(output)) is not output:
+        raise ToolRegistryError("protocol.parent_measurement_required")
+    return _record_parent_measurement(replace(output))
 
 
 @dataclass(frozen=True, slots=True)

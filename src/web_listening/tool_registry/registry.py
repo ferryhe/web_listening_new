@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from web_listening.request.model import classify_mime_type
 from web_listening.request.validate import compile_access_policy
+from web_listening.tool_registry.acquisition.quality import quality_failure_code
 from web_listening.tool_registry.eligibility import (
     EligibilityDecision,
     EligibilityRequirements,
@@ -32,6 +33,8 @@ from web_listening.tool_registry.protocols.acquisition import (
     AcquisitionFailure,
     AcquisitionInput,
     AcquisitionOutput,
+    ParentMeasuredAcquisitionOutput,
+    rebuild_parent_measurement,
 )
 from web_listening.tool_registry.protocols.discovery import (
     DiscoveryFailure,
@@ -83,11 +86,35 @@ class Registry:
 
     def __init__(self) -> None:
         self._registrations: dict[str, _Registration] = {}
+        self._unavailable: dict[str, tuple[ToolManifest, str]] = {}
+
+    def declare_unavailable(self, manifest: ToolManifest, reason: str) -> None:
+        """Retain installed-catalog exclusions without registering executable code."""
+        snapshot = _snapshot_manifest(manifest)
+        if (
+            snapshot.tool_id in self._registrations
+            or snapshot.tool_id in self._unavailable
+        ):
+            raise ToolRegistryError("registry.duplicate_id")
+        if reason not in {
+            "eligibility.version_mismatch",
+            "eligibility.runtime_identity_mismatch",
+            "eligibility.not_installed",
+            "eligibility.disabled",
+            "eligibility.inactive",
+            "eligibility.unhealthy",
+            "eligibility.unqualified",
+        }:
+            raise ToolRegistryError("eligibility.facts_invalid")
+        self._unavailable[snapshot.tool_id] = snapshot, reason
 
     def register(self, manifest: ToolManifest, tool: Any) -> None:
         """Register one exactly matching manifest and protocol implementation."""
         snapshot = _snapshot_manifest(manifest)
-        if snapshot.tool_id in self._registrations:
+        if (
+            snapshot.tool_id in self._registrations
+            or snapshot.tool_id in self._unavailable
+        ):
             raise ToolRegistryError("registry.duplicate_id")
         tool_manifest = _snapshot_manifest(_static_manifest(tool))
         if not _manifests_equal(tool_manifest, snapshot):
@@ -121,6 +148,11 @@ class Registry:
         return tuple(
             evaluate_eligibility(registration.manifest, requirements)
             for registration in self._registrations.values()
+        ) + tuple(
+            EligibilityDecision(
+                manifest.tool_id, manifest.version, False, (reason,), ()
+            )
+            for manifest, reason in self._unavailable.values()
         )
 
     def eligible(
@@ -326,7 +358,11 @@ def _validate_output(  # pylint: disable=too-many-branches
     if type(tool_input) is DiscoveryInput:
         allowed_types = (DiscoveryOutput, DiscoveryFailure)
     elif type(tool_input) is AcquisitionInput:
-        allowed_types = (AcquisitionOutput, AcquisitionFailure)
+        allowed_types = (
+            AcquisitionOutput,
+            ParentMeasuredAcquisitionOutput,
+            AcquisitionFailure,
+        )
     else:
         allowed_types = (TransformOutput, TransformFailure)
     if type(output) not in allowed_types:
@@ -373,6 +409,9 @@ def _validate_output(  # pylint: disable=too-many-branches
         )
         if resource_code is not None:
             raise _acquisition_rejection(manifest, output, resource_code)
+        quality_code = quality_failure_code(output)
+        if quality_code is not None:
+            raise _acquisition_rejection(manifest, output, quality_code)
     elif isinstance(output, TransformOutput):
         if output.source_artifact_id != tool_input.source.artifact.artifact_id:
             raise ToolRegistryError("registry.output_invalid")
@@ -391,6 +430,8 @@ def _revalidate_output(output: ToolResult) -> ToolResult:
             getattr(output, "coverage", None),
         )
     if isinstance(output, AcquisitionOutput):
+        if type(output) is ParentMeasuredAcquisitionOutput:
+            return rebuild_parent_measurement(output)
         redirects = tuple(replace(redirect) for redirect in output.redirects)
         return AcquisitionOutput(
             output.tool_id,

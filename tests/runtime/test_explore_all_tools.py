@@ -399,7 +399,12 @@ def test_retryable_technical_and_quality_failures_switch_to_first_valid_success(
 
 def test_reported_success_usage_is_deducted_before_quality_fallback(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # This case isolates reported usage; observed wall-time limits have separate tests.
+    monkeypatch.setattr(
+        workflow_module, "_elapsed_runtime_ms", lambda _started_ns, _finished_ns=None: 0
+    )
     preferred = _Tool(
         PREFERRED,
         _output(

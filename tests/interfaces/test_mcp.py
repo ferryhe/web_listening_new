@@ -43,6 +43,13 @@ TOOL_NAMES = {
     "web_listening_submit_site_batch",
     "web_listening_get_site_batch",
     "web_listening_cancel_site_batch",
+    "web_listening_retrieval_methods",
+    "web_listening_retrieve_http",
+    "web_listening_retrieve_browser",
+    "web_listening_retrieve_cloak",
+    "web_listening_retrieve_file",
+    "web_listening_retrieve_alternate",
+    "web_listening_retrieve",
 }
 
 EXPECTED_STRING_ARRAY = {

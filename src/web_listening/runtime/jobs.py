@@ -24,7 +24,7 @@ from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from web_listening.artifact.lineage import validate_artifact_id
-from web_listening.request.model import Request
+from web_listening.request.model import ContentType, Request
 from web_listening.request.site_batch import (
     SiteBatchRequest,
     site_batch_request_from_json,
@@ -1068,6 +1068,55 @@ class JobRepository:
         execution_request: Request | None = None,
     ) -> Job:
         """Atomically persist a canonical Request and its idempotency identity."""
+        return self._submit_request(
+            job_id,
+            request,
+            caller_id=caller_id,
+            idempotency_key=idempotency_key,
+            at=at,
+            execution_request=execution_request,
+        )
+
+    def submit_and_claim(
+        self,
+        job_id: str,
+        request: Request,
+        *,
+        caller_id: str,
+        idempotency_key: str,
+        worker_id: str,
+        at: str,
+        lease_deadline: str,
+        execution_request: Request | None = None,
+    ) -> JobClaim | Job:
+        """Publish an exact owned running Job atomically; replay never reclaims."""
+        worker = _validate_boundary_text(worker_id, "worker.id_invalid", 128)
+        timestamp = _validate_time(at)
+        deadline = _validate_time(lease_deadline)
+        if parse_utc_time(deadline) <= parse_utc_time(timestamp):
+            raise JobStateError("job.lease_invalid")
+        return self._submit_request(
+            job_id,
+            request,
+            caller_id=caller_id,
+            idempotency_key=idempotency_key,
+            at=timestamp,
+            execution_request=execution_request,
+            claim=(worker, deadline),
+        )
+
+    def _submit_request(
+        self,
+        job_id: str,
+        request: Request,
+        *,
+        caller_id: str,
+        idempotency_key: str,
+        at: str,
+        execution_request: Request | None = None,
+        claim: tuple[str, str] | None = None,
+    ) -> Job | JobClaim:
+        """Atomically persist a canonical Request and its idempotency identity."""
         identifier = _validate_job_id(job_id)
         timestamp = _validate_time(at)
         caller = _validate_boundary_text(caller_id, "caller.invalid", 256)
@@ -1095,6 +1144,23 @@ class JobRepository:
             execution_request_fingerprint=execution_fingerprint,
         )
         event = JobEvent(1, identifier, None, JobStatus.SUBMITTED, timestamp)
+        events = (event,)
+        if claim is not None:
+            worker, deadline = claim
+            job = replace(
+                job,
+                status=JobStatus.RUNNING,
+                started_at=timestamp,
+                worker_id=worker,
+                claim_token=secrets.token_hex(32),
+                claimed_at=timestamp,
+                lease_deadline=deadline,
+            )
+            events += (
+                JobEvent(
+                    2, identifier, JobStatus.SUBMITTED, JobStatus.RUNNING, timestamp
+                ),
+            )
         with self._lock:
             self._ensure_open()
             if self._connection is None:
@@ -1113,8 +1179,12 @@ class JobRepository:
                 if identifier in self._jobs:
                     raise JobStateError("job.duplicate")
                 self._jobs[identifier] = job
-                self._events[identifier] = [event]
-                return job
+                self._events[identifier] = list(events)
+                return (
+                    job
+                    if claim is None
+                    else JobClaim(job, canonical_execution, job.claim_token)
+                )
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
                 row = self._connection.execute(
@@ -1132,10 +1202,12 @@ class JobRepository:
                 self._connection.execute(
                     "INSERT INTO jobs (job_id,status,submitted_at,request_json,"
                     "request_fingerprint,caller_id,idempotency_key,execution_request_json,"
-                    "execution_request_fingerprint) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "execution_request_fingerprint,started_at,worker_id,claim_token,"
+                    "claimed_at,lease_deadline) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         identifier,
-                        "submitted",
+                        job.status.value,
                         timestamp,
                         request_json,
                         fingerprint,
@@ -1143,12 +1215,22 @@ class JobRepository:
                         key,
                         execution_json,
                         execution_fingerprint,
+                        job.started_at,
+                        job.worker_id,
+                        job.claim_token,
+                        job.claimed_at,
+                        job.lease_deadline,
                     ),
                 )
-                self._insert_event(event)
-                persisted = self._validate_persisted_snapshot(job, (event,))
+                for item in events:
+                    self._insert_event(item)
+                persisted = self._validate_persisted_snapshot(job, events)
                 self._connection.execute("COMMIT")
-                return persisted
+                return (
+                    persisted
+                    if claim is None
+                    else JobClaim(persisted, canonical_execution, persisted.claim_token)
+                )
             except BaseException:
                 self._rollback()
                 raise
@@ -2117,7 +2199,13 @@ def _request_from_json(payload: str) -> Request:
 def _validate_execution_authority(
     request: Request, execution: Request, *, code: str
 ) -> None:
-    if replace(request, budgets=execution.budgets) != execution or any(
+    scope = request.scope
+    if (
+        execution.scope.content_types == (ContentType.FILE,)
+        and ContentType.FILE in request.scope.content_types
+    ):
+        scope = replace(scope, content_types=(ContentType.FILE,))
+    if replace(request, scope=scope, budgets=execution.budgets) != execution or any(
         getattr(execution.budgets, name) > getattr(request.budgets, name)
         for name in (
             "max_requests",

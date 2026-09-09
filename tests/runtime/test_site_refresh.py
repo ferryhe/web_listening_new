@@ -2148,8 +2148,8 @@ def test_required_file_goal_direct_recipe_replays_goal_aware_discovery(
     ordinary = tuple(f"{ROOT}p{index:03}" for index in range(249))
     file_url = f"{ROOT}z-report.pdf"
     root = (
-        "".join(f"<a href=p{index:03}>" for index in range(249))
-        + "<a href=z-report.pdf>"
+        "".join(f"<a href=p{index:03}>page {index}</a>" for index in range(249))
+        + "<a href=z-report.pdf>report</a>"
     ).encode()
     limits = Budgets(3, 52_428_800, 60, 4)
     scope = replace(
@@ -2277,7 +2277,7 @@ def test_required_file_goal_recovery_saves_goal_aware_recipe(
     tmp_path: Path,
 ) -> None:
     file_url = f"{ROOT}z-report.pdf"
-    root = b"<a href=z-report.pdf>"
+    root = b"<a href=z-report.pdf>report</a>"
     old_manifest = replace(HTML_LINKS_MANIFEST, tool_id="discovery.old")
     limits = Budgets(4, 52_428_800, 60, 4)
     scope = replace(
@@ -3786,6 +3786,11 @@ def test_empty_authorized_discovery_finalization_respects_runtime_boundary(
     coverage: DiscoveryCoverage,
     discovery_runtime_ms: int,
 ) -> None:
+    # Exact-budget assertions need both acquisition and discovery clocks frozen.
+    monkeypatch.setattr(
+        "web_listening.runtime.workflow._elapsed_runtime_ms",
+        lambda _started_ns, _finished_ns=None: 0,
+    )
     historical = "https://example.test/history"
     root = b"root"
     limits = Budgets(4, 65536, 2, 4)
@@ -3853,6 +3858,11 @@ def test_empty_authorized_discovery_finalization_respects_runtime_boundary(
 def test_cancelled_discovery_finalization_respects_shared_runtime_boundary(
     tmp_path: Path, monkeypatch, discovery_runtime_ms: int
 ) -> None:
+    # Exact-budget assertions need both acquisition and discovery clocks frozen.
+    monkeypatch.setattr(
+        "web_listening.runtime.workflow._elapsed_runtime_ms",
+        lambda _started_ns, _finished_ns=None: 0,
+    )
     historical = "https://example.test/history"
     root = b"root"
     limits = Budgets(4, 65536, 2, 4)
