@@ -1,5 +1,7 @@
 """Parent bridge reads use the unchanged Gateway (no public traffic)."""
 
+# Intentional cross-test fixtures: pytest resolves the repository namespace.
+# pylint: disable=import-error
 # pylint: disable=missing-function-docstring,duplicate-code
 
 from dataclasses import replace

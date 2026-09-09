@@ -4,6 +4,8 @@ No fake SDK or manual Registry registration is used here. Missing engines are
 BLOCKED. URLs come exclusively from the frozen fixture/public snapshots.
 """
 
+# Intentional cross-test fixtures: pytest resolves the repository namespace.
+# pylint: disable=import-error
 # pylint: disable=missing-function-docstring,too-many-locals,duplicate-code
 # pylint: disable=too-many-arguments
 

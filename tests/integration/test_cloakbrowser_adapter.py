@@ -13,6 +13,8 @@ README 1-2 Alignment:
   or second browser is added.
 """
 
+# Intentional cross-test fixtures: pytest resolves the repository namespace.
+# pylint: disable=import-error
 # pylint: disable=duplicate-code,missing-function-docstring,protected-access
 # pylint: disable=too-few-public-methods,too-many-lines,too-many-locals
 

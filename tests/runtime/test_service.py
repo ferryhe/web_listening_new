@@ -1,5 +1,7 @@
 """Offline end-to-end tests for the minimal Runtime supporting layer."""
 
+# Intentional cross-test fixtures: pytest resolves the repository namespace.
+# pylint: disable=import-error
 # pylint: disable=missing-class-docstring,missing-function-docstring
 # pylint: disable=too-few-public-methods
 # pylint: disable=duplicate-code,too-many-lines

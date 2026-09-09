@@ -1,5 +1,7 @@
 """Retrieval preserves caller-owned Job authority and exact method execution."""
 
+# Intentional cross-test fixtures: pytest resolves the repository namespace.
+# pylint: disable=import-error
 # pylint: disable=missing-function-docstring,protected-access,duplicate-code
 # pylint: disable=import-outside-toplevel,redefined-outer-name,too-many-locals
 import hashlib

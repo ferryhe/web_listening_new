@@ -1,5 +1,7 @@
 """Issue 102 parent-owned browser integration contracts (offline by default)."""
 
+# Intentional cross-test fixtures: pytest resolves the repository namespace.
+# pylint: disable=import-error
 # pylint: disable=missing-function-docstring,duplicate-code,protected-access,too-many-lines
 
 import base64
