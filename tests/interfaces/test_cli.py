@@ -1059,3 +1059,16 @@ def test_issue101_v2_decisions_interface_round_trip(tmp_path, capsys, monkeypatc
     payload = json.loads(capsys.readouterr().out)
     assert payload["result"] == result.to_dict()
     assert payload["result"]["attempts"] == payload["result"]["manifest"]["attempts"]
+
+
+def test_retrieval_cli_help_commands():
+    for name in (
+        "retrieval-methods",
+        "retrieve-http",
+        "retrieve-browser",
+        "retrieve-cloak",
+        "retrieve-file",
+        "retrieve-alternate",
+        "retrieve",
+    ):
+        assert name in cli._parser().format_help()

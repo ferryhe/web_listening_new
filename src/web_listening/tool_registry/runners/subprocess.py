@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 from urllib.parse import urlsplit
 
 from web_listening.request.model import classify_mime_type
@@ -32,6 +32,8 @@ from web_listening.tool_registry.protocols.acquisition import (
     AcquisitionInput,
     AcquisitionOutput,
     AcquisitionRedirect,
+    ParentMeasuredAcquisitionOutput,
+    rebuild_parent_measurement,
     validate_mime_type,
     validate_runtime,
 )
@@ -151,6 +153,9 @@ class SubprocessRunner:
         command: tuple[str, ...],
         *,
         limits: SubprocessLimits | None = None,
+        parent_acquisition: (
+            Callable[[AcquisitionOutput], AcquisitionOutput | AcquisitionFailure] | None
+        ) = None,
     ) -> None:
         if type(manifest) is not ToolManifest:
             raise ToolRegistryError("runner.manifest_invalid")
@@ -160,6 +165,12 @@ class SubprocessRunner:
             or any(type(item) is not str or not item for item in command)
         ):
             raise ToolRegistryError("runner.command_invalid")
+        if parent_acquisition is not None and (
+            manifest.category is not ToolCategory.ACQUISITION
+            or not callable(parent_acquisition)
+        ):
+            raise ToolRegistryError("runner.parent_acquisition_invalid")
+        self._parent_acquisition = parent_acquisition
         self._manifest = manifest
         self._command = command
         self._limits = limits or SubprocessLimits(
@@ -183,6 +194,8 @@ class SubprocessRunner:
             runtime_seconds, acquisition_output_bytes = _effective_acquisition_limits(
                 self._manifest, self._limits, tool_input
             )
+        if self._parent_acquisition is not None:
+            acquisition_output_bytes = self._manifest.limits.max_output_bytes
         wire = _encode_request(
             self._manifest,
             tool_input,
@@ -211,6 +224,7 @@ class SubprocessRunner:
                         attempt_directory,
                         runtime_ms,
                         acquisition_output_bytes,
+                        parent_acquisition=self._parent_acquisition,
                     )
                 except ToolRegistryError as exc:
                     code = (
@@ -437,6 +451,8 @@ def _decode_response(  # pylint: disable=too-many-arguments,too-many-positional-
     attempt_directory: Path,
     runtime_ms: int,
     acquisition_output_bytes: int,
+    *,
+    parent_acquisition=None,
 ) -> ToolResult:
     try:
         payload = json.loads(stdout.decode("utf-8"), object_pairs_hook=_unique_object)
@@ -481,6 +497,7 @@ def _decode_response(  # pylint: disable=too-many-arguments,too-many-positional-
             attempt_directory,
             runtime_ms,
             acquisition_output_bytes,
+            parent_acquisition=parent_acquisition,
         )
     return _decode_transform(
         manifest, tool_input, result, attempt_directory, runtime_ms
@@ -521,7 +538,9 @@ def _decode_acquisition(  # pylint: disable=too-many-arguments,too-many-position
     attempt_directory: Path,
     runtime_ms: int,
     output_bytes: int,
-) -> AcquisitionOutput:
+    *,
+    parent_acquisition=None,
+) -> AcquisitionOutput | AcquisitionFailure:
     _require_fields(
         result,
         {
@@ -556,6 +575,13 @@ def _decode_acquisition(  # pylint: disable=too-many-arguments,too-many-position
         raise ToolRegistryError("runner.output_mismatch")
     if output.requested_url != tool_input.target_url:
         raise ToolRegistryError("runner.output_mismatch")
+    if parent_acquisition is not None:
+        output = parent_acquisition(output)
+        if type(output) is AcquisitionFailure:
+            return output
+        if type(output) is not ParentMeasuredAcquisitionOutput:
+            raise ToolRegistryError("runner.parent_acquisition_invalid")
+        output = rebuild_parent_measurement(output)
     _validate_acquisition_policy(tool_input, output)
     return output
 
@@ -714,8 +740,8 @@ def _validate_acquisition_policy(
     if not policy.decide_content_type(content_type).allowed:
         raise ToolRegistryError("runner.output_mismatch")
     for name, amount in (
-        ("max_requests", len(output.redirects) + 1),
-        ("max_bytes", len(output.body)),
+        ("max_requests", output.requests),
+        ("max_bytes", output.bytes_received),
         ("max_runtime_seconds", (output.runtime_ms + 999) // 1000),
     ):
         if not policy.decide_budget(name, amount).allowed:

@@ -56,10 +56,12 @@ from web_listening.site_skill.model import (
 )
 from web_listening.site_skill.resolve import resolve_site_skill
 from web_listening.site_skill.update import SiteSkillCandidate, create_candidate
+from web_listening.tool_registry.acquisition.quality import quality_failure_code
 from web_listening.tool_registry.eligibility import (
     EligibilityFacts,
     EligibilityRequirements,
     acquisition_failure_allows_switch,
+    acquisition_followup_candidates,
     rank_eligible_tools,
 )
 from web_listening.tool_registry.manifest import (
@@ -84,6 +86,9 @@ from web_listening.tool_registry.protocols.transform import (
     TransformOutput,
 )
 from web_listening.tool_registry.registry import AcquisitionOutputRejected, Registry
+from web_listening.tool_registry.runners.browser_acquisition import (
+    acquisition_execution,
+)
 
 _MAX_DISCOVERY_CANDIDATES = 100
 _DEFAULT_ACQUISITION_TOOL_ID = "acquisition.web_http"
@@ -183,6 +188,23 @@ class _AuthorizedAction:
     scope_request: Request
 
 
+_RETRIEVAL_LIMITS: ContextVar[
+    tuple[frozenset[str] | None, float | None, ContentType | None]
+] = ContextVar("retrieval_execution", default=(None, None, None))
+
+
+@contextmanager
+def retrieval_execution(candidates, deadline, budgets, *, content_type=None):
+    """Narrow this operation only; never mutate the shared Registry or Request."""
+    token = _RETRIEVAL_LIMITS.set((candidates, deadline, content_type))
+    budget_token = _INVOCATION_BUDGET_LIMITS.set(budgets)
+    try:
+        yield
+    finally:
+        _INVOCATION_BUDGET_LIMITS.reset(budget_token)
+        _RETRIEVAL_LIMITS.reset(token)
+
+
 def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
     # pylint: disable=too-many-statements
     request: Request,
@@ -195,6 +217,7 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
 ) -> Result:
     """Validate, resolve, run the controlled acquisition, and assemble a Result."""
     request = validate_request(request)
+    invocation_started = time.monotonic()
     cancelled = _CANCELLATION_CHECK.get()
     requested_url = target_url or request.scope.seeds[0]
     if target_url is None and len(request.scope.seeds) != 1:
@@ -249,6 +272,19 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
                 site_skill=site_skill,
             )
         effective_request = resolution.request
+    _, _, content_type = _RETRIEVAL_LIMITS.get()
+    if content_type is not None:
+        effective_request = replace(
+            effective_request,
+            scope=replace(
+                effective_request.scope,
+                content_types=tuple(
+                    value
+                    for value in effective_request.scope.content_types
+                    if value is content_type
+                ),
+            ),
+        )
     budget_limits = _INVOCATION_BUDGET_LIMITS.get()
     if budget_limits is not None:
         current = effective_request.budgets
@@ -272,6 +308,7 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
     try:
         tool_input = AcquisitionInput(effective_request, requested_url)
         acquisition_manifests = registry.query(category=ToolCategory.ACQUISITION)
+
     except ToolRegistryError as exc:
         return _failure_result(
             status=ResultStatus.REJECTED,
@@ -286,6 +323,12 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
             site_skill=site_skill,
         )
 
+    invocation_deadline = (
+        invocation_started + effective_request.budgets.max_runtime_seconds
+    )
+    _, retrieval_deadline, _ = _RETRIEVAL_LIMITS.get()
+    if retrieval_deadline is not None:
+        invocation_deadline = min(invocation_deadline, retrieval_deadline)
     requested_url = tool_input.target_url
     registered_tool_ids = frozenset(
         manifest.tool_id for manifest in acquisition_manifests
@@ -341,8 +384,13 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
             EligibilityFacts(
                 # Registry registration is the current executable/installed seam.
                 registered_tool_ids,
-                # Every Acquisition registration executes under the same Request gate.
-                registered_tool_ids,
+                # HTML browsers never gain file-only Request permission.
+                frozenset(
+                    item.tool_id
+                    for item in acquisition_manifests
+                    if "browser_render" not in item.capabilities
+                    or ContentType.HTML in effective_request.scope.content_types
+                ),
                 remaining_requests,
                 remaining_bytes,
                 remaining_runtime_ms,
@@ -351,7 +399,16 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
             preferred_tool_id=preferred_tool_id,
             include_alternates=effective_request.explore_all_tools,
             attempted_tool_ids=frozenset(attempted_tool_ids),
+            catalog_decisions=registry.eligibility(
+                EligibilityRequirements(category=ToolCategory.ACQUISITION)
+            ),
         )
+        candidates, _, _ = _RETRIEVAL_LIMITS.get()
+        if candidates is not None:
+            selection = replace(
+                selection,
+                ranked=tuple(m for m in selection.ranked if m.tool_id in candidates),
+            )
         if (attempted_tool_ids or not selection.ranked) and not (
             selection.budget_exhausted
         ):
@@ -384,6 +441,21 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
                 )
                 recorded_skips.add(decision.tool_id)
         if not selection.ranked:
+            if (
+                candidates is not None
+                and not attempted_tool_ids
+                and not selection.budget_exhausted
+            ):
+                return _failure_result(
+                    status=ResultStatus.FAILED,
+                    run_id=run_id,
+                    generated_at=clock(),
+                    requested_url=requested_url,
+                    current_url=requested_url,
+                    code="retrieval.method_unavailable",
+                    message="The requested method is not eligible.",
+                    attempts=tuple(acquisition_attempts),
+                )
             if not attempted_tool_ids:
                 decision = next(
                     (
@@ -452,7 +524,8 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
         started_at = clock()
         invocation_started_ns = time.perf_counter_ns()
         try:
-            acquisition = registry.invoke(manifest.tool_id, tool_input)
+            with acquisition_execution(cancelled, invocation_deadline):
+                acquisition = registry.invoke(manifest.tool_id, tool_input)
         except AcquisitionOutputRejected as exc:
             acquisition = exc.failure
         except ToolRegistryError as exc:
@@ -581,8 +654,11 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
         assert error is not None and failure_code is not None
         acquisition_errors.append(error)
         last_failure_code = failure_code
+        acquisition_manifests = acquisition_followup_candidates(
+            acquisition_manifests, failure_code, manifest.tool_id
+        )
         if not effective_request.explore_all_tools or not (
-            acquisition_failure_allows_switch(failure_code)
+            acquisition_failure_allows_switch(failure_code, manifest.tool_id)
         ):
             return _acquisition_failure_result(
                 run_id=run_id,
@@ -1829,12 +1905,7 @@ def _quality_failure_code(
     allowed_mime_types: tuple[str, ...],
     minimum_words: int,
 ) -> str | None:
-    if acquisition.mime_type not in allowed_mime_types:
-        return "runtime.quality_mime_mismatch"
-    words = acquisition.body.decode("utf-8", errors="ignore").split()
-    if len(words) < minimum_words:
-        return "runtime.quality_minimum_words"
-    return None
+    return quality_failure_code(acquisition, allowed_mime_types, minimum_words)
 
 
 def _acquisition_budget_exhaustion_code(

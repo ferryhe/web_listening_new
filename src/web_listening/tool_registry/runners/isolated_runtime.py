@@ -35,7 +35,10 @@ from web_listening.tool_registry.protocols.acquisition import (
     AcquisitionInput,
     AcquisitionOutput,
 )
-from web_listening.tool_registry.runners.subprocess import SubprocessRunner
+from web_listening.tool_registry.runners.subprocess import (
+    SubprocessLimits,
+    SubprocessRunner,
+)
 
 _BOUNDARY_SCHEMA = "web-listening-network-boundary.v1"
 _QUALIFICATION_PROTOCOL = "web-listening-tool-qualification.v1"
@@ -67,6 +70,9 @@ class NetworkBoundary:
     isolation_proof: str | None = None
     browser_profile_home: str | None = None
     observation_reader: Callable[[str], dict[str, object]] | None = None
+    bridge: dict[str, str] | None = None
+    result_normalizer: Callable | None = None
+    remaining_seconds: Callable[[], float] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -104,6 +110,8 @@ class NetworkBoundary:
             "proxy_server": self.proxy_server,
             "browser_profile_home": self.browser_profile_home,
         }
+        if self.bridge is not None:
+            payload["bridge"] = dict(self.bridge)
         if tool_input is not None:
             if not _nonce_is_valid(attempt_nonce):
                 raise ToolRegistryError("isolated_runtime.attempt_nonce_invalid")
@@ -185,6 +193,9 @@ class IsolatedRuntime:
         self._boundary = boundary
         self._state_reader = state_reader
         self._qualified_binding: str | None = None
+        self._qualified_input: AcquisitionInput | None = None
+        self._successful_report: IsolationQualification | None = None
+        self._installation_digest = self._installed_digest()
         self._last_evidence = IsolationEvidence(
             target_url=None,
             allowed_origins=(),
@@ -207,9 +218,14 @@ class IsolatedRuntime:
         """Return sanitized evidence for the most recent qualify/invoke call."""
         return self._last_evidence
 
-    def qualify(self, tool_input: AcquisitionInput) -> IsolationQualification:
+    def qualify(  # pylint: disable=too-many-locals
+        self, tool_input: AcquisitionInput
+    ) -> IsolationQualification:
         """Qualify only the exact authorized input/boundary and retain its result."""
         tool_input = _require_input(tool_input)
+        self._successful_report = None
+        self._qualified_binding = None
+        self._qualified_input = None
         checks = dict.fromkeys(_REQUIRED_CHECKS, False)
         self._begin_evidence(tool_input)
         rejected = self._preflight_rejection(tool_input)
@@ -268,22 +284,22 @@ class IsolatedRuntime:
                 adapter=True,
                 checks=checks,
             )
-        result = SubprocessRunner(self._installed_manifest, command).invoke(tool_input)
+        result = self._run_acquisition(command, tool_input)
         self._record_result(tool_input, result)
-        if type(result) is not AcquisitionOutput:
+        if not isinstance(result, AcquisitionOutput):
             assert isinstance(result, AcquisitionFailure)
             observation_failure = self._observation_failure(
                 attempt_nonce, tool_input, require_observation=False
             )
-            if observation_failure in {
-                "isolated_runtime.proxy_request_limit",
-                "isolated_runtime.proxy_response_limit",
-            }:
-                result = AcquisitionFailure(
-                    self._installed_manifest.tool_id,
-                    self._installed_manifest.version,
-                    observation_failure,
-                )
+            if (
+                observation_failure
+                in {
+                    "isolated_runtime.proxy_request_limit",
+                    "isolated_runtime.proxy_response_limit",
+                }
+                and self._boundary.result_normalizer is None
+            ):
+                result = replace(result, code=observation_failure)
             return self._failed_qualification(
                 result.code,
                 adapter=True,
@@ -310,12 +326,13 @@ class IsolatedRuntime:
         for name in ("scope", "redirect", "output_bound"):
             checks[name] = True
         self._qualified_binding = binding_sha256
+        self._qualified_input = tool_input
         self._manifest = replace(
             self._installed_manifest,
             health=HealthStatus.HEALTHY,
             qualification=QualificationStatus.QUALIFIED,
         )
-        return IsolationQualification(
+        report = IsolationQualification(
             True,
             self._manifest,
             tuple(checks.items()),
@@ -323,6 +340,50 @@ class IsolatedRuntime:
             None,
             binding_sha256,
         )
+        self._successful_report = report
+        return report
+
+    def validates_installation(
+        self,
+        report: IsolationQualification,
+        manifest: ToolManifest,
+        command: tuple[str, ...],
+        directory: Path,
+    ) -> bool:
+        """Validate a live parent-issued report for Lifecycle's exact install.
+
+        A copied dataclass or a tool's self-report is not an issued report.
+        This grants installation eligibility only, never a new Request binding.
+        """
+        return (
+            report is self._successful_report
+            and type(report) is IsolationQualification
+            and report.qualified
+            and report.failure_code is None
+            and report.binding_sha256 == self._qualified_binding
+            and report.checks == tuple((name, True) for name in _REQUIRED_CHECKS)
+            and isinstance(report.result, AcquisitionOutput)
+            and report.manifest == self._manifest
+            and replace(
+                manifest,
+                health=self._manifest.health,
+                qualification=self._manifest.qualification,
+            )
+            == self._manifest
+            and directory.resolve() == self._tool_directory
+            and command == self._command
+            and self._installed_digest() == self._installation_digest
+            and self._last_evidence.cleanup_complete
+        )
+
+    def _installed_digest(self) -> str:
+        digest = hashlib.sha256()
+        for name in ("tool.json", "tool.py", "runtime.json"):
+            path = self._tool_directory / name
+            if path.is_file():
+                digest.update(name.encode())
+                digest.update(path.read_bytes())
+        return digest.hexdigest()
 
     def invoke(
         self, tool_input: AcquisitionInput
@@ -337,13 +398,12 @@ class IsolatedRuntime:
         if (
             self._manifest.qualification is not QualificationStatus.QUALIFIED
             or self._qualified_binding != _binding_sha256(payload)
+            or self._qualified_input != tool_input
         ):
             return self._failure(
                 "isolated_runtime.qualification_required", tool_input, adapter=False
             )
-        result = SubprocessRunner(
-            self._installed_manifest, self._bound_command(payload)
-        ).invoke(tool_input)
+        result = self._run_acquisition(self._bound_command(payload), tool_input)
         self._record_result(tool_input, result)
         if isinstance(result, AcquisitionOutput):
             observation_failure = self._observation_failure(
@@ -352,6 +412,33 @@ class IsolatedRuntime:
             if observation_failure is not None:
                 return self._failure(observation_failure, tool_input, adapter=True)
         return result
+
+    def _run_acquisition(self, command, tool_input):
+        remaining = self._remaining_seconds()
+        if remaining <= 0:
+            result = AcquisitionFailure(
+                self._manifest.tool_id, self._manifest.version, "budget.runtime"
+            )
+        else:
+            result = SubprocessRunner(
+                self._installed_manifest,
+                command,
+                limits=SubprocessLimits(timeout_seconds=remaining),
+                parent_acquisition=(
+                    self._boundary.result_normalizer
+                    if self._boundary is not None
+                    else None
+                ),
+            ).invoke(tool_input)
+        if self._boundary is not None and self._boundary.result_normalizer is not None:
+            result = self._boundary.result_normalizer(result)
+        return result
+
+    def _remaining_seconds(self) -> float:
+        maximum = float(self._installed_manifest.limits.max_runtime_seconds)
+        if self._boundary is not None and self._boundary.remaining_seconds is not None:
+            return min(maximum, self._boundary.remaining_seconds())
+        return maximum
 
     def _preflight_rejection(self, tool_input: AcquisitionInput) -> str | None:
         if not _authorization_is_valid(self._authorization):
@@ -378,9 +465,14 @@ class IsolatedRuntime:
     ) -> dict[str, object]:
         assert self._boundary is not None
         assert self._authorization is not None
-        return self._boundary.binding_payload(
+        payload = self._boundary.binding_payload(
             self._authorization, tool_input, attempt_nonce=attempt_nonce
         )
+        if self._boundary.result_normalizer is not None:
+            payload["limits"][
+                "max_output_bytes"
+            ] = self._installed_manifest.limits.max_output_bytes
+        return payload
 
     def _bound_command(self, payload: dict[str, object]) -> tuple[str, ...]:
         encoded = base64.urlsafe_b64encode(
@@ -401,6 +493,9 @@ class IsolatedRuntime:
         if operation == "probe":
             request["checks"] = list(checks)
         try:
+            remaining = self._remaining_seconds()
+            if remaining <= 0:
+                return None
             completed = subprocess.run(  # pylint: disable=subprocess-run-check
                 command,
                 input=json.dumps(request, separators=(",", ":")).encode("utf-8"),
@@ -408,7 +503,7 @@ class IsolatedRuntime:
                 stderr=subprocess.PIPE,
                 cwd=self._tool_directory,
                 env=_minimal_environment(),
-                timeout=self._installed_manifest.limits.max_runtime_seconds,
+                timeout=remaining,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None

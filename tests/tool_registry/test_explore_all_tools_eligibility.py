@@ -226,5 +226,18 @@ def test_eligibility_module_is_pure_metadata_selection_without_tool_execution() 
     assert "registry.invoke" not in source
     assert ".acquire(" not in source
     assert "fallback_order" not in source
-    assert "playwright" not in source
-    assert "cloakbrowser" not in source
+    assert "subprocess" not in source
+
+
+def test_default_browser_order_is_not_lexicographic_and_preference_is_first():
+    ids = ("acquisition.web_http", "acquisition.playwright", "acquisition.cloakbrowser")
+    manifests = tuple(_manifest(tool_id) for tool_id in reversed(ids))
+    for preferred, expected in ((ids[0], ids), (ids[2], (ids[2], ids[0], ids[1]))):
+        selected = rank_eligible_tools(
+            manifests,
+            EligibilityRequirements(ToolCategory.ACQUISITION),
+            _facts(manifests),
+            preferred_tool_id=preferred,
+            include_alternates=True,
+        )
+        assert tuple(item.tool_id for item in selected.ranked) == expected

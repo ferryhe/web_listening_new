@@ -612,7 +612,7 @@ def test_same_target_proposal_exhausts_per_target_attempts_before_second_io(
     store.close()
 
 
-def test_empty_successful_body_keeps_evidence_without_unverified_candidate(
+def test_empty_body_fails_quality_without_artifact_or_candidate(
     tmp_path: Path,
 ) -> None:
     initial, allowed, registry, store, spy, explorer = _setup(
@@ -633,20 +633,21 @@ def test_empty_successful_body_keeps_evidence_without_unverified_candidate(
     )
 
     assert decision.allowed is True
-    assert decision.code == "exploration.candidate_quality_unverified"
+    assert decision.code == "exploration.execution_failed"
     assert decision.candidate is None
     assert decision.result.site_skill_update is None
-    assert decision.result.status.value == "partial"
+    assert decision.result.status.value == "failed"
     assert [attempt.outcome for attempt in decision.result.attempts] == [
         "failed",
-        "succeeded",
+        "failed",
     ]
+    assert decision.result.attempts[-1].error.code == "acquisition.empty"
     assert decision.result.usage.requests == 2
     assert decision.result.usage.tool_attempts == 2
-    assert len(decision.result.artifacts) == 1
+    assert len(decision.result.artifacts) == 0
     assert initial.calls == [INITIAL_URL, CANDIDATE_URL]
     assert not allowed.calls
-    assert spy.commits == 1
+    assert spy.commits == 0
     assert request.site_skill.digest == active_digest
     store.close()
 

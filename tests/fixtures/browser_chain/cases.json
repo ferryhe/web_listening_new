@@ -1,0 +1,168 @@
+{
+  "schema_version": "browser-chain-fixtures.v1",
+  "limits": {
+    "requests": 24,
+    "bytes": 8388608,
+    "seconds": 60,
+    "concurrency": 1,
+    "retry": 0
+  },
+  "cases": [
+    {
+      "name": "http",
+      "path": "/http",
+      "tools": [
+        "acquisition.web_http"
+      ],
+      "delivered": true
+    },
+    {
+      "name": "browser",
+      "path": "/browser",
+      "tools": [
+        "acquisition.web_http",
+        "acquisition.playwright"
+      ],
+      "delivered": true
+    },
+    {
+      "name": "cloak",
+      "path": "/cloak",
+      "tools": [
+        "acquisition.web_http",
+        "acquisition.playwright",
+        "acquisition.cloakbrowser"
+      ],
+      "delivered": true
+    },
+    {
+      "name": "all-failed",
+      "path": "/failed",
+      "tools": [
+        "acquisition.web_http",
+        "acquisition.playwright",
+        "acquisition.cloakbrowser"
+      ],
+      "delivered": false
+    },
+    {
+      "name": "robots-denied",
+      "path": "/deny",
+      "tools": [
+        "acquisition.web_http"
+      ],
+      "delivered": false
+    },
+    {
+      "name": "robots-unknown",
+      "path": "/browser",
+      "robots_status": 503,
+      "tools": [
+        "acquisition.web_http",
+        "acquisition.playwright"
+      ],
+      "delivered": true
+    },
+    {
+      "name": "auth-terminal",
+      "path": "/auth",
+      "tools": [
+        "acquisition.web_http"
+      ],
+      "delivered": false
+    },
+    {
+      "name": "interaction-terminal",
+      "path": "/interactive",
+      "tools": [
+        "acquisition.web_http"
+      ],
+      "delivered": false
+    },
+    {
+      "name": "file",
+      "path": "/file",
+      "tools": [
+        "acquisition.web_http"
+      ],
+      "delivered": true
+    },
+    {
+      "name": "redirect",
+      "path": "/redirect",
+      "tools": [
+        "acquisition.web_http",
+        "acquisition.playwright"
+      ],
+      "delivered": true
+    },
+    {
+      "name": "resource-scope",
+      "path": "/out-of-scope",
+      "tools": [
+        "acquisition.web_http",
+        "acquisition.playwright"
+      ],
+      "delivered": false
+    },
+    {
+      "name": "switching-off",
+      "path": "/browser",
+      "explore": false,
+      "tools": [
+        "acquisition.web_http"
+      ],
+      "delivered": false
+    },
+    {
+      "name": "budget",
+      "path": "/browser",
+      "max_requests": 2,
+      "tools": [
+        "acquisition.web_http"
+      ],
+      "delivered": false
+    },
+    {
+      "name": "retrieval-browser",
+      "path": "/browser",
+      "operation": "retrieve",
+      "tools": [
+        "acquisition.web_http",
+        "acquisition.playwright"
+      ],
+      "delivered": true
+    },
+    {
+      "name": "retrieval-cloudflare",
+      "path": "/cloudflare",
+      "operation": "retrieve",
+      "tools": [
+        "acquisition.web_http",
+        "acquisition.playwright"
+      ],
+      "delivered": false
+    },
+    {
+      "name": "retrieval-file",
+      "path": "/file",
+      "operation": "retrieve-file",
+      "tools": [
+        "acquisition.web_http"
+      ],
+      "delivered": true
+    },
+    {
+      "name": "retrieval-alternate",
+      "path": "/cloudflare",
+      "operation": "retrieve",
+      "alternate": "/http",
+      "tools": [
+        "acquisition.web_http",
+        "acquisition.playwright",
+        "acquisition.web_http"
+      ],
+      "delivered": true
+    }
+  ]
+}
