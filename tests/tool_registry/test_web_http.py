@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from dataclasses import replace
 from urllib.parse import urlsplit
 
 import pytest
@@ -321,7 +322,7 @@ def test_invocation_request_blocks_redirect_before_disallowed_origin_read() -> N
 
     failure = _tool(transport).acquire(AcquisitionInput(narrow_request, start))
 
-    assert failure == AcquisitionFailure(
+    assert replace(failure, robots_decisions=()) == AcquisitionFailure(
         "acquisition.web_http", "1.0.0", "scope.origin_not_allowed"
     )
     assert transport.requests == ["https://example.com/robots.txt", start]
@@ -346,7 +347,7 @@ def test_prebuilt_broad_gateway_cannot_be_reused_as_transport_factory() -> None:
     failure = tool.acquire(AcquisitionInput(_request(start), start))
     broad_gateway.close()
 
-    assert failure == AcquisitionFailure(
+    assert replace(failure, robots_decisions=()) == AcquisitionFailure(
         "acquisition.web_http", "1.0.0", "web_http.failure"
     )
     assert not transport.requests
@@ -372,7 +373,9 @@ def test_gateway_timeout_and_transport_failures_keep_safe_codes(
 
     failure = _tool(transport).acquire(AcquisitionInput(_request(url), url))
 
-    assert failure == AcquisitionFailure("acquisition.web_http", "1.0.0", code)
+    assert replace(failure, robots_decisions=()) == AcquisitionFailure(
+        "acquisition.web_http", "1.0.0", code
+    )
     assert "private" not in str(failure)
     assert transport.requests == ["https://example.test/robots.txt", url]
     assert robots.closed == transport.closed == 1
@@ -415,7 +418,7 @@ def test_ordinary_transport_factory_exception_is_safely_contained() -> None:
 
     failure = tool.acquire(AcquisitionInput(_request(), "https://example.test/report"))
 
-    assert failure == AcquisitionFailure(
+    assert replace(failure, robots_decisions=()) == AcquisitionFailure(
         "acquisition.web_http", "1.0.0", "web_http.failure"
     )
     assert secret not in str(failure)
@@ -438,7 +441,7 @@ def test_invalid_gateway_failure_code_is_contained_without_private_text(
         AcquisitionInput(_request(), "https://example.test/report")
     )
 
-    assert failure == AcquisitionFailure(
+    assert replace(failure, robots_decisions=()) == AcquisitionFailure(
         "acquisition.web_http", "1.0.0", "web_http.failure"
     )
     assert private_code not in str(failure)
@@ -558,7 +561,7 @@ def test_registry_query_url_returns_safe_failure_instead_of_invalid_output() -> 
         AcquisitionInput(_request(url), url),
     )
 
-    assert output == AcquisitionFailure(
+    assert replace(output, robots_decisions=()) == AcquisitionFailure(
         "acquisition.web_http", "1.0.0", "web_http.url_redacted"
     )
     assert transport.requests == ["https://example.test/robots.txt", url]
@@ -601,7 +604,7 @@ def test_close_is_idempotent_and_rejects_before_resource_creation() -> None:
     failure = tool.acquire(AcquisitionInput(_request(), "https://example.test/report"))
 
     assert factory_calls == 0
-    assert failure == AcquisitionFailure(
+    assert replace(failure, robots_decisions=()) == AcquisitionFailure(
         "acquisition.web_http", "1.0.0", "gateway.closed"
     )
 
@@ -622,3 +625,59 @@ def test_adapter_has_no_store_runtime_fallback_or_second_network_path() -> None:
     )
 
     assert all(token not in source for token in forbidden)
+
+
+@pytest.mark.parametrize("status", [200, 503])
+def test_issue101_gateway_evidence_survives_registry_success_and_failure(status):
+    """Only the target outcome changes; the preceding robots facts survive both."""
+    url = "https://example.test/report"
+    transport = _ScriptedTransport(
+        {
+            "https://example.test/robots.txt": [_ScriptedResponse(503)],
+            url: [_ScriptedResponse(status, b"content", Content_Type="text/html")],
+        }
+    )
+    tool = _tool(transport)
+    registry = Registry()
+    registry.register(tool.manifest, tool)
+    result = registry.invoke(tool.manifest.tool_id, AcquisitionInput(_request(), url))
+    assert isinstance(
+        result, AcquisitionOutput if status == 200 else AcquisitionFailure
+    )
+    assert result.robots_decisions[0].decision == "unknown_allow"
+    assert result.robots_decisions[0].status_code == 503
+    assert result.requests == 2
+
+
+@pytest.mark.parametrize("denied", [False, True])
+def test_issue101_cross_origin_redirect_keeps_both_decisions(denied):
+    """Each visited origin retains its decision, including a terminal denial."""
+    start, final = "https://example.test/report", "https://other.test/final"
+    transport = _ScriptedTransport(
+        {
+            "https://example.test/robots.txt": [_ScriptedResponse(503)],
+            start: [_ScriptedResponse(302, Location=final)],
+            "https://other.test/robots.txt": [
+                (
+                    _ScriptedResponse(200, b"User-agent: *\nDisallow: /\n")
+                    if denied
+                    else _ScriptedResponse(404)
+                )
+            ],
+            final: [_ScriptedResponse(200, b"done", Content_Type="text/html")],
+        }
+    )
+    request = _request(
+        start, allowed_origins=("https://example.test", "https://other.test")
+    )
+    tool = _tool(transport)
+    registry = Registry()
+    registry.register(tool.manifest, tool)
+    result = registry.invoke(tool.manifest.tool_id, AcquisitionInput(request, start))
+    assert [item.target_url for item in result.robots_decisions] == [start, final]
+    assert [item.decision for item in result.robots_decisions] == [
+        "unknown_allow",
+        "denied" if denied else "absent",
+    ]
+    assert result.requests == (3 if denied else 4)
+    assert (final in transport.requests) is not denied

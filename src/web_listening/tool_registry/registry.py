@@ -408,6 +408,7 @@ def _revalidate_output(output: ToolResult) -> ToolResult:
             getattr(output, "_usage_explicit", None),
             getattr(output, "_inferred_requests", None),
             getattr(output, "_inferred_bytes", None),
+            robots_decisions=getattr(output, "robots_decisions", ()),
         )
     return replace(output)
 
@@ -499,5 +500,6 @@ def _acquisition_rejection(
             requests=requests,
             bytes_received=bytes_received,
             runtime_ms=output.runtime_ms,
+            robots_decisions=output.robots_decisions,
         ),
     )

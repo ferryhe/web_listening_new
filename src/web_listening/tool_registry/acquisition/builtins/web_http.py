@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from web_listening.result.robots import RobotsDecision
 from web_listening.tool_registry.manifest import (
     HealthStatus,
     QualificationStatus,
@@ -67,6 +68,7 @@ class WebHttpAcquisitionTool:
         transport: Transport | None = None
         gateway: GovernedAccessGateway | None = None
         usage: UsageEvidence | None = None
+        robots_decisions: tuple[RobotsDecision, ...] = ()
         try:
             transport = self._transport_factory()
             if self._runtime_deadline is None:
@@ -84,8 +86,9 @@ class WebHttpAcquisitionTool:
                 )
             result = gateway.read(tool_input.target_url)
             usage = result.evidence.usage
+            robots_decisions = result.evidence.robots
             if result.requested_url != tool_input.target_url:
-                return self._failure("web_http.url_redacted", usage)
+                return self._failure("web_http.url_redacted", usage, robots_decisions)
             redirects = tuple(
                 AcquisitionRedirect(
                     from_url=redirect.source_url,
@@ -108,11 +111,12 @@ class WebHttpAcquisitionTool:
                 runtime_ms=round(result.evidence.usage.elapsed_seconds * 1000),
                 requests=result.evidence.usage.requests,
                 bytes_received=result.evidence.usage.bytes,
+                robots_decisions=robots_decisions,
             )
         except GatewayFailure as exc:
-            return self._safe_failure(exc.code, exc.evidence.usage)
+            return self._safe_failure(exc.code, exc.evidence.usage, exc.evidence.robots)
         except Exception:  # pylint: disable=broad-exception-caught
-            return self._safe_failure("web_http.failure", usage)
+            return self._safe_failure("web_http.failure", usage, robots_decisions)
         finally:
             if gateway is not None:
                 self._close_resource(gateway)
@@ -133,25 +137,32 @@ class WebHttpAcquisitionTool:
             pass
 
     def _failure(
-        self, code: str, usage: UsageEvidence | None = None
+        self,
+        code: str,
+        usage: UsageEvidence | None = None,
+        robots_decisions: tuple[RobotsDecision, ...] = (),
     ) -> AcquisitionFailure:
         return AcquisitionFailure(
             tool_id=self.manifest.tool_id,
             tool_version=self.manifest.version,
             code=code,
+            robots_decisions=robots_decisions,
             requests=0 if usage is None else usage.requests,
             bytes_received=0 if usage is None else usage.bytes,
             runtime_ms=(0 if usage is None else round(usage.elapsed_seconds * 1_000)),
         )
 
     def _safe_failure(
-        self, code: str, usage: UsageEvidence | None
+        self,
+        code: str,
+        usage: UsageEvidence | None,
+        robots_decisions: tuple[RobotsDecision, ...] = (),
     ) -> AcquisitionFailure:
         try:
-            return self._failure(code, usage)
+            return self._failure(code, usage, robots_decisions)
         except Exception:  # pylint: disable=broad-exception-caught
             try:
-                return self._failure("web_http.failure", usage)
+                return self._failure("web_http.failure", usage, robots_decisions)
             except Exception:  # pylint: disable=broad-exception-caught
                 return self._failure("web_http.failure")
 

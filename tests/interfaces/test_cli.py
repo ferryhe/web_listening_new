@@ -31,6 +31,7 @@ from web_listening.result.errors import SafeError
 from web_listening.result.handoff import AcquisitionHandoff
 from web_listening.result.manifest import SiteSkillEvidence, Usage
 from web_listening.result.model import Result
+from web_listening.result.robots import RobotsDecision
 from web_listening.result.site_explore import SiteExploreResult
 from web_listening.result.site_refresh import (
     ChangeEvidence,
@@ -1026,3 +1027,35 @@ def test_pyproject_declares_only_the_requested_console_script() -> None:
         "web-listening": "web_listening.interfaces.cli:main",
         "web-listening-server": "web_listening.interfaces.server:main",
     }
+
+
+def test_issue101_v2_decisions_interface_round_trip(tmp_path, capsys, monkeypatch):
+    """The adapter emits the same versioned evidence without manufacturing v1 data."""
+
+    result = _result()
+    attempts = tuple(
+        replace(
+            attempt,
+            schema_version="web-listening-attempt.v2",
+            robots_decisions=(
+                RobotsDecision(
+                    "https://example.org",
+                    "https://example.org/robots.txt",
+                    attempt.requested_url,
+                    503,
+                    "unknown_allow",
+                    "robots.http_status",
+                ),
+            ),
+        )
+        for attempt in result.attempts
+    )
+    result = replace(
+        result, attempts=attempts, manifest=replace(result.manifest, attempts=attempts)
+    )
+    job = replace(_job(), result=result)
+    monkeypatch.setattr(FakeRuntime, "get_job", lambda _self, _job_id: job)
+    assert cli.main(["get-job", job.job_id, "--output", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"] == result.to_dict()
+    assert payload["result"]["attempts"] == payload["result"]["manifest"]["attempts"]

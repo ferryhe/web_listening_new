@@ -27,6 +27,7 @@ from web_listening.artifact.model import (
     StoredObservation,
 )
 from web_listening.request.model import Budgets, ContentType, Request, Scope
+from web_listening.result.robots import RobotsDecision
 from web_listening.tool_registry.eligibility import EligibilityRequirements
 from web_listening.tool_registry.manifest import (
     HealthStatus,
@@ -50,7 +51,7 @@ from web_listening.tool_registry.protocols.transform import (
     TransformInput,
     TransformOutput,
 )
-from web_listening.tool_registry.registry import Registry
+from web_listening.tool_registry.registry import AcquisitionOutputRejected, Registry
 
 
 def _request(
@@ -1692,3 +1693,60 @@ def test_acquisition_budget_rejection_uses_usage_replaced_onto_legacy_output() -
         17,
         7,
     )
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_issue101_registry_rebuild_preserves_robots(rejected):
+
+    manifest = _manifest("acquisition.http", ToolCategory.ACQUISITION)
+    decision = RobotsDecision(
+        "https://example.test",
+        "https://example.test/robots.txt",
+        "https://example.test/",
+        503,
+        "unknown_allow",
+        "robots.http_status",
+    )
+    output = _AcquisitionFake(manifest).acquire(
+        AcquisitionInput(_request(), "https://example.test/")
+    )
+    output = replace(
+        output, robots_decisions=(decision,), runtime_ms=11000 if rejected else 1
+    )
+    registry = Registry()
+    registry.register(manifest, _AcquisitionFake(manifest, output))
+    if rejected:
+        with pytest.raises(AcquisitionOutputRejected) as caught:
+            registry.invoke(
+                manifest.tool_id, AcquisitionInput(_request(), "https://example.test/")
+            )
+        result = caught.value.failure
+    else:
+        result = registry.invoke(
+            manifest.tool_id, AcquisitionInput(_request(), "https://example.test/")
+        )
+    assert result.robots_decisions == (decision,)
+
+
+def test_issue101_registry_revalidates_forged_decision():
+
+    manifest = _manifest("acquisition.http", ToolCategory.ACQUISITION)
+    decision = RobotsDecision(
+        "https://example.test",
+        "https://example.test/robots.txt",
+        "https://example.test/",
+        200,
+        "allowed",
+        "robots.allowed",
+    )
+    output = _AcquisitionFake(manifest).acquire(
+        AcquisitionInput(_request(), "https://example.test/")
+    )
+    output = replace(output, robots_decisions=(decision,))
+    object.__setattr__(output.robots_decisions[0], "decision", "forged")
+    registry = Registry()
+    registry.register(manifest, _AcquisitionFake(manifest, output))
+    with pytest.raises(ToolRegistryError):
+        registry.invoke(
+            manifest.tool_id, AcquisitionInput(_request(), "https://example.test/")
+        )

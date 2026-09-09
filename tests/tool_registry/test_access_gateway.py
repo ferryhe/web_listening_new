@@ -13,6 +13,7 @@ import io
 import json
 import ssl
 import time
+from asyncio import CancelledError
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
@@ -450,7 +451,8 @@ def test_new_redirect_hop_clears_prior_response_fields_before_robots() -> None:
 
     failure = failure_code(lambda: access.read("https://example.com/start"))
 
-    assert failure.code == "robots.dns_error"
+    assert failure.code == "gateway.dns"
+    assert failure.evidence.robots[-1].reason_code == "robots.dns_error"
     assert failure.evidence.current_url == "https://other.example/final"
     assert failure.evidence.final_url == "https://other.example/final"
     assert failure.evidence.response_status is None
@@ -745,7 +747,8 @@ def test_resolver_is_bounded_by_the_remaining_runtime() -> None:
 
     failure = failure_code(lambda: access.read("https://example.com/public"))
 
-    assert failure.code == "robots.timeout"
+    assert failure.code == "gateway.timeout"
+    assert failure.evidence.robots[-1].reason_code == "robots.timeout"
     assert time.monotonic() - started < 0.15
     assert any(
         item.stage == "robots.dns"
@@ -1369,19 +1372,22 @@ def test_timeout_and_transport_failures_are_typed_and_redacted() -> None:
     assert "query-sha256=" in failure.evidence.requested_url
 
     timed_out = FakeTransport(
-        {"https://example.com/robots.txt": [TimeoutError("private timeout")]}
+        {
+            "https://example.com/robots.txt": [TimeoutError("private timeout")],
+            "https://example.com/public": [TimeoutError("private target timeout")],
+        }
     )
     failure = failure_code(
         lambda: gateway(timed_out).read("https://example.com/public")
     )
-    assert failure.code == "robots.timeout"
+    assert failure.code == "gateway.timeout"
     assert failure.evidence.robots[-1].code == "robots.timeout"
     assert timed_out.requests[0][1] <= 30
 
 
 @pytest.mark.parametrize(
     ("during_robots", "expected_requests"),
-    [(True, 1), (False, 2)],
+    [(True, 2), (False, 2)],
 )
 def test_certificate_verification_failure_has_terminal_gateway_code(
     during_robots: bool, expected_requests: int
@@ -1395,8 +1401,7 @@ def test_certificate_verification_failure_has_terminal_gateway_code(
             certificate_failure if during_robots else FakeResponse(404)
         ]
     }
-    if not during_robots:
-        scripts[target_url] = [certificate_failure]
+    scripts[target_url] = [certificate_failure]
     transport = FakeTransport(scripts)
 
     failure = failure_code(lambda: gateway(transport).read(target_url))
@@ -1442,16 +1447,21 @@ def test_robots_body_io_failures_keep_robots_specific_codes(
             raise error
 
     robots = FailingRobotsBody(200, Content_Type="text/plain")
-    transport = FakeTransport({"https://example.com/robots.txt": [robots]})
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [robots],
+            "https://example.com/public": [OSError("target failure")],
+        }
+    )
 
     failure = failure_code(
         lambda: gateway(transport).read("https://example.com/public")
     )
 
-    assert failure.code == expected_code
+    assert failure.code == "gateway.transport"
     assert failure.evidence.robots[-1].code == expected_code
     assert robots.closed == 1
-    assert len(transport.requests) == 1
+    assert len(transport.requests) == 2
     encoded = json.dumps(asdict(failure.evidence), sort_keys=True)
     assert "private robots" not in encoded
 
@@ -1463,17 +1473,23 @@ def test_robots_partial_body_counts_usage_without_target_content_evidence() -> N
             raise in_process_runner._PartialBodyRead(b"abc")
 
     robots = PartialRobotsBody(200, Content_Type="text/plain")
-    transport = FakeTransport({"https://example.com/robots.txt": [robots]})
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [robots],
+            "https://example.com/public": [OSError("target failure")],
+        }
+    )
 
     failure = failure_code(
         lambda: gateway(transport).read("https://example.com/public")
     )
 
-    assert failure.code == "robots.network_error"
+    assert failure.code == "gateway.transport"
+    assert failure.evidence.robots[-1].reason_code == "robots.network_error"
     assert failure.evidence.usage.bytes == 3
     assert failure.evidence.content_bytes == 0
     assert failure.evidence.content_sha256 is None
-    assert len(transport.requests) == 1
+    assert len(transport.requests) == 2
     assert robots.closed == 1
 
 
@@ -2043,3 +2059,290 @@ def test_pinned_transport_connection_close_keeps_response_file_socket_alive(
 
     assert raw.body_timeouts == [10.0, 9.0, 8.0, 7.0]
     assert raw.closed == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "decision", "reason"),
+    [
+        (200, ROBOTS_ALLOW, "allowed", "robots.allowed"),
+        (200, b"User-agent: *\nDisallow: /public\n", "denied", "robots.disallowed"),
+        (404, b"", "absent", "robots.absent"),
+        (410, b"", "absent", "robots.absent"),
+        (401, b"", "denied", "robots.auth_required"),
+        (403, b"", "denied", "robots.forbidden"),
+        (500, b"", "unknown_allow", "robots.http_status"),
+        (429, b"", "unknown_allow", "robots.http_status"),
+        (204, b"", "unknown_allow", "robots.http_status"),
+        (
+            200,
+            b"\xff\nUser-agent: *\nDisallow: /public\nbroken\n",
+            "denied",
+            "robots.disallowed",
+        ),
+        (200, b"", "allowed", "robots.allowed"),
+        (200, b"# comment\n", "allowed", "robots.allowed"),
+        (200, b"User-agent: another-bot\nDisallow: /\n", "allowed", "robots.allowed"),
+        (200, b"<html>Error</html>", "unknown_allow", "robots.parse_error"),
+        (200, b"not robots at all", "unknown_allow", "robots.parse_error"),
+    ],
+)
+def test_issue101_frozen_matrix(status, body, decision, reason):
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [FakeResponse(status, body)],
+            "https://example.com/public": [
+                FakeResponse(200, b"done", Content_Type="text/html")
+            ],
+        }
+    )
+    access = gateway(transport)
+    if decision == "denied":
+        evidence = failure_code(
+            lambda: access.read("https://example.com/public")
+        ).evidence
+        assert len(transport.requests) == 1
+    else:
+        evidence = access.read("https://example.com/public").evidence
+        assert len(transport.requests) == 2
+    assert evidence.robots[0].to_dict() == {
+        "origin": "https://example.com",
+        "robots_url": "https://example.com/robots.txt",
+        "target_url": "https://example.com/public",
+        "status_code": status,
+        "decision": decision,
+        "reason_code": reason,
+        "policy_id": "robots-unknown-allow.v1",
+    }
+    assert evidence.usage.requests == len(transport.requests)
+    assert evidence.usage.bytes == (len(body) if status == 200 else 0) + (
+        0 if decision == "denied" else 4
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError(), ConnectionError(), ssl.SSLError(), ssl.SSLCertVerificationError()],
+)
+def test_issue101_fetch_failure_allows_target_and_caches_unknown(error):
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [error],
+            "https://example.com/public": [
+                FakeResponse(200, b"done", Content_Type="text/html") for _ in range(2)
+            ],
+        }
+    )
+    access = gateway(transport)
+    for _ in range(2):
+        result = access.read("https://example.com/public")
+        assert result.evidence.robots[0].decision == "unknown_allow"
+        assert result.evidence.robots[0].status_code is None
+    assert len(transport.requests) == 3
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_issue101_incomplete_rules_keep_denial(partial):
+    body = b"User-agent: *\nDisallow: /public\n"
+
+    class BrokenResponse(FakeResponse):
+        def read(self, max_bytes):
+            if partial:
+                raise in_process_runner._PartialBodyRead(body)
+            return super().read(max_bytes)
+
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [
+                BrokenResponse(200, body, Content_Length=str(len(body) + 10))
+            ]
+        }
+    )
+    failure = failure_code(
+        lambda: gateway(transport).read("https://example.com/public")
+    )
+    assert failure.code == "robots.disallowed"
+    assert failure.evidence.robots[0].decision == "denied"
+    assert failure.evidence.usage.bytes == len(body)
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("during_robots", [False, True])
+def test_issue101_cancel_is_terminal_with_prior_evidence(during_robots):
+
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [
+                CancelledError() if during_robots else FakeResponse(503)
+            ],
+            "https://example.com/public": [CancelledError()],
+        }
+    )
+    failure = failure_code(
+        lambda: gateway(transport).read("https://example.com/public")
+    )
+    assert failure.code == "runtime.cancelled"
+    assert len(transport.requests) == (1 if during_robots else 2)
+    assert len(failure.evidence.robots) == (0 if during_robots else 1)
+
+
+@pytest.mark.parametrize(
+    "max_requests,max_bytes,expected",
+    [(1, 100, "budget.requests"), (6, 3, "budget.bytes")],
+)
+def test_issue101_unknown_cannot_bypass_budget(max_requests, max_bytes, expected):
+    transport = FakeTransport(
+        {"https://example.com/robots.txt": [FakeResponse(200, b"abc")]}
+    )
+    failure = failure_code(
+        lambda: gateway(
+            transport, request_for(max_requests=max_requests, max_bytes=max_bytes)
+        ).read("https://example.com/public")
+    )
+    assert failure.code == expected
+    assert len(transport.requests) == 1
+
+
+def test_issue101_total_deadline_beats_fetch_timeout():
+    clock = ManualClock()
+
+    class ExpiredTransport(FakeTransport):
+        def send(self, url, *, timeout, addresses):
+            clock.value = 30
+            return super().send(url, timeout=timeout, addresses=addresses)
+
+    transport = ExpiredTransport({"https://example.com/robots.txt": [TimeoutError()]})
+    access = GovernedAccessGateway(
+        request_for(), transport, resolver=Resolver(), clock=clock
+    )
+    assert (
+        failure_code(lambda: access.read("https://example.com/public")).code
+        == "budget.runtime"
+    )
+    assert len(transport.requests) == 1
+
+
+def test_issue101_dns_unknown_is_not_a_target_dns_waiver():
+    count = 0
+
+    def resolver(_host, _port):
+        nonlocal count
+        count += 1
+        if count == 1:
+            raise OSError("private dns diagnostic")
+        return (PUBLIC_IP,)
+
+    transport = FakeTransport(
+        {
+            "https://example.com/public": [
+                FakeResponse(200, b"ok", Content_Type="text/html")
+            ]
+        }
+    )
+    result = gateway(transport, resolver=resolver).read("https://example.com/public")
+    assert result.evidence.robots[0].reason_code == "robots.dns_error"
+    assert count == 2
+    assert result.evidence.usage.requests == 1
+
+
+@pytest.mark.parametrize("incremental", [False, True])
+def test_issue101_body_safety_failure_is_never_unknown(incremental):
+    class UnsafeBody(RecordingHttpResponse):
+        def read(self, _amount):
+            raise in_process_runner._TransportSafetyError("gateway.transport_contract")
+
+    raw = UnsafeBody(b"x")
+    if incremental:
+        raw.read1 = raw.read  # pylint: disable=attribute-defined-outside-init
+    response = in_process_runner._HttpResponse(raw, RecordingConnection(), PUBLIC_IP)
+    transport = FakeTransport({"https://example.com/robots.txt": [response]})
+    failure = failure_code(
+        lambda: gateway(transport).read("https://example.com/public")
+    )
+    assert failure.code == "gateway.transport_contract"
+    assert len(transport.requests) == 1
+
+
+def test_issue101_partial_cancellation_keeps_actual_bytes():
+    class CancelledBody(RecordingHttpResponse):
+        def __init__(self):
+            super().__init__(b"xxxx")
+            self.calls = 0
+
+        def read1(self, _amount):
+            self.calls += 1
+            if self.calls == 1:
+                return b"abc"
+            raise CancelledError()
+
+    response = in_process_runner._HttpResponse(
+        CancelledBody(), RecordingConnection(), PUBLIC_IP
+    )
+    transport = FakeTransport({"https://example.com/robots.txt": [response]})
+    failure = failure_code(
+        lambda: gateway(transport).read("https://example.com/public")
+    )
+    assert failure.code == "runtime.cancelled"
+    assert failure.evidence.usage.bytes == 3
+    assert failure.evidence.usage.requests == 1
+
+
+@pytest.mark.parametrize(
+    ("bom", "encoding"),
+    [
+        (b"\xef\xbb\xbf", "utf-8"),
+        (b"\xff\xfe", "utf-16-le"),
+        (b"\xfe\xff", "utf-16-be"),
+    ],
+)
+@pytest.mark.parametrize("partial", [False, True])
+def test_issue101_review_bom_rules_deny_without_target(bom, encoding, partial):
+    body = bom + "User-agent: *\nDisallow: /public\n".encode(encoding)
+
+    class InterruptedResponse(FakeResponse):
+        def read(self, max_bytes):
+            raise in_process_runner._PartialBodyRead(body)
+
+    response_type = InterruptedResponse if partial else FakeResponse
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [response_type(200, body)],
+            "https://example.com/public": [
+                FakeResponse(200, b"done", Content_Type="text/html")
+            ],
+        }
+    )
+    evidence = failure_code(
+        lambda: gateway(transport).read("https://example.com/public")
+    ).evidence
+    assert evidence.robots[0].decision == "denied"
+    assert evidence.robots[0].reason_code == "robots.disallowed"
+    assert [request[0] for request in transport.requests] == [
+        "https://example.com/robots.txt"
+    ]
+    assert evidence.usage.requests == 1
+    assert evidence.usage.bytes == len(body)
+
+
+@pytest.mark.parametrize("rules", ["User-agent: *", "User-agent: *\nDisallow: /public"])
+@pytest.mark.parametrize("document", ["doctype", "html", "header"])
+def test_issue101_review_html_rules_are_parse_error(rules, document):
+    headers = {}
+    if document == "header":
+        body = rules.encode()
+        headers = {"Content_Type": "Text/HTML; charset=utf-8"}
+    else:
+        marker = "<!DOCTYPE html>" if document == "doctype" else '<HTML lang="en">'
+        body = f"{marker}\n{rules}\n</html>".encode()
+    transport = FakeTransport(
+        {
+            "https://example.com/robots.txt": [FakeResponse(200, body, **headers)],
+            "https://example.com/public": [
+                FakeResponse(200, b"done", Content_Type="text/html")
+            ],
+        }
+    )
+    evidence = gateway(transport).read("https://example.com/public").evidence
+    assert evidence.robots[0].decision == "unknown_allow"
+    assert evidence.robots[0].reason_code == "robots.parse_error"
+    assert evidence.usage.requests == len(transport.requests) == 2
+    assert evidence.usage.bytes == len(body) + 4

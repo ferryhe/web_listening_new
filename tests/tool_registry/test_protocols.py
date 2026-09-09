@@ -659,3 +659,16 @@ def test_transform_input_validates_role_and_lineage_cross_links() -> None:
     with pytest.raises(ValueError) as caught:
         TransformInput(replace(stored, lineage=(edge,)))
     assert getattr(caught.value, "code", None) == "lineage.forbidden"
+
+
+@pytest.mark.parametrize("value", [[], ({},), ("allowed",)])
+def test_issue101_protocol_rejects_invalid_robots(value):
+    with pytest.raises(ToolRegistryError):
+        AcquisitionFailure(
+            "acquisition.http", "1.0.0", "gateway.transport", robots_decisions=value
+        )
+    output = _AcquisitionFake().acquire(
+        AcquisitionInput(_request(), "https://example.test/")
+    )
+    with pytest.raises(ToolRegistryError):
+        replace(output, robots_decisions=value)

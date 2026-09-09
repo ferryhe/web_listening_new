@@ -15,8 +15,10 @@ from web_listening.result.errors import (
     validate_url,
     validate_utc_time,
 )
+from web_listening.result.robots import RobotsDecision, validate_robots_decisions
 
-ATTEMPT_SCHEMA_VERSION = "web-listening-attempt.v1"
+ATTEMPT_SCHEMA_VERSION = "web-listening-attempt.v2"
+_LEGACY_VERSION = "web-listening-attempt.v1"
 _OUTCOMES = {"succeeded", "failed", "skipped"}
 
 
@@ -40,9 +42,16 @@ class Attempt:  # pylint: disable=too-many-instance-attributes
     runtime_ms: int
     schema_version: str = ATTEMPT_SCHEMA_VERSION
 
+    robots_decisions: tuple[RobotsDecision, ...] = ()
+
     def __post_init__(self) -> None:
-        if self.schema_version != ATTEMPT_SCHEMA_VERSION:
+        if self.schema_version not in (ATTEMPT_SCHEMA_VERSION, _LEGACY_VERSION):
             raise ResultValidationError("schema.version_invalid")
+        object.__setattr__(
+            self, "robots_decisions", validate_robots_decisions(self.robots_decisions)
+        )
+        if self.schema_version == _LEGACY_VERSION and self.robots_decisions:
+            raise ResultValidationError("attempt.robots_invalid")
         validate_nonnegative_int(self.order, code="attempt.order_invalid")
         validate_text(self.attempt_id, code="attempt.id_invalid", maximum=128)
         if not isinstance(self.outcome, str) or self.outcome not in _OUTCOMES:
@@ -129,12 +138,23 @@ class Attempt:  # pylint: disable=too-many-instance-attributes
                 "requests",
                 "bytes_received",
                 "runtime_ms",
-            },
+            }
+            | (
+                {"robots_decisions"}
+                if payload.get("schema_version") == ATTEMPT_SCHEMA_VERSION
+                else set()
+            ),
         )
+        decisions = payload.get("robots_decisions", [])
+        if not isinstance(decisions, list):
+            raise ResultValidationError("attempt.robots_invalid")
         error = (
             None if payload["error"] is None else SafeError.from_dict(payload["error"])
         )
         return cls(
+            robots_decisions=tuple(
+                RobotsDecision.from_dict(item) for item in decisions
+            ),
             schema_version=payload["schema_version"],
             order=payload["order"],
             attempt_id=payload["attempt_id"],
@@ -154,7 +174,7 @@ class Attempt:  # pylint: disable=too-many-instance-attributes
 
     def to_dict(self) -> dict[str, object]:
         """Return the complete attempt as a plain JSON value."""
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "order": self.order,
             "attempt_id": self.attempt_id,
@@ -171,6 +191,11 @@ class Attempt:  # pylint: disable=too-many-instance-attributes
             "bytes_received": self.bytes_received,
             "runtime_ms": self.runtime_ms,
         }
+        if self.schema_version == ATTEMPT_SCHEMA_VERSION:
+            payload["robots_decisions"] = [
+                item.to_dict() for item in self.robots_decisions
+            ]
+        return payload
 
 
 def validate_attempts(attempts: tuple[Attempt, ...]) -> tuple[Attempt, ...]:

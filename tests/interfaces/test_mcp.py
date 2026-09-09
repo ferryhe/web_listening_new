@@ -13,7 +13,9 @@ import os
 import subprocess
 import sys
 import tomllib
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +30,8 @@ from web_listening.artifact.model import ArtifactRole
 from web_listening.artifact.observation import ObservationProposal
 from web_listening.artifact.store import ArtifactStore
 from web_listening.result.model import Result
+from web_listening.result.robots import RobotsDecision
+from web_listening.runtime.jobs import Job, JobStatus
 
 ROOT = Path(__file__).parents[2]
 SITE_SKILL_CATALOG = ROOT / "tests" / "live" / "catalog" / "site_skill_cases.json"
@@ -207,7 +211,7 @@ EXPECTED_ARTIFACT_EVIDENCE_SCHEMA = {
     ],
     "additionalProperties": False,
 }
-EXPECTED_ATTEMPT_SCHEMA = {
+EXPECTED_ATTEMPT_V1_SCHEMA = {
     "type": "object",
     "properties": {
         "schema_version": {"const": "web-listening-attempt.v1"},
@@ -249,6 +253,53 @@ EXPECTED_ATTEMPT_SCHEMA = {
         "runtime_ms",
     ],
     "additionalProperties": False,
+}
+EXPECTED_ROBOTS_DECISION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "origin": {"type": "string"},
+        "robots_url": {"type": "string"},
+        "target_url": {"type": "string"},
+        "status_code": {
+            "anyOf": [
+                {"type": "integer", "minimum": 100, "maximum": 599},
+                {"type": "null"},
+            ]
+        },
+        "decision": {"enum": ["allowed", "denied", "absent", "unknown_allow"]},
+        "reason_code": {
+            "type": "string",
+            "pattern": r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$",
+        },
+        "policy_id": {"const": "robots-unknown-allow.v1"},
+    },
+    "required": [
+        "origin",
+        "robots_url",
+        "target_url",
+        "status_code",
+        "decision",
+        "reason_code",
+        "policy_id",
+    ],
+    "additionalProperties": False,
+}
+EXPECTED_ATTEMPT_SCHEMA = {
+    "oneOf": [
+        EXPECTED_ATTEMPT_V1_SCHEMA,
+        {
+            **EXPECTED_ATTEMPT_V1_SCHEMA,
+            "properties": {
+                **EXPECTED_ATTEMPT_V1_SCHEMA["properties"],
+                "schema_version": {"const": "web-listening-attempt.v2"},
+                "robots_decisions": {
+                    "type": "array",
+                    "items": EXPECTED_ROBOTS_DECISION_SCHEMA,
+                },
+            },
+            "required": [*EXPECTED_ATTEMPT_V1_SCHEMA["required"], "robots_decisions"],
+        },
+    ],
 }
 EXPECTED_REDIRECT_SCHEMA = {
     "type": "object",
@@ -733,3 +784,173 @@ assert 'mcp' not in sys.modules
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_issue101_v2_decisions_interface_round_trip():
+    """The adapter emits the same versioned evidence without manufacturing v1 data."""
+
+    result = Result.from_dict(
+        json.loads((ROOT / "tests/result/fixtures/completed.v1.json").read_text())
+    )
+    attempts = tuple(
+        replace(
+            attempt,
+            schema_version="web-listening-attempt.v2",
+            robots_decisions=(
+                RobotsDecision(
+                    "https://example.org",
+                    "https://example.org/robots.txt",
+                    attempt.requested_url,
+                    503,
+                    "unknown_allow",
+                    "robots.http_status",
+                ),
+            ),
+        )
+        for attempt in result.attempts
+    )
+    result = replace(
+        result, attempts=attempts, manifest=replace(result.manifest, attempts=attempts)
+    )
+    job = Job(
+        "robots-job",
+        JobStatus.COMPLETED,
+        "2026-08-26T12:00:00Z",
+        "2026-08-26T12:00:00Z",
+        "2026-08-26T12:00:01Z",
+        result,
+    )
+    runtime = SimpleNamespace(get_job=lambda _job_id: job)
+
+    async def call():
+        return await mcp_interface._call_tool(  # pylint: disable=protected-access
+            lambda: runtime, "web_listening_get_job", {"job_id": "robots-job"}
+        )  # pylint: disable=protected-access
+
+    payload = anyio.run(call)
+    assert payload["result"] == result.to_dict()
+    assert payload["result"]["attempts"] == payload["result"]["manifest"]["attempts"]
+
+
+def test_issue101_published_mcp_schema_accepts_versioned_attempts():
+    """The advertised schema must accept the v2 result emitted by Runtime."""
+    import jsonschema  # pylint: disable=import-outside-toplevel
+
+    payload = json.loads((ROOT / "tests/result/fixtures/completed.v1.json").read_text())
+    for location in (payload, payload["manifest"]):
+        for attempt in location["attempts"]:
+            attempt["schema_version"] = "web-listening-attempt.v2"
+            attempt["robots_decisions"] = []
+    assert Result.from_dict(payload).to_dict() == payload
+    jsonschema.validate(
+        payload, mcp_interface._RESULT_SCHEMA  # pylint: disable=protected-access
+    )  # pylint: disable=protected-access
+
+
+@pytest.mark.parametrize(
+    "version", ["web-listening-attempt.v1", "web-listening-attempt.v2"]
+)
+def test_issue101_mcp_attempt_versions_are_mutually_exclusive(version):
+    """Both versions have exactly one matching branch and strict field ownership."""
+    import jsonschema  # pylint: disable=import-outside-toplevel
+
+    payload = json.loads(
+        (ROOT / "tests/result/fixtures/completed.v1.json").read_text()
+    )["attempts"][0]
+    payload["schema_version"] = version
+    if version.endswith(".v2"):
+        payload["robots_decisions"] = []
+    schema = mcp_interface._ATTEMPT_SCHEMA  # pylint: disable=protected-access
+    jsonschema.validate(payload, schema)
+    assert (
+        sum(
+            jsonschema.Draft202012Validator(branch).is_valid(payload)
+            for branch in schema["oneOf"]
+        )
+        == 1
+    )
+    if version.endswith(".v1"):
+        payload["robots_decisions"] = []
+    else:
+        del payload["robots_decisions"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(payload, schema)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("decision", "invalid"),
+        ("policy_id", "other"),
+        ("reason_code", "not a code"),
+        ("status_code", True),
+        ("status_code", 600),
+        ("extra", "unexpected"),
+        ("target_url", None),
+    ],
+)
+def test_issue101_mcp_rejects_invalid_robots_decisions(field, value):
+    """Published v2 evidence rejects invalid enums, types and unknown fields."""
+    import jsonschema  # pylint: disable=import-outside-toplevel
+
+    payload = json.loads(
+        (ROOT / "tests/result/fixtures/completed.v1.json").read_text()
+    )["attempts"][0]
+    payload["schema_version"] = "web-listening-attempt.v2"
+    decision = RobotsDecision(
+        "https://www.soa.org",
+        "https://www.soa.org/robots.txt",
+        payload["requested_url"],
+        503,
+        "unknown_allow",
+        "robots.http_status",
+    ).to_dict()
+    payload["robots_decisions"] = [decision]
+    schema = mcp_interface._ATTEMPT_SCHEMA  # pylint: disable=protected-access
+    jsonschema.validate(payload, schema)
+    decision[field] = value
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(payload, schema)
+
+
+def test_issue101_published_tools_share_versioned_attempt_schema():
+    """Acquisition and Job reads advertise the same strict Result and Manifest shape."""
+    by_name = {
+        tool.name: tool
+        for tool in mcp_interface._TOOLS  # pylint: disable=protected-access
+    }  # pylint: disable=protected-access
+    for name in ("web_listening_acquire", "web_listening_get_job"):
+        assert by_name[name].outputSchema == _expected_output_schema(
+            EXPECTED_JOB_SCHEMA
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "origin",
+        "robots_url",
+        "target_url",
+        "status_code",
+        "decision",
+        "reason_code",
+        "policy_id",
+    ],
+)
+def test_issue101_mcp_requires_every_robots_field(field):
+    """A partial evidence object cannot pass the published output contract."""
+    import jsonschema  # pylint: disable=import-outside-toplevel
+
+    decision = RobotsDecision(
+        "https://example.org",
+        "https://example.org/robots.txt",
+        "https://example.org/",
+        None,
+        "unknown_allow",
+        "robots.timeout",
+    ).to_dict()
+    schema = mcp_interface._ROBOTS_DECISION_SCHEMA  # pylint: disable=protected-access
+    jsonschema.validate(decision, schema)
+    del decision[field]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(decision, schema)

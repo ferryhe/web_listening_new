@@ -47,6 +47,7 @@ from web_listening.result.manifest import (
     manifest_from_observations,
 )
 from web_listening.result.model import Result, ResultStatus
+from web_listening.result.robots import RobotsDecision
 from web_listening.site_skill.model import (
     SiteSkill,
     SiteSkillError,
@@ -557,6 +558,7 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
                 else acquisition.bytes_received
             ),
             runtime_ms=attempt_runtime_ms,
+            robots_decisions=acquisition.robots_decisions,
         )
         acquisition_attempts.append(attempt)
         attempted_tool_ids.add(manifest.tool_id)
@@ -641,6 +643,7 @@ def run_single_target(  # pylint: disable=too-many-arguments,too-many-branches
             requests=attempt.requests,
             bytes_received=attempt.bytes_received,
             runtime_ms=attempt.runtime_ms,
+            robots_decisions=attempt.robots_decisions,
         )
         return _failure_result(
             status=ResultStatus.FAILED,
@@ -1645,6 +1648,7 @@ def _cancelled_before_commit(
             requests=last.requests,
             bytes_received=last.bytes_received,
             runtime_ms=last.runtime_ms,
+            robots_decisions=last.robots_decisions,
         )
     )
     return _failure_result(
@@ -1783,10 +1787,12 @@ def _attempt(  # pylint: disable=too-many-arguments
     runtime_ms: int,
     order: int = 0,
     attempt_id: str | None = None,
+    robots_decisions: tuple[RobotsDecision, ...] = (),
 ) -> Attempt:
     return Attempt(
         order=order,
         attempt_id=run_id if attempt_id is None else attempt_id,
+        robots_decisions=robots_decisions,
         outcome=outcome,
         tool_id=tool_id,
         tool_version=tool_version,

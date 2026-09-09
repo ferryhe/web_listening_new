@@ -48,6 +48,7 @@ from web_listening.result.errors import SafeError
 from web_listening.result.handoff import AcquisitionHandoff
 from web_listening.result.manifest import SiteSkillEvidence, Usage
 from web_listening.result.model import Result
+from web_listening.result.robots import RobotsDecision
 from web_listening.result.site_explore import SiteExploreResult
 from web_listening.result.site_refresh import (
     ChangeEvidence,
@@ -961,3 +962,35 @@ def test_pyproject_keeps_rest_dependencies_in_one_optional_extra() -> None:
     assert len(rest_dependencies) == 2
     assert rest_dependencies[0].startswith("fastapi>=")
     assert rest_dependencies[1].startswith("uvicorn>=")
+
+
+def test_issue101_v2_decisions_interface_round_trip(runtime):
+    """The adapter emits the same versioned evidence without manufacturing v1 data."""
+
+    result = _result()
+    attempts = tuple(
+        replace(
+            attempt,
+            schema_version="web-listening-attempt.v2",
+            robots_decisions=(
+                RobotsDecision(
+                    "https://example.org",
+                    "https://example.org/robots.txt",
+                    attempt.requested_url,
+                    503,
+                    "unknown_allow",
+                    "robots.http_status",
+                ),
+            ),
+        )
+        for attempt in result.attempts
+    )
+    result = replace(
+        result, attempts=attempts, manifest=replace(result.manifest, attempts=attempts)
+    )
+    runtime.get_job_result = replace(_job(), result=result)
+    response = _client(runtime).get("/v1/jobs/run-completed-001")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["result"] == result.to_dict()
+    assert payload["result"]["attempts"] == payload["result"]["manifest"]["attempts"]

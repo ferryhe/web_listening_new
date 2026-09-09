@@ -187,7 +187,7 @@ _ARTIFACT_EVIDENCE_SCHEMA = {
     ],
     "additionalProperties": False,
 }
-_ATTEMPT_SCHEMA = {
+_ATTEMPT_V1_SCHEMA = {
     "type": "object",
     "properties": {
         "schema_version": {"const": "web-listening-attempt.v1"},
@@ -229,6 +229,50 @@ _ATTEMPT_SCHEMA = {
         "runtime_ms",
     ],
     "additionalProperties": False,
+}
+_ROBOTS_DECISION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "origin": {"type": "string"},
+        "robots_url": {"type": "string"},
+        "target_url": {"type": "string"},
+        "status_code": {
+            "anyOf": [
+                {"type": "integer", "minimum": 100, "maximum": 599},
+                {"type": "null"},
+            ]
+        },
+        "decision": {"enum": ["allowed", "denied", "absent", "unknown_allow"]},
+        "reason_code": {
+            "type": "string",
+            "pattern": r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$",
+        },
+        "policy_id": {"const": "robots-unknown-allow.v1"},
+    },
+    "required": [
+        "origin",
+        "robots_url",
+        "target_url",
+        "status_code",
+        "decision",
+        "reason_code",
+        "policy_id",
+    ],
+    "additionalProperties": False,
+}
+_ATTEMPT_SCHEMA = {
+    "oneOf": [
+        _ATTEMPT_V1_SCHEMA,
+        {
+            **_ATTEMPT_V1_SCHEMA,
+            "properties": {
+                **_ATTEMPT_V1_SCHEMA["properties"],
+                "schema_version": {"const": "web-listening-attempt.v2"},
+                "robots_decisions": {"type": "array", "items": _ROBOTS_DECISION_SCHEMA},
+            },
+            "required": [*_ATTEMPT_V1_SCHEMA["required"], "robots_decisions"],
+        },
+    ],
 }
 _REDIRECT_SCHEMA = {
     "type": "object",
