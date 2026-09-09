@@ -660,7 +660,7 @@ def test_real_gateway_mime_failures_only_switch_for_technical_codes(
         ("target", "tls", "gateway.tls", 0, True),
     ],
 )
-def test_robots_failures_are_terminal_while_target_technical_failures_switch(
+def test_robots_unknown_allows_target_while_target_technical_failures_switch(
     tmp_path: Path,
     stage: str,
     failure_kind: str,
@@ -708,7 +708,7 @@ def test_robots_failures_are_terminal_while_target_technical_failures_switch(
                 )
             if current_stage == "robots":
                 return Response(404, {})
-            raise AssertionError("target must be the scripted failure stage")
+            return Response(200, {"content-type": "text/html"}, b"valid target content")
 
         def close(self) -> None:
             return None
@@ -728,9 +728,15 @@ def test_robots_failures_are_terminal_while_target_technical_failures_switch(
         _request_without_site_skill(explore=True),
     )
 
-    expected_requests = 1 if stage == "robots" else 2
+    expected_requests = 2
     first_attempt = result.attempts[0]
-    assert first_attempt.error.code == expected_code
+    if stage == "robots":
+        assert first_attempt.error is None
+        assert first_attempt.robots_decisions[0].reason_code == expected_code
+        assert first_attempt.robots_decisions[0].decision == "unknown_allow"
+        expected_bytes += len(b"valid target content")
+    else:
+        assert first_attempt.error.code == expected_code
     assert first_attempt.requests == expected_requests
     assert first_attempt.bytes_received == expected_bytes
     if allows_switch:
@@ -742,7 +748,7 @@ def test_robots_failures_are_terminal_while_target_technical_failures_switch(
         assert result.usage.requests == expected_requests + 1
         assert result.usage.bytes_received == expected_bytes + len(alternate_body)
     else:
-        assert result.status.value == "failed"
+        assert result.status.value == "completed"
         assert len(result.attempts) == 1
         assert alternate.calls == 0
         assert result.usage.requests == expected_requests

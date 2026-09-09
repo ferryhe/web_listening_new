@@ -25,6 +25,7 @@ from web_listening.request.model import (
 )
 from web_listening.request.site_refresh import SiteRefreshRequest
 from web_listening.result.model import ResultStatus
+from web_listening.result.robots import RobotsDecision
 from web_listening.runtime.site_refresh import (
     run_site_refresh,
     site_refresh_result_from_mapping,
@@ -4145,3 +4146,40 @@ def test_distinct_old_source_can_complete_when_selected_recipe_replays_it(
     assert result.site_skill_update.candidate.discovery_key[2] == sitemap
     assert acquisition.targets == [sitemap, sitemap, candidate]
     store.close()
+
+
+def test_issue101_site_refresh_keeps_per_target_decisions(tmp_path, monkeypatch):
+
+    original = _Acquisition.acquire
+
+    def acquire(tool, tool_input):
+        output = original(tool, tool_input)
+        decision = RobotsDecision(
+            "https://example.test",
+            "https://example.test/robots.txt",
+            tool_input.target_url,
+            503,
+            "unknown_allow",
+            "robots.http_status",
+        )
+        return replace(output, robots_decisions=(decision,))
+
+    monkeypatch.setattr(_Acquisition, "acquire", acquire)
+    old, current = _normal_bodies()
+    skill = _skill(Budgets(6, 16384, 30, 6))
+    registry, store = _runtime(tmp_path, _Acquisition(current), _DiscoverySpy())
+    result = run_site_refresh(
+        _request(skill, _previous(skill, old)),
+        registry,
+        store,
+        run_id="robots-refresh",
+        clock=lambda: NOW,
+    )
+    decisions = [
+        item for attempt in result.attempts for item in attempt.robots_decisions
+    ]
+    assert {item.target_url for item in decisions} == set(current)
+    assert len(decisions) == len(current)
+    assert site_refresh_result_from_mapping(result.to_dict()) == result
+    for target in result.target_results:
+        assert target.attempts == target.manifest.attempts

@@ -18,6 +18,7 @@ from web_listening.request.model import Budgets, ContentType, Request, Scope
 from web_listening.result.attempts import Attempt
 from web_listening.result.errors import SafeError
 from web_listening.result.model import ResultStatus
+from web_listening.result.robots import RobotsDecision
 from web_listening.runtime.site_explore import run_site_explore
 from web_listening.runtime.workflow import prior_target_attempts, run_single_target
 from web_listening.site_skill.repository import SiteSkillRepository
@@ -2870,3 +2871,42 @@ def test_eligible_tool_switching_failures_remain_auditable_on_completed_explore(
     )
     assert reused.status is ResultStatus.COMPLETED
     store.close()
+
+
+def test_issue101_site_explore_keeps_per_target_decisions(tmp_path, monkeypatch):
+
+    original = _Acquisition.acquire
+
+    def acquire(tool, tool_input):
+        output = original(tool, tool_input)
+        decision = RobotsDecision(
+            "https://example.test",
+            "https://example.test/robots.txt",
+            tool_input.target_url,
+            503,
+            "unknown_allow",
+            "robots.http_status",
+        )
+        return replace(output, robots_decisions=(decision,))
+
+    monkeypatch.setattr(_Acquisition, "acquire", acquire)
+    _acquisition, registry, store = _runtime(
+        tmp_path,
+        {
+            "https://example.test/": b"<a href='/a'>page a</a>",
+            "https://example.test/a": b"page a content",
+        },
+    )
+    result = run_site_explore(
+        _request(), registry, store, run_id="robots-explore", clock=lambda: NOW
+    )
+    decisions = [
+        item for attempt in result.attempts for item in attempt.robots_decisions
+    ]
+    assert [item.target_url for item in decisions] == [
+        "https://example.test/",
+        "https://example.test/a",
+    ]
+    assert all(item.decision == "unknown_allow" for item in decisions)
+    for target in result.target_results:
+        assert target.attempts == target.manifest.attempts

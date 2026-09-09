@@ -237,6 +237,12 @@ registered
 ∩ within budget
 ```
 
+Robots behavior is fixed by `robots-unknown-allow.v1`, not a Request option.
+Valid rules remain authoritative. A missing file (404/410) is distinct from an
+unknown observation. Only fetch or compatible-parse inability permits an
+`unknown_allow` decision; auth, scope, network-boundary, budget, and cancellation
+failures still stop work. There is no ignore-robots switch.
+
 ## 6. Consistent Result Contract
 
 CLI, REST, and MCP should return the same logical Result:
@@ -265,6 +271,20 @@ The Manifest must explain at least:
 - actual budget consumption.
 
 The Manifest must not contain cookies, tokens, authorization headers, or other secrets.
+
+New Attempts use `web-listening-attempt.v2` with a `robots_decisions` array.
+Each decision records `origin`, `robots_url`, `target_url`, `status_code`,
+`decision`, `reason_code`, and the fixed `policy_id`. URLs are sanitized, and
+`decision` is `allowed`, `denied`, `absent`, or `unknown_allow`. Gateway owns
+these facts; Runtime and Result only carry and validate them. Result and Manifest
+contain identical attempts, including decisions before a later failure, redirect,
+commit failure, or cancellation. Persisted Jobs and CLI/REST/MCP expose the same
+records. An unknown observation alone does not make successful acquisition fail.
+
+Historical Attempt v1 payloads remain strictly readable and serialize unchanged,
+without fabricated evidence. Consumers must upgrade to accept Attempt v2 before
+reading new results; compatibility with old clients reading v2 is not promised.
+Result and Manifest retain their existing outer schemas.
 
 ## 7. Immutable Snapshot and Observation Model
 
@@ -406,6 +426,16 @@ Tool switching must never be used to bypass:
 - exhausted budget;
 - missing tool qualification or authorization.
 
+The unknown-allow policy is a deliberate product change. Robots 401/403 still
+stop; other unsuccessful statuses, including 429, can be unknown without retries.
+Fetch DNS/TLS/connection errors and per-fetch timeouts can be unknown only while
+Request budgets remain. Target TLS verification stays enabled. Compatible decoding
+and line tolerance preserve recognizable restrictions, including partial bodies;
+HTML and non-rule responses are `robots.parse_error`. Empty files, comments, and
+valid rules for another user-agent are valid unrestricted observations. All actual
+robots reads and redirects consume the same budget. The existing origin cache is
+local to one Gateway lifecycle; a new invocation does not reuse unknown state.
+
 Fallback is not a hard-coded chain such as:
 
 ```text
@@ -477,6 +507,10 @@ The current Web Listening 3.1 product explicitly disables production target read
 - disable and rollback support.
 
 A browser tool with unrestricted network access that cannot use a controlled proxy or network isolation may be installed and inspected, but it must not enter the automatic exploration pool.
+
+Future browser readers must receive the same parent Gateway decisions. This
+change does not alter the external tool wire protocol or trust an SDK's claim
+that robots allowed access. Explicit denial remains terminal across tools.
 
 ## 12. HTML-to-Markdown as an Independent Transform
 
@@ -808,6 +842,10 @@ The first production-ready version must prove that:
 14. External tools cannot write final Artifacts, Manifests, or Site Skills directly.
 15. External tool upgrades support side-by-side qualification, atomic activation, and rollback.
 16. Adding a conforming tool does not change the public CLI, REST, or MCP Request shape.
+
+Issue #101 verifies the frozen robots matrix with controlled offline transports,
+strict v1/v2 round trips, exact usage, and persisted evidence through all three
+interfaces. Live site testing is explicitly skipped for this policy change.
 
 Availability-first batch acceptance is implemented as a strict `first`/`refresh`
 Request and Result boundary. Sites run serially with independent per-site budgets;

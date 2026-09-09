@@ -23,6 +23,7 @@ from web_listening.artifact.model import (
     Observation,
     StoredObservation,
 )
+from web_listening.result.attempts import Attempt
 from web_listening.result.errors import (
     ResultValidationError,
     SafeError,
@@ -32,6 +33,7 @@ from web_listening.result.manifest import (
     manifest_from_observations,
 )
 from web_listening.result.model import Result, ResultStatus, Usage
+from web_listening.result.robots import RobotsDecision
 from web_listening.result.site_explore import DiscoveryEvidence
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -1076,3 +1078,75 @@ def test_non_ascii_output_authority_rejects_on_all_public_surfaces(url: str) -> 
     assert parsed.value.code == "url.invalid"
     assert direct.value.code == "url.invalid"
     assert rendered.value.code == "url.invalid"
+
+
+def test_issue101_v2_result_round_trip_and_v1_unchanged() -> None:
+    """Evidence is versioned on attempts only, and cannot alter historical data."""
+    original = fixture_payload("completed.v1.json")
+    assert Result.from_dict(original).to_dict() == original
+    payload = copy.deepcopy(original)
+    for attempt in payload["attempts"]:
+        attempt["schema_version"] = "web-listening-attempt.v2"
+        attempt["robots_decisions"] = [
+            {
+                "origin": "https://example.org",
+                "robots_url": "https://example.org/robots.txt",
+                "target_url": attempt["requested_url"],
+                "status_code": 503,
+                "decision": "unknown_allow",
+                "reason_code": "robots.http_status",
+                "policy_id": "robots-unknown-allow.v1",
+            }
+        ]
+    payload["manifest"]["attempts"] = copy.deepcopy(payload["attempts"])
+    assert Result.from_dict(payload).to_dict() == payload
+    assert Result.from_dict(payload).status == ResultStatus.COMPLETED
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("decision", "allow"),
+        ("policy_id", "other"),
+        ("status_code", True),
+        ("status_code", 600),
+        ("reason_code", "not a code"),
+        ("origin", "https://example.org/path"),
+        ("target_url", "https://user:pass@example.org/"),
+        ("extra", "unknown"),
+    ],
+)
+def test_issue101_strict_robots_value(field, value) -> None:
+    """Reject unknown fields and invalid evidence independently of policy matching."""
+
+    payload = {
+        "origin": "https://example.org",
+        "robots_url": "https://example.org/robots.txt",
+        "target_url": "https://example.org/",
+        "status_code": 200,
+        "decision": "allowed",
+        "reason_code": "robots.allowed",
+        "policy_id": "robots-unknown-allow.v1",
+    }
+    payload[field] = value
+    with pytest.raises(ResultValidationError):
+        RobotsDecision.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    "version,decisions",
+    [
+        ("web-listening-attempt.v1", []),
+        ("web-listening-attempt.v2", None),
+        ("web-listening-attempt.v2", {}),
+    ],
+)
+def test_issue101_attempt_version_requires_exact_fields(version, decisions):
+    """Each Attempt version has its own exact required field set."""
+
+    payload = fixture_payload("completed.v1.json")["attempts"][0]
+    payload["schema_version"] = version
+    if decisions is not None:
+        payload["robots_decisions"] = decisions
+    with pytest.raises(ResultValidationError):
+        Attempt.from_dict(payload)

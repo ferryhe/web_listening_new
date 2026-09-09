@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import http.client
 import io
@@ -27,6 +28,7 @@ from web_listening.request.model import (
 )
 from web_listening.request.scope import canonicalize_url
 from web_listening.request.validate import CompiledAccessPolicy, compile_access_policy
+from web_listening.result.robots import RobotsDecision
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 WEB_HTTP_REQUEST_PROFILE: Mapping[str, str] = MappingProxyType(
@@ -53,6 +55,7 @@ _ROBOTS_NETWORK_FAILURE_CODES = {
     "gateway.dns": "robots.dns_error",
     "gateway.timeout": "robots.timeout",
     "gateway.tls": "robots.network_error",
+    "gateway.tls_certificate_invalid": "gateway.tls_certificate_invalid",
     "gateway.transport": "robots.network_error",
 }
 
@@ -108,16 +111,7 @@ class RedirectEvidence:
     decision_code: str
 
 
-@dataclass(frozen=True, slots=True)
-class RobotsEvidence:
-    """The robots outcome applied before one target read."""
-
-    origin: str
-    robots_url: str
-    target_url: str
-    status_code: int | None
-    code: str
-    allowed: bool
+RobotsEvidence = RobotsDecision
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +183,7 @@ class _ReadState:  # pylint: disable=too-many-instance-attributes
     response_status: int | None = None
     response_mime_type: str | None = None
     content_bytes: int = 0
+    robots_body: bytes = b""
     content_sha256: str | None = None
     decisions: list[DecisionEvidence] = field(default_factory=list)
     redirects: list[RedirectEvidence] = field(default_factory=list)
@@ -440,7 +435,11 @@ class _HttpResponse:  # pylint: disable=too-many-instance-attributes
             raise _PartialBodyRead(_incomplete_read_partial(exc)) from exc
         except (TimeoutError, socket.timeout) as exc:
             raise _PartialBodyRead(b"", "gateway.timeout") from exc
-        except (ConnectionError, OSError, _TransportSafetyError) as exc:
+        except _TransportSafetyError as exc:
+            raise _PartialBodyRead(b"", exc.code) from exc
+        except asyncio.CancelledError as exc:
+            raise _PartialBodyRead(b"", "runtime.cancelled") from exc
+        except (ConnectionError, OSError) as exc:
             raise _PartialBodyRead(b"") from exc
 
     def _read_incrementally(
@@ -460,7 +459,11 @@ class _HttpResponse:  # pylint: disable=too-many-instance-attributes
                 raise _PartialBodyRead(partial) from exc
             except (TimeoutError, socket.timeout) as exc:
                 raise _PartialBodyRead(b"".join(chunks), "gateway.timeout") from exc
-            except (ConnectionError, OSError, _TransportSafetyError) as exc:
+            except _TransportSafetyError as exc:
+                raise _PartialBodyRead(b"".join(chunks), exc.code) from exc
+            except asyncio.CancelledError as exc:
+                raise _PartialBodyRead(b"".join(chunks), "runtime.cancelled") from exc
+            except (ConnectionError, OSError) as exc:
                 raise _PartialBodyRead(b"".join(chunks)) from exc
             if not isinstance(chunk, bytes):
                 raise _PartialBodyRead(b"".join(chunks), "gateway.transport_contract")
@@ -679,23 +682,28 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
         if policy is None:
             policy = self._load_robots(origin, state)
             self._robots[origin] = policy
-        allowed = policy.code == "robots.absent" or (
-            policy.parser is not None
-            and policy.parser.can_fetch(
-                WEB_HTTP_REQUEST_PROFILE["user_agent"], target_url
-            )
-        )
-        code = "robots.allowed" if allowed else policy.code
-        if policy.parser is not None and not allowed:
-            code = "robots.disallowed"
+        code = policy.code
+        if code in {"robots.auth_required", "robots.forbidden"}:
+            decision = "denied"
+        elif policy.parser is not None and not policy.parser.can_fetch(
+            WEB_HTTP_REQUEST_PROFILE["user_agent"], target_url
+        ):
+            decision, code = "denied", "robots.disallowed"
+        elif code == "robots.absent":
+            decision = "absent"
+        elif code == "robots.allowed":
+            decision = "allowed"
+        else:
+            decision = "unknown_allow"
+        allowed = decision != "denied"
         state.robots.append(
             RobotsEvidence(
                 origin=origin,
                 robots_url=_safe_url(policy.robots_url),
                 target_url=_safe_url(target_url),
                 status_code=policy.status_code,
-                code=code,
-                allowed=allowed,
+                reason_code=code,
+                decision=decision,
             )
         )
         state.decisions.append(
@@ -719,6 +727,7 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
                 mapped_code = _ROBOTS_NETWORK_FAILURE_CODES.get(exc.code)
                 if mapped_code is None:
                     raise
+                self._preflight_budget(current, state)
                 return _RobotsPolicy(current, None, mapped_code, None)
             try:
                 self._check_peer(response.peer_ip, addresses, current, state)
@@ -737,22 +746,19 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
                     return _RobotsPolicy(
                         current, response.status, "robots.http_status", None
                     )
+                state.robots_body = b""
                 try:
                     body = self._read_body(response, current, state)
                 except GatewayFailure as exc:
                     mapped_code = _ROBOTS_NETWORK_FAILURE_CODES.get(exc.code)
                     if mapped_code is None:
                         raise
-                    return _RobotsPolicy(current, response.status, mapped_code, None)
-                try:
-                    text = body.decode("utf-8-sig")
-                except UnicodeDecodeError:
-                    return _RobotsPolicy(
-                        current, response.status, "robots.parse_error", None
-                    )
-                parser = RobotFileParser(current)
-                parser.parse(text.splitlines())
-                return _RobotsPolicy(current, response.status, "robots.allowed", parser)
+                    self._preflight_budget(current, state)
+                    parser = _parse_robots(current, state.robots_body, response.headers)
+                    return _RobotsPolicy(current, response.status, mapped_code, parser)
+                parser = _parse_robots(current, body, response.headers)
+                code = "robots.allowed" if parser is not None else "robots.parse_error"
+                return _RobotsPolicy(current, response.status, code, parser)
             finally:
                 _close_response(response)
 
@@ -950,6 +956,8 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
                     )
                 )
             )
+        except asyncio.CancelledError:
+            self._raise("runtime.cancelled", state)
         except TimeoutError:
             state.decisions.append(
                 DecisionEvidence(stage, _safe_url(url), False, "gateway.timeout")
@@ -976,6 +984,8 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
         timeout = self._reserve_request(url, state)
         try:
             response = self._transport.send(url, timeout=timeout, addresses=addresses)
+        except asyncio.CancelledError:
+            self._raise("runtime.cancelled", state)
         except _TransportSafetyError as exc:
             state.decisions.append(
                 DecisionEvidence("transport.peer", _safe_url(url), False, exc.code)
@@ -1078,6 +1088,8 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
         if self._set_body_timeout(response, timeout, state):
             try:
                 body = response.read(read_limit)
+            except asyncio.CancelledError:
+                self._raise("runtime.cancelled", state)
             except _PartialBodyRead as exc:
                 self._record_body_bytes(exc.partial, state, target_content)
                 self._raise(exc.code, state)
@@ -1111,6 +1123,8 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
         target_content: bool,
     ) -> None:
         self._usage.bytes += len(body)
+        if not target_content:
+            state.robots_body = body
         if target_content:
             state.content_bytes = len(body)
             state.content_sha256 = hashlib.sha256(body).hexdigest()
@@ -1126,6 +1140,8 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
             return False
         try:
             setter(timeout)
+        except asyncio.CancelledError:
+            self._raise("runtime.cancelled", state)
         except _TransportSafetyError as exc:
             self._raise(exc.code, state)
         except (TimeoutError, socket.timeout):
@@ -1188,6 +1204,53 @@ class GovernedAccessGateway:  # pylint: disable=too-many-instance-attributes
 
     def _raise(self, code: str, state: _ReadState) -> NoReturn:
         raise GatewayFailure(code, self._evidence(state))
+
+
+def _parse_robots(
+    url: str, body: bytes, headers: Mapping[str, str]
+) -> RobotFileParser | None:
+    """Keep recognizable lines and let the existing matcher own rule semantics."""
+    encoding = "utf-16" if body.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+    content = body.decode(encoding, errors="replace")
+    media_type = _normalized_media_type(headers)[0]
+    if media_type in {"text/html", "application/xhtml+xml"} or re.search(
+        r"^\s*<(?:!doctype\s+html\b|html(?:\s|>))",
+        content,
+        re.IGNORECASE | re.MULTILINE,
+    ):
+        return None
+    lines = content.splitlines()
+    recognized: list[str] = []
+    nonempty = False
+    for raw in lines:
+        line = raw.partition("#")[0].strip()
+        if not line:
+            # Only real blank lines terminate a group; malformed lines must not.
+            if not raw.strip():
+                recognized.append("")
+            continue
+        nonempty = True
+        key, separator, value = line.partition(":")
+        if (
+            separator
+            and key.strip().lower()
+            in {
+                "user-agent",
+                "allow",
+                "disallow",
+                "sitemap",
+                "crawl-delay",
+                "request-rate",
+            }
+            and "<" not in line
+            and ">" not in line
+        ):
+            recognized.append(f"{key.strip()}: {value.strip()}")
+    if nonempty and not any(recognized):
+        return None
+    parser = RobotFileParser(url)
+    parser.parse(recognized)
+    return parser
 
 
 def _safe_url(value: object) -> str:

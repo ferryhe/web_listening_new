@@ -13,6 +13,8 @@ from web_listening.artifact.identity import validate_mime_type as validate_artif
 from web_listening.artifact.model import ArtifactStoreError
 from web_listening.request.model import Budgets, Request, RequestValidationError
 from web_listening.request.validate import compile_access_policy, validate_request
+from web_listening.result.errors import ResultValidationError
+from web_listening.result.robots import RobotsDecision, validate_robots_decisions
 from web_listening.tool_registry.manifest import (
     ToolManifest,
     ToolRegistryError,
@@ -115,8 +117,17 @@ class AcquisitionOutput:  # pylint: disable=too-many-instance-attributes
     _usage_explicit: bool | None = field(default=None, repr=False, compare=False)
     _inferred_requests: int | None = field(default=None, repr=False, compare=False)
     _inferred_bytes: int | None = field(default=None, repr=False, compare=False)
+    robots_decisions: tuple[RobotsDecision, ...] = ()
 
     def __post_init__(self) -> None:
+        try:
+            object.__setattr__(
+                self,
+                "robots_decisions",
+                validate_robots_decisions(self.robots_decisions),
+            )
+        except ResultValidationError as exc:
+            raise ToolRegistryError("protocol.robots_invalid") from exc
         validate_tool_id(self.tool_id)
         validate_tool_version(self.tool_version)
         object.__setattr__(self, "requested_url", validate_url(self.requested_url))
@@ -200,8 +211,17 @@ class AcquisitionFailure:
     requests: int = field(default=0, compare=False)
     bytes_received: int = field(default=0, compare=False)
     runtime_ms: int = field(default=0, compare=False)
+    robots_decisions: tuple[RobotsDecision, ...] = ()
 
     def __post_init__(self) -> None:
+        try:
+            object.__setattr__(
+                self,
+                "robots_decisions",
+                validate_robots_decisions(self.robots_decisions),
+            )
+        except ResultValidationError as exc:
+            raise ToolRegistryError("protocol.robots_invalid") from exc
         validate_tool_id(self.tool_id)
         validate_tool_version(self.tool_version)
         validate_safe_code(self.code)

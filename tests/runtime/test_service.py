@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import quote
@@ -33,6 +34,7 @@ from web_listening.request.model import (
 from web_listening.request.site_batch import SiteBatchPhase, SiteBatchRequest
 from web_listening.request.site_refresh import SiteRefreshRequest
 from web_listening.result.errors import ResultValidationError
+from web_listening.result.model import Result
 from web_listening.runtime.jobs import JobRepository, JobStateError, JobStatus
 from web_listening.runtime.service import RuntimeService
 from web_listening.runtime.site_batch import site_batch_result_from_mapping
@@ -2670,3 +2672,91 @@ def test_cancel_committing_before_rejected_transition_forces_cancelled_failure(
     assert [error.code for error in finished.result.errors] == ["runtime.cancelled"]
     assert tool.calls == 0
     store.close()
+
+
+@pytest.mark.parametrize("target_status", [200, 503])
+def test_issue101_persisted_gateway_evidence(tmp_path, monkeypatch, target_status):
+    """Real Gateway facts survive Registry, workflow, and closing/reopening Jobs."""
+    transport = _Transport(_Response(target_status, BODY, Content_Type="text/html"))
+    transport.robots = _Response(503)
+    monkeypatch.setattr(service_module, "PinnedHttpTransport", lambda: transport)
+    monkeypatch.setattr(
+        service_module,
+        "WebHttpAcquisitionTool",
+        lambda factory: WebHttpAcquisitionTool(factory, resolver=_resolver),
+    )
+    data_dir = tmp_path / "robots-runtime"
+    service = RuntimeService.open(data_dir)
+    job = service.run(_request(_skill()))
+    service.close()
+    reopened = RuntimeService.open(data_dir)
+    restored = reopened.get_job(job.job_id)
+    reopened.close()
+    assert restored == job
+    attempt = restored.result.attempts[0]
+    assert attempt.schema_version == "web-listening-attempt.v2"
+    assert attempt.robots_decisions[0].decision == "unknown_allow"
+    assert restored.result.attempts == restored.result.manifest.attempts
+    assert restored.result.status.value == (
+        "completed" if target_status == 200 else "failed"
+    )
+    assert transport.requests == [f"{ORIGIN}/robots.txt", URL]
+
+
+@pytest.mark.parametrize("boundary", ["commit", "cancel"])
+def test_issue101_post_acquisition_failure_keeps_decisions(
+    tmp_path, monkeypatch, boundary
+):
+    transport = _Transport(_Response(200, BODY, Content_Type="text/html"))
+    transport.robots = _Response(503)
+    service, store, _jobs = _service(
+        tmp_path, WebHttpAcquisitionTool(lambda: transport, resolver=_resolver)
+    )
+    if boundary == "commit":
+
+        def fail_commit(_proposal):
+            raise ArtifactStoreError("artifact.fixture_failure")
+
+        monkeypatch.setattr(store, "commit_observation", fail_commit)
+        job = service.run(_request(_skill()))
+    else:
+        checks = 0
+
+        def cancel():
+            nonlocal checks
+            checks += 1
+            return checks >= 2
+
+        with workflow_module.cancellation_check(cancel):
+            job = service.run(_request(_skill()))
+    assert job.result.attempts[0].outcome == "failed"
+    assert job.result.attempts[0].robots_decisions[0].decision == "unknown_allow"
+    assert job.result.attempts == job.result.manifest.attempts
+    assert job.result.usage.requests == 2
+    service.close()
+
+
+def test_issue101_historical_v1_job_reopens_without_new_evidence(tmp_path):
+    """Persist an unchanged historical Result through the existing Job repository."""
+
+    payload = json.loads(
+        (Path(__file__).parents[1] / "result/fixtures/completed.v1.json").read_text()
+    )
+    database = tmp_path / "legacy-jobs.sqlite3"
+    jobs = JobRepository(database)
+    jobs.submit(payload["manifest"]["run_id"], at=payload["attempts"][0]["started_at"])
+    jobs.transition(
+        payload["manifest"]["run_id"],
+        JobStatus.RUNNING,
+        at=payload["attempts"][0]["started_at"],
+    )
+    jobs.transition(
+        payload["manifest"]["run_id"],
+        JobStatus.COMPLETED,
+        at=NOW,
+        result=Result.from_dict(payload),
+    )
+    jobs.close()
+    reopened = JobRepository(database)
+    assert reopened.get(payload["manifest"]["run_id"]).result.to_dict() == payload
+    reopened.close()
