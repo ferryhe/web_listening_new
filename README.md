@@ -948,6 +948,12 @@ without contacting the target. Next actions have stable IDs and CLI/REST/MCP
 names; `discover_official_alternates` is inert guidance for the caller's own
 external discovery, not an implemented search provider.
 
+For Python Runtime callers, a post-execution rejected retrieval raises
+`RetrievalRequestError`, and another terminal retrieval failure raises
+`RetrievalJobError`. Both retain the corresponding existing validation/job error
+code and include only the durable `job_id`; the same caller can use it with
+`get_owned_job`. Errors before admission remain the existing handle-free errors.
+
 A parent-recognized Cloudflare rejection can lead from HTTP to ordinary Playwright
 once when authorized and eligible. Continued Browser blocking returns
 `UNRESOLVED/CLOUDFLARE_BLOCKED`; it does not automatically invoke Cloak, rotate

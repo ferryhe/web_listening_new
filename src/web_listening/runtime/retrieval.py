@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 
 from web_listening.artifact.lineage import validate_artifact_id
-from web_listening.request.model import ContentType
+from web_listening.request.model import ContentType, RequestValidationError
 from web_listening.request.validate import validate_request
 from web_listening.result.errors import (
     ResultValidationError,
@@ -15,7 +15,7 @@ from web_listening.result.errors import (
 )
 from web_listening.result.manifest import Usage
 from web_listening.result.model import ResultStatus
-from web_listening.runtime.jobs import Job
+from web_listening.runtime.jobs import Job, JobStateError, _validate_job_id
 from web_listening.site_skill.resolve import resolve_site_skill
 from web_listening.tool_registry.eligibility import (
     EligibilityFacts,
@@ -56,6 +56,22 @@ REASONS = frozenset(
         "METHODS_EXHAUSTED",
     }
 )
+
+
+class RetrievalRequestError(RequestValidationError):
+    """A rejected targeted retrieval whose durable Job is available to its owner."""
+
+    def __init__(self, code: str, *, job_id: str) -> None:
+        super().__init__(code)
+        self.job_id = _validate_job_id(job_id)
+
+
+class RetrievalJobError(JobStateError):
+    """A failed targeted retrieval whose durable Job is available to its owner."""
+
+    def __init__(self, code: str, *, job_id: str) -> None:
+        super().__init__(code)
+        self.job_id = _validate_job_id(job_id)
 
 
 def action(name):
