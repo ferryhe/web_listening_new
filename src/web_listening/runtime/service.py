@@ -52,6 +52,8 @@ from web_listening.runtime.jobs import (
 from web_listening.runtime.retrieval import (
     METHOD_TO_TOOL,
     OPERATIONS,
+    RetrievalJobError,
+    RetrievalRequestError,
     job_payload,
     method_catalog,
     project_retrieval,
@@ -451,8 +453,8 @@ class RuntimeService:
         code = retrieval_error_code(jobs[-1].result)
         if code:
             if jobs[-1].result.status is ResultStatus.REJECTED:
-                raise RequestValidationError(code)
-            raise JobStateError(code)
+                raise RetrievalRequestError(code, job_id=jobs[-1].job_id)
+            raise RetrievalJobError(code, job_id=jobs[-1].job_id)
         state = project_retrieval(all_jobs, catalog)
         provenance = [
             {
